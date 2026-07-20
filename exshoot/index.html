@@ -57,6 +57,7 @@
   }
   #keyhint b { color: rgba(223, 232, 223, 0.8); }
   body.mobile #keyhint { display: none; }
+  body.mobile #ammo .wname { display: none; } /* 조준 버튼과 겹침 — 무기 버튼이 대체 */
 
   #topbar {
     position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
@@ -203,6 +204,10 @@
   #tb-ads    { right: 132px; bottom: 40px;  width: 60px; height: 60px; }
   #tb-jump   { right: 42px;  bottom: 168px; width: 60px; height: 60px; }
   #tb-reload { right: 132px; bottom: 128px; width: 60px; height: 60px; }
+  #tb-weapon {
+    right: 132px; bottom: 216px; width: 60px; height: 60px;
+    font-size: 11px; display: none; text-align: center; line-height: 1.3;
+  }
   #tb-heal   { right: 212px; bottom: 30px;  width: 52px; height: 52px; }
   #tb-inv    { right: 18px;  top: 64px;     width: 48px; height: 48px; font-size: 11px; }
   #tb-interact {
@@ -292,6 +297,7 @@
       <div class="tbtn" id="tb-ads">조준</div>
       <div class="tbtn" id="tb-jump">점프</div>
       <div class="tbtn" id="tb-reload">장전</div>
+      <div class="tbtn" id="tb-weapon">무기</div>
       <div class="tbtn" id="tb-heal">치료</div>
       <div class="tbtn" id="tb-inv">가방</div>
       <div class="tbtn" id="tb-interact">열기</div>

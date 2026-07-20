@@ -2244,6 +2244,13 @@ function equipWeapon(key, announce = true) {
   if (announce) { addFeed(`${w.name} 장착`); sfx.reload2(); }
 }
 
+// 무기 순환 교체 (모바일 버튼)
+function cycleWeapon() {
+  if (carry.length < 2) return;
+  const i = carry.indexOf(GUN.key);
+  equipWeapon(carry[(i + 1) % carry.length]);
+}
+
 // 1/2/3 키 무기 교체
 function switchWeapon(slot) {
   const key = carry[slot];
@@ -2814,6 +2821,7 @@ if (IS_MOBILE) {
   });
   onHold('tb-jump', () => { if (inRaid()) touch.jump = true; });
   onHold('tb-reload', () => { if (inRaid()) startReload(); });
+  onHold('tb-weapon', () => { if (inRaid()) cycleWeapon(); });
   onHold('tb-heal', () => { if (inRaid()) useHeal(); });
   onHold('tb-inv', () => {
     if (state.phase !== 'raid') return;
@@ -2947,6 +2955,11 @@ function updateHUD() {
   const slot = carry.indexOf(GUN.key);
   const wnText = `${slot >= 0 ? `[${slot + 1}] ` : ''}${GUN.name}`;
   if (wn.textContent !== wnText) wn.textContent = wnText;
+  if (IS_MOBILE) {
+    const tb = $('tb-weapon');
+    const show = carry.length >= 2 ? 'flex' : 'none';
+    if (tb.style.display !== show) tb.style.display = show;
+  }
   dom.raidTimer.textContent = fmtTime(state.raidTime);
   dom.raidTimer.style.color = state.raidTime < 60 ? '#d94f3d' : '#e8eee6';
   dom.kills.textContent = `사살 ${state.kills}`;
