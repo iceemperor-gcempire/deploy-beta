@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>EXSHOOT — 익스트랙션 슈터</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0c0a; touch-action: none; }
+  body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; color: #cfd8cf; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+  #game-canvas { display: block; width: 100%; height: 100%; }
+
+  .overlay { position: absolute; inset: 0; pointer-events: none; }
+
+  /* ---------- HUD ---------- */
+  #hud { display: none; }
+  #crosshair {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: 4px; height: 4px; border-radius: 50%;
+    background: rgba(220, 235, 220, 0.9);
+    box-shadow: 0 0 3px rgba(0,0,0,0.8);
+  }
+  #hitmarker {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: 22px; height: 22px; opacity: 0; transition: opacity 0.25s;
+  }
+  #hitmarker::before, #hitmarker::after {
+    content: ''; position: absolute; left: 50%; top: 50%;
+    width: 22px; height: 2px; background: #ff5544;
+  }
+  #hitmarker::before { transform: translate(-50%,-50%) rotate(45deg); }
+  #hitmarker::after  { transform: translate(-50%,-50%) rotate(-45deg); }
+
+  #vitals {
+    position: absolute; left: 24px; bottom: 24px; width: 240px;
+  }
+  .bar-label { font-size: 11px; letter-spacing: 2px; opacity: 0.7; margin-bottom: 3px; }
+  .bar { width: 100%; height: 10px; background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.18); margin-bottom: 8px; }
+  .bar > div { height: 100%; transition: width 0.15s; }
+  #hp-fill { background: linear-gradient(90deg, #b83232, #d94f3d); width: 100%; }
+  #stam-fill { background: linear-gradient(90deg, #7a8f4a, #a9c25f); width: 100%; }
+  #armor-fill { background: linear-gradient(90deg, #4a6a8f, #5f8fc2); width: 100%; }
+
+  #ammo {
+    position: absolute; right: 28px; bottom: 22px; text-align: right;
+    text-shadow: 0 0 6px rgba(0,0,0,0.9);
+  }
+  #ammo .mag { font-size: 42px; font-weight: 700; color: #e8eee6; }
+  #ammo .reserve { font-size: 18px; opacity: 0.7; }
+  #ammo .state { font-size: 12px; letter-spacing: 3px; color: #d9b23c; height: 16px; }
+
+  #topbar {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+    text-align: center; width: 420px;
+  }
+  #raid-timer { font-size: 22px; font-weight: 700; letter-spacing: 2px; color: #e8eee6; text-shadow: 0 0 8px rgba(0,0,0,0.9); }
+  #compass {
+    position: relative; margin: 6px auto 0; width: 380px; height: 26px; overflow: hidden;
+    background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.12); border-radius: 3px;
+  }
+  .compass-mark { position: absolute; top: 4px; font-size: 12px; opacity: 0.85; transform: translateX(-50%); }
+  .compass-extract { color: #5fd97a; font-weight: 700; font-size: 11px; top: 2px; text-align: center; line-height: 11px; }
+
+  #loot-value {
+    position: absolute; top: 16px; right: 24px; text-align: right;
+    font-size: 15px; color: #d9c86a; text-shadow: 0 0 6px rgba(0,0,0,0.9);
+  }
+  #kills { font-size: 12px; color: #b7c2b7; margin-top: 4px; }
+
+  #prompt {
+    position: absolute; left: 50%; top: 58%; transform: translateX(-50%);
+    font-size: 15px; color: #dfe8df; background: rgba(0,0,0,0.5);
+    padding: 6px 14px; border: 1px solid rgba(255,255,255,0.2); border-radius: 4px;
+    display: none;
+  }
+  #prompt b { color: #8fd98f; }
+
+  #extract-progress {
+    position: absolute; left: 50%; top: 40%; transform: translateX(-50%);
+    width: 300px; display: none; text-align: center;
+  }
+  #extract-progress .label { font-size: 14px; color: #8fd98f; letter-spacing: 2px; margin-bottom: 6px; text-shadow: 0 0 8px #000; }
+  #extract-progress .bar > div { background: #5fd97a; width: 0%; }
+
+  #damage-vignette {
+    position: absolute; inset: 0; opacity: 0;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(190, 20, 10, 0.55) 100%);
+    transition: opacity 0.3s;
+  }
+  #lowhp-vignette {
+    position: absolute; inset: 0; opacity: 0;
+    background: radial-gradient(ellipse at center, transparent 45%, rgba(120, 0, 0, 0.65) 100%);
+  }
+
+  #killfeed {
+    position: absolute; left: 24px; top: 90px; font-size: 12px; color: #c9d4c9;
+  }
+  #killfeed div { margin-bottom: 4px; text-shadow: 0 0 4px #000; opacity: 0.9; }
+
+  /* ---------- 인벤토리 ---------- */
+  #inventory {
+    position: absolute; right: 24px; top: 80px; width: 280px;
+    background: rgba(8, 12, 8, 0.85); border: 1px solid rgba(255,255,255,0.15);
+    padding: 12px 14px; display: none; border-radius: 4px;
+  }
+  #inventory h3 { font-size: 13px; letter-spacing: 3px; color: #9fb59f; margin-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 6px; }
+  #inv-list { font-size: 13px; max-height: 320px; overflow-y: auto; }
+  #inv-list .item { display: flex; justify-content: space-between; padding: 3px 0; }
+  #inv-list .item .val { color: #d9c86a; }
+  #inv-total { margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 13px; display: flex; justify-content: space-between; color: #e8dfa0; }
+
+  /* ---------- 스크린 (메뉴/결과) ---------- */
+  .screen {
+    position: absolute; inset: 0; display: none;
+    background: rgba(5, 8, 5, 0.92);
+    flex-direction: column; align-items: center; justify-content: center;
+    pointer-events: auto; text-align: center;
+  }
+  .screen h1 { font-size: 44px; letter-spacing: 10px; color: #dfe8df; margin-bottom: 6px; font-weight: 800; }
+  .screen h2 { font-size: 26px; letter-spacing: 4px; margin-bottom: 18px; }
+  .screen .sub { font-size: 14px; color: #93a393; margin-bottom: 26px; line-height: 1.9; }
+  .screen .stash { font-size: 15px; color: #d9c86a; margin-bottom: 26px; }
+  .screen button {
+    pointer-events: auto; cursor: pointer;
+    font-family: inherit; font-size: 16px; letter-spacing: 3px;
+    padding: 13px 46px; color: #dfe8df; background: rgba(90, 120, 80, 0.25);
+    border: 1px solid #6f8f5f; border-radius: 3px; transition: background 0.15s;
+  }
+  .screen button:hover { background: rgba(120, 160, 100, 0.4); }
+  .screen button:disabled { opacity: 0.55; cursor: default; }
+  .screen button:disabled:hover { background: rgba(90, 120, 80, 0.25); }
+
+  /* ---------- 장비 상점 ---------- */
+  #shop {
+    width: 380px; margin-bottom: 22px; text-align: left;
+    background: rgba(10, 16, 10, 0.55); border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 4px; padding: 10px 14px;
+  }
+  #shop h3 { font-size: 12px; letter-spacing: 3px; color: #9fb59f; margin-bottom: 8px; }
+  .shop-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 5px 0; font-size: 13px; border-top: 1px solid rgba(255,255,255,0.06);
+  }
+  .shop-row .w-name { color: #dfe8df; }
+  .shop-row .w-desc { font-size: 11px; color: #7f8f7f; margin-top: 1px; }
+  .shop-row button {
+    font-family: inherit; font-size: 12px; letter-spacing: 1px; cursor: pointer;
+    padding: 4px 12px; color: #dfe8df; background: rgba(90, 120, 80, 0.25);
+    border: 1px solid #6f8f5f; border-radius: 3px; white-space: nowrap;
+  }
+  .shop-row button:disabled { opacity: 0.4; cursor: default; }
+  .shop-row .equipped { color: #8fd98f; font-size: 12px; letter-spacing: 1px; padding: 4px 6px; }
+  @media (max-width: 900px) { #shop { width: 300px; padding: 8px 10px; } }
+
+  /* ---------- 에셋 로딩 진행 바 ---------- */
+  #load-progress { width: 300px; margin-bottom: 18px; }
+  #load-progress .bar { height: 8px; margin-bottom: 0; }
+  #load-fill { background: linear-gradient(90deg, #6f8f5f, #a9c25f); width: 0%; }
+  #load-label { font-size: 12px; color: #93a393; letter-spacing: 1px; margin-bottom: 6px; }
+  .screen .keys { margin-top: 34px; font-size: 12px; color: #6f7f6f; line-height: 2; }
+  .screen .keys b { color: #a9b9a9; }
+  #death-screen h2 { color: #d94f3d; }
+  #extract-screen h2 { color: #5fd97a; }
+  .summary-loot { font-size: 14px; color: #c9d4c9; margin-bottom: 20px; max-height: 200px; overflow-y: auto; line-height: 1.8; }
+  .summary-loot .val { color: #d9c86a; }
+
+  /* ---------- 모바일 터치 UI ---------- */
+  #touch-ui { display: none; }
+  body.mobile #hud #touch-ui { display: block; }
+  body.mobile .keys { display: none; }
+  .touch-keys { display: none; font-size: 12px; color: #6f7f6f; margin-top: 30px; line-height: 2; }
+  .touch-keys b { color: #a9b9a9; }
+  body.mobile .touch-keys { display: block; }
+
+  #joystick {
+    position: absolute; left: 26px; bottom: 84px; width: 128px; height: 128px;
+    border-radius: 50%; background: rgba(255,255,255,0.06);
+    border: 1.5px solid rgba(255,255,255,0.22); pointer-events: auto;
+  }
+  #joystick-knob {
+    position: absolute; left: 50%; top: 50%; width: 52px; height: 52px;
+    margin: -26px 0 0 -26px; border-radius: 50%;
+    background: rgba(210, 225, 210, 0.35); border: 1px solid rgba(255,255,255,0.4);
+  }
+  .tbtn {
+    position: absolute; pointer-events: auto;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; font-size: 13px; letter-spacing: 1px; color: #dfe8df;
+    background: rgba(20, 30, 20, 0.42); border: 1.5px solid rgba(255,255,255,0.3);
+    text-shadow: 0 0 4px #000;
+  }
+  .tbtn:active, .tbtn.active { background: rgba(120, 160, 100, 0.5); }
+  #tb-fire   { right: 30px;  bottom: 66px;  width: 88px; height: 88px; font-size: 16px; }
+  #tb-ads    { right: 132px; bottom: 40px;  width: 60px; height: 60px; }
+  #tb-jump   { right: 42px;  bottom: 168px; width: 60px; height: 60px; }
+  #tb-reload { right: 132px; bottom: 128px; width: 60px; height: 60px; }
+  #tb-heal   { right: 212px; bottom: 30px;  width: 52px; height: 52px; }
+  #tb-inv    { right: 18px;  top: 64px;     width: 48px; height: 48px; font-size: 11px; }
+  #tb-interact {
+    left: 50%; top: 64%; transform: translateX(-50%);
+    width: auto; height: 46px; padding: 0 26px; border-radius: 23px;
+    background: rgba(90, 130, 80, 0.55); font-size: 15px; display: none;
+  }
+
+  /* ---------- 작은 화면 보정 ---------- */
+  @media (max-width: 900px) {
+    #compass { width: 240px; }
+    #topbar { width: 260px; }
+    #raid-timer { font-size: 17px; }
+    #vitals { width: 160px; left: 14px; bottom: 14px; }
+    #ammo { right: 16px; bottom: 14px; }
+    #ammo .mag { font-size: 30px; }
+    #killfeed { top: 64px; font-size: 11px; }
+    #loot-value { font-size: 13px; top: 10px; right: 16px; }
+    #inventory { width: 230px; top: 60px; right: 74px; }
+    .screen h1 { font-size: 32px; letter-spacing: 6px; }
+    .screen .sub { font-size: 12px; padding: 0 16px; }
+    .screen .keys, .screen .touch-keys { margin-top: 18px; font-size: 11px; }
+    #prompt { font-size: 13px; top: 54%; }
+  }
+  body.mobile #ammo {
+    left: 50%; right: auto; bottom: 14px; transform: translateX(-50%);
+    text-align: center;
+  }
+  body.mobile #vitals { bottom: auto; top: 120px; left: 14px; }
+  body.mobile #prompt { display: none !important; } /* 모바일은 '열기' 버튼으로 대체 */
+</style>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+
+  <div class="overlay" id="hud">
+    <div id="damage-vignette"></div>
+    <div id="lowhp-vignette"></div>
+    <div id="crosshair"></div>
+    <div id="hitmarker"></div>
+
+    <div id="topbar">
+      <div id="raid-timer">12:00</div>
+      <div id="compass"></div>
+    </div>
+
+    <div id="loot-value">
+      <div>₽ <span id="loot-value-num">0</span></div>
+      <div id="kills">사살 0</div>
+    </div>
+
+    <div id="vitals">
+      <div class="bar-label">체력</div>
+      <div class="bar"><div id="hp-fill"></div></div>
+      <div class="bar-label">지구력</div>
+      <div class="bar"><div id="stam-fill"></div></div>
+      <div class="bar-label" id="armor-label" style="display:none">방탄</div>
+      <div class="bar" id="armor-bar" style="display:none"><div id="armor-fill"></div></div>
+    </div>
+
+    <div id="ammo">
+      <div class="state" id="gun-state"></div>
+      <div><span class="mag" id="ammo-mag">30</span> <span class="reserve">/ <span id="ammo-reserve">90</span></span></div>
+    </div>
+
+    <div id="prompt"></div>
+
+    <div id="extract-progress">
+      <div class="label" id="extract-label">탈출 진행 중...</div>
+      <div class="bar"><div id="extract-fill"></div></div>
+    </div>
+
+    <div id="killfeed"></div>
+
+    <div id="inventory">
+      <h3>인벤토리 [Tab]</h3>
+      <div id="inv-list"></div>
+      <div id="inv-total"><span>총 가치</span><span id="inv-total-val">₽ 0</span></div>
+    </div>
+
+    <div id="touch-ui">
+      <div id="joystick"><div id="joystick-knob"></div></div>
+      <div class="tbtn" id="tb-fire">발사</div>
+      <div class="tbtn" id="tb-ads">조준</div>
+      <div class="tbtn" id="tb-jump">점프</div>
+      <div class="tbtn" id="tb-reload">장전</div>
+      <div class="tbtn" id="tb-heal">치료</div>
+      <div class="tbtn" id="tb-inv">가방</div>
+      <div class="tbtn" id="tb-interact">열기</div>
+    </div>
+  </div>
+
+  <div class="screen" id="menu-screen" style="display:flex">
+    <h1>EXSHOOT</h1>
+    <div class="sub">
+      스캐브를 뚫고 전리품을 챙긴 뒤, 탈출 지점까지 살아서 도달하십시오.<br>
+      사망하거나 시간이 초과되면 이번 레이드의 전리품을 전부 잃습니다.
+    </div>
+    <div class="stash" id="menu-stash"></div>
+    <div id="shop"></div>
+    <div id="load-progress">
+      <div id="load-label">에셋 로딩 중...</div>
+      <div class="bar"><div id="load-fill"></div></div>
+    </div>
+    <button id="btn-start">레이드 시작</button>
+    <div class="keys">
+      <b>WASD</b> 이동 · <b>Shift</b> 달리기 · <b>Space</b> 점프 · <b>마우스</b> 조준/사격<br>
+      <b>R</b> 재장전 · <b>E</b> 루팅/상호작용 · <b>Q</b> 치료 · <b>Tab</b> 인벤토리
+    </div>
+    <div class="touch-keys">
+      <b>왼쪽 조이스틱</b> 이동 (끝까지 밀면 달리기) · <b>오른쪽 화면 드래그</b> 시선<br>
+      <b>발사 / 조준 / 장전 / 점프</b> 버튼 · 상자 근처에서 <b>열기</b> 버튼
+    </div>
+  </div>
+
+  <div class="screen" id="death-screen">
+    <h2>사 망</h2>
+    <div class="sub" id="death-cause">스캐브에게 사살당했습니다.</div>
+    <div class="summary-loot" id="death-loot"></div>
+    <button class="btn-menu">메뉴로</button>
+  </div>
+
+  <div class="screen" id="extract-screen">
+    <h2>탈출 성공</h2>
+    <div class="sub" id="extract-stats"></div>
+    <div class="summary-loot" id="extract-loot"></div>
+    <button class="btn-menu">메뉴로</button>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
