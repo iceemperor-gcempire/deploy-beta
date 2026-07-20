@@ -552,10 +552,12 @@ const gun = {
   swayX: 0, swayY: 0,   // 시선 이동에 따른 뷰모델 끌림
   sprintBlend: 0,       // 0=조준 자세, 1=스프린트 내림 자세
   semiLatch: false,     // 단발 무기 클릭당 1발
-  foundWeapon: null,    // 레이드 중 습득 무기 (탈출 시 소유 확정)
+  foundWeapons: [],     // 레이드 중 습득 무기들 (탈출 시 소유 확정)
 };
 
 let inventory = [];       // {name, value, heal?}
+let carry = [];           // 이번 레이드 휴대 무기 키 목록 (1/2/3 키 순)
+const weaponAmmo = {};    // 무기별 탄약 상태 { key: { mag, reserve } }
 let colliders = [];       // yaw 정렬 OBB { cx, cz, c, s, hx, hz, minY, maxY }
 let obstacleMeshes = [];  // LOS/총알 차단용
 let enemies = [];
@@ -715,8 +717,6 @@ const SFX_FILES = {
   tick: ['tick_001.ogg'],
   confirm: ['confirmation_001.ogg'],
   deathBoom: ['lowFrequency_explosion_000.ogg'],
-  girlHurt: [0, 1, 2, 3].map((i) => `girl_hurt_${i}.wav`),
-  girlDeath: [0, 1, 2].map((i) => `girl_death_${i}.wav`),
 };
 const AB = {}; // name -> AudioBuffer[]
 async function loadAudio() {
@@ -779,45 +779,6 @@ function ambientStart() {
   src.start(); lfo.start();
   ambient = { src, lfo, g };
 }
-// 메뉴 BGM — 절차 생성 다크 앰비언트 패드 (마이너 드론 + 느린 트레몰로)
-let bgm = null;
-function bgmStart() {
-  if (bgm) return;
-  const ctx = audio();
-  const master = ctx.createGain();
-  master.gain.setValueAtTime(0, ctx.currentTime);
-  master.gain.linearRampToValueAtTime(0.05, ctx.currentTime + 3);
-  master.connect(ctx.destination);
-  const parts = [];
-  // A 마이너 드론: A1 saw(로우패스) + E2 sine + C3 sine (미세 디튠)
-  for (const [freq, type, g, det] of [[55, 'sawtooth', 0.5, 0], [82.41, 'sine', 0.45, 2], [130.81, 'sine', 0.3, -3]]) {
-    const o = ctx.createOscillator();
-    o.type = type; o.frequency.value = freq; o.detune.value = det;
-    const f = ctx.createBiquadFilter();
-    f.type = 'lowpass'; f.frequency.value = 320; f.Q.value = 0.5;
-    const og = ctx.createGain(); og.gain.value = g;
-    o.connect(f).connect(og).connect(master);
-    o.start();
-    parts.push(o);
-  }
-  // 느린 트레몰로 (숨쉬는 느낌)
-  const lfo = ctx.createOscillator();
-  lfo.frequency.value = 0.07;
-  const lfoG = ctx.createGain(); lfoG.gain.value = 0.018;
-  lfo.connect(lfoG).connect(master.gain);
-  lfo.start();
-  parts.push(lfo);
-  bgm = { parts, master };
-}
-function bgmStop() {
-  if (!bgm) return;
-  const ctx = audio();
-  const { parts, master } = bgm;
-  bgm = null;
-  master.gain.linearRampToValueAtTime(0, ctx.currentTime + 1.5);
-  setTimeout(() => { try { parts.forEach((o) => o.stop()); } catch {} }, 1700);
-}
-
 function ambientStop() {
   if (!ambient) return;
   const ctx = audio();
@@ -841,17 +802,6 @@ function updateAcoustics(dt) {
   if (ambient) ambient.g.gain.value = 0.045 * (1 - indoorK * 0.65);
 }
 
-// 적 보이스 (거리 감쇠 + 원거리 먹먹, 보스는 저음)
-function enemyVoice(e, kind) {
-  const dist = player.pos.distanceTo(e.pos);
-  if (dist > 42) return;
-  playBuf(kind === 'death' ? 'girlDeath' : 'girlHurt', {
-    vol: Math.max(0.06, 0.55 - dist * 0.012),
-    lp: Math.max(1400, 6000 - dist * 110),
-    rate: e.boss ? 0.85 : 1,
-    jitter: 0.07,
-  });
-}
 
 function noiseBurst({ dur = 0.15, freq = 900, q = 0.7, gain = 0.5, type = 'lowpass', decay = 30 }) {
   const ctx = audio();
@@ -1943,11 +1893,6 @@ function playEnemyOneShot(e, act, fade = 0.06) {
 // 피격 반응: 서서 교전 중이면 가끔 측면 회피 구르기, 아니면 부위별 Hit 원샷,
 // 이동/앉은 상태면 절차 flinch
 function enemyHitReact(e, headshot) {
-  const now = performance.now();
-  if (!e.voiceT || now - e.voiceT > 350) {
-    if (Math.random() < 0.6) enemyVoice(e, 'hurt');
-    e.voiceT = now;
-  }
   if (e.state === 'combat' && e.rollT <= 0 && Math.random() < 0.3 &&
       playEnemyOneShot(e, e.actRoll, 0.08)) {
     const toP = player.pos.clone().sub(e.pos); toP.y = 0; toP.normalize();
@@ -1983,7 +1928,6 @@ function killEnemy(e) {
   }
   state.kills++;
   sfx.enemyDeath();
-  enemyVoice(e, 'death');
   addFeed(e.boss ? '보스 사살! 시체에서 전리품을 회수하세요' : '스캐브 사살');
   if (e.boss) sfx.death(); // 저역 붐으로 강조
   e.flash.intensity = 0;
@@ -2287,12 +2231,24 @@ function equipWeapon(key, announce = true) {
   vm.model.visible = true;
   muzzleLocal.copy(vm.muzzle);
   GUN_ADS.copy(vm.adsPos);
+  // 무기별 탄약 상태 저장/복원 (레이드 중 교체 시 유지)
+  if (GUN && GUN.key !== key && weaponAmmo[GUN.key]) {
+    weaponAmmo[GUN.key] = { mag: gun.mag, reserve: gun.reserve };
+  }
   GUN = w;
-  gun.mag = w.magSize;
-  gun.reserve = w.reserveMax;
+  const ammo = weaponAmmo[key];
+  gun.mag = ammo ? ammo.mag : w.magSize;
+  gun.reserve = ammo ? ammo.reserve : w.reserveMax;
   gun.reloading = 0;
   gun.cooldown = 0;
   if (announce) { addFeed(`${w.name} 장착`); sfx.reload2(); }
+}
+
+// 1/2/3 키 무기 교체
+function switchWeapon(slot) {
+  const key = carry[slot];
+  if (!key || key === GUN.key) return;
+  equipWeapon(key);
 }
 camera.add(gunGroup);
 scene.add(camera);
@@ -2496,11 +2452,13 @@ function lootInteractable(it) {
   if (it.label === '보급 상자' && Math.random() < 0.1) {
     const st = loadStash();
     const owned = st.weapons || ['rifle'];
-    const cand = Object.keys(WEAPONS).filter((k) => !owned.includes(k) && k !== GUN.key && k !== gun.foundWeapon);
+    const cand = Object.keys(WEAPONS).filter((k) => !owned.includes(k) && !carry.includes(k));
     if (cand.length) {
       const k = cand[Math.floor(Math.random() * cand.length)];
+      carry.push(k);
+      weaponAmmo[k] = { mag: WEAPONS[k].magSize, reserve: WEAPONS[k].reserveMax };
+      gun.foundWeapons = [...(gun.foundWeapons || []), k]; // 탈출해야 소유 확정
       equipWeapon(k);
-      gun.foundWeapon = k; // 탈출해야 소유 확정 (이전 습득 무기는 교체로 폐기)
       addFeed(`${WEAPONS[k].name} 발견!`);
     }
   }
@@ -2640,12 +2598,15 @@ function startRaid() {
   player.stamina = 100;
 
   const stash0 = loadStash();
-  const eq = stash0.equipped && WEAPONS[stash0.equipped] && (stash0.weapons || ['rifle']).includes(stash0.equipped)
-    ? stash0.equipped : 'rifle';
+  const owned0 = (stash0.weapons || ['rifle']).filter((k) => WEAPONS[k]);
+  carry = ['rifle', ...owned0.filter((k) => k !== 'rifle')]; // 1번 슬롯은 항상 소총
+  for (const k of Object.keys(weaponAmmo)) delete weaponAmmo[k];
+  for (const k of carry) weaponAmmo[k] = { mag: WEAPONS[k].magSize, reserve: WEAPONS[k].reserveMax };
+  const eq = stash0.equipped && carry.includes(stash0.equipped) ? stash0.equipped : 'rifle';
   equipWeapon(eq, false); // mag/reserve/reload 리셋 포함
   gun.triggerDown = false;
   gun.semiLatch = false;
-  gun.foundWeapon = null;
+  gun.foundWeapons = [];
   player.armorDur = Math.min(ARMOR_MAX, stash0.armorDur || 0);
   player.helmet = !!stash0.helmet;
   player.aiming = false;
@@ -2679,7 +2640,6 @@ function startRaid() {
   dom.inventory.style.display = 'none';
 
   lockPointer();
-  bgmStop();
   ambientStart();
   const activeNames = extractions.map(e => e.name).join(', ');
   addFeed(`활성 탈출구: ${activeNames}`);
@@ -2700,7 +2660,6 @@ function endRaid(result, cause) {
   if (state.phase !== 'raid') return;
   state.phase = result === 'extract' ? 'extracted' : 'dead';
   ambientStop();
-  bgmStart();
   document.exitPointerLock?.(); // iOS Safari 는 Pointer Lock API 자체가 없음
   dom.hud.style.display = 'none';
   gun.triggerDown = false;
@@ -2715,7 +2674,7 @@ function endRaid(result, cause) {
     stash.roubles = (stash.roubles || 0) + value;
     // 레이드 중 습득한 무기 소유 확정 + 장착 유지
     const owned = new Set(stash.weapons || ['rifle']);
-    if (gun.foundWeapon) owned.add(gun.foundWeapon);
+    for (const k of (gun.foundWeapons || [])) owned.add(k);
     stash.weapons = [...owned];
     stash.equipped = GUN.key;
     stash.armorDur = player.armorDur;
@@ -2951,6 +2910,9 @@ document.addEventListener('keydown', (e) => {
     }
   }
   if (state.phase !== 'raid' || state.paused) return;
+  if (e.code === 'Digit1') switchWeapon(0);
+  if (e.code === 'Digit2') switchWeapon(1);
+  if (e.code === 'Digit3') switchWeapon(2);
   if (e.code === 'KeyR') startReload();
   if (e.code === 'KeyQ') useHeal();
   if (e.code === 'KeyE') {
@@ -2981,6 +2943,10 @@ function updateHUD() {
   }
   dom.ammoMag.textContent = gun.mag;
   dom.ammoReserve.textContent = gun.reserve;
+  const wn = $('weapon-name');
+  const slot = carry.indexOf(GUN.key);
+  const wnText = `${slot >= 0 ? `[${slot + 1}] ` : ''}${GUN.name}`;
+  if (wn.textContent !== wnText) wn.textContent = wnText;
   dom.raidTimer.textContent = fmtTime(state.raidTime);
   dom.raidTimer.style.color = state.raidTime < 60 ? '#d94f3d' : '#e8eee6';
   dom.kills.textContent = `사살 ${state.kills}`;
@@ -3046,10 +3012,6 @@ window.__ex = {
   kill(i) { const e = enemies[i]; if (e && !e.dead) killEnemy(e); },
   hurt(n, hs = false) { damagePlayer(n, hs); },
 };
-
-document.addEventListener('pointerdown', () => {
-  if (state.phase !== 'raid') bgmStart();
-}, { capture: true });
 
 updateMenuStash();
 refreshInventoryUI();

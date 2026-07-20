@@ -26,6 +26,5 @@ FBX → GLB 변환: Blender 5.1 headless (총기, 캐릭터+애니메이션).
 - RPG Audio — Kenney — https://kenney.nl/assets/rpg-audio (CC0) — 재장전, 루팅, 치료
 - Sci-Fi Sounds — Kenney — https://kenney.nl/assets/sci-fi-sounds (CC0) — 사망 시 저역 붐
 - Gunshot Sounds — Vincent Sevedge — https://opengameart.org/content/gunshot-sounds (CC-BY 3.0) — 소총(SKS)/권총(CZ) 총성. 단발 구간을 잘라 mono WAV 로 사용.
-- Female Hurt Grunts & Groans — nocturnalvanguard — https://opengameart.org/content/female-hurt-grunts-groans (CC0) — 적 피격/사망 보이스. 발화 7개를 분리해 22kHz mono WAV 로 사용.
 
 총성 전처리: 연속 사격 녹음에서 onset 검출로 단발 추출 후 페이드아웃/정규화 (Python).
