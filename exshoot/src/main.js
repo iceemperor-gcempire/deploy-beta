@@ -667,8 +667,31 @@ function renderShop() {
 // 오디오 — 프리 에셋 샘플 (Kenney CC0 / OpenGameArt) + 절차 생성 폴백
 // ============================================================
 let AC = null;
+let sfxBus = null;   // 모든 SFX 가 지나는 버스 (드라이 + 리버브 센드)
+let wetGain = null;  // 실내 리버브 센드 (indoorK 로 제어)
+function makeImpulse(ctx) {
+  // 절차 생성 IR: 0.7s 지수 감쇠 스테레오 노이즈 (작은 실내 느낌)
+  const len = Math.floor(ctx.sampleRate * 0.7);
+  const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / len * 6.5);
+  }
+  return buf;
+}
 function audio() {
-  if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+  if (!AC) {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    sfxBus = AC.createGain();
+    sfxBus.connect(AC.destination);
+    const conv = AC.createConvolver();
+    conv.buffer = makeImpulse(AC);
+    wetGain = AC.createGain();
+    wetGain.gain.value = 0;
+    sfxBus.connect(wetGain);
+    wetGain.connect(conv);
+    conv.connect(AC.destination);
+  }
   if (AC.state === 'suspended') AC.resume();
   return AC;
 }
@@ -692,6 +715,8 @@ const SFX_FILES = {
   tick: ['tick_001.ogg'],
   confirm: ['confirmation_001.ogg'],
   deathBoom: ['lowFrequency_explosion_000.ogg'],
+  girlHurt: [0, 1, 2, 3].map((i) => `girl_hurt_${i}.wav`),
+  girlDeath: [0, 1, 2].map((i) => `girl_death_${i}.wav`),
 };
 const AB = {}; // name -> AudioBuffer[]
 async function loadAudio() {
@@ -725,7 +750,7 @@ function playBuf(name, { vol = 1, rate = 1, jitter = 0.06, lp = 0, delay = 0 } =
   }
   const g = ctx.createGain();
   g.gain.value = vol;
-  node.connect(g).connect(ctx.destination);
+  node.connect(g).connect(sfxBus);
   src.start(ctx.currentTime + delay);
   return true;
 }
@@ -750,10 +775,49 @@ function ambientStart() {
   const g = ctx.createGain();
   g.gain.setValueAtTime(0, ctx.currentTime);
   g.gain.linearRampToValueAtTime(0.045, ctx.currentTime + 2.5);
-  src.connect(f).connect(g).connect(ctx.destination);
+  src.connect(f).connect(g).connect(sfxBus);
   src.start(); lfo.start();
   ambient = { src, lfo, g };
 }
+// 메뉴 BGM — 절차 생성 다크 앰비언트 패드 (마이너 드론 + 느린 트레몰로)
+let bgm = null;
+function bgmStart() {
+  if (bgm) return;
+  const ctx = audio();
+  const master = ctx.createGain();
+  master.gain.setValueAtTime(0, ctx.currentTime);
+  master.gain.linearRampToValueAtTime(0.05, ctx.currentTime + 3);
+  master.connect(ctx.destination);
+  const parts = [];
+  // A 마이너 드론: A1 saw(로우패스) + E2 sine + C3 sine (미세 디튠)
+  for (const [freq, type, g, det] of [[55, 'sawtooth', 0.5, 0], [82.41, 'sine', 0.45, 2], [130.81, 'sine', 0.3, -3]]) {
+    const o = ctx.createOscillator();
+    o.type = type; o.frequency.value = freq; o.detune.value = det;
+    const f = ctx.createBiquadFilter();
+    f.type = 'lowpass'; f.frequency.value = 320; f.Q.value = 0.5;
+    const og = ctx.createGain(); og.gain.value = g;
+    o.connect(f).connect(og).connect(master);
+    o.start();
+    parts.push(o);
+  }
+  // 느린 트레몰로 (숨쉬는 느낌)
+  const lfo = ctx.createOscillator();
+  lfo.frequency.value = 0.07;
+  const lfoG = ctx.createGain(); lfoG.gain.value = 0.018;
+  lfo.connect(lfoG).connect(master.gain);
+  lfo.start();
+  parts.push(lfo);
+  bgm = { parts, master };
+}
+function bgmStop() {
+  if (!bgm) return;
+  const ctx = audio();
+  const { parts, master } = bgm;
+  bgm = null;
+  master.gain.linearRampToValueAtTime(0, ctx.currentTime + 1.5);
+  setTimeout(() => { try { parts.forEach((o) => o.stop()); } catch {} }, 1700);
+}
+
 function ambientStop() {
   if (!ambient) return;
   const ctx = audio();
@@ -762,6 +826,33 @@ function ambientStop() {
   g.gain.linearRampToValueAtTime(0, ctx.currentTime + 1.2);
   setTimeout(() => { try { src.stop(); lfo.stop(); } catch {} }, 1400);
 }
+// 실내 구역 (사무동 / 게스트하우스 1층 / 중앙 창고) — 리버브·바람 덕킹용
+const INDOOR_RECTS = [
+  { x: -14, z: -32, hw: 6, hd: 4.5 },
+  { x: 56, z: 44, hw: 5, hd: 4 },
+  { x: -28, z: -18, hw: 13, hd: 7.5 },
+];
+let indoorK = 0;
+function updateAcoustics(dt) {
+  const p = player.pos;
+  const inside = INDOOR_RECTS.some((r) => Math.abs(p.x - r.x) < r.hw && Math.abs(p.z - r.z) < r.hd && p.y < 3) ? 1 : 0;
+  indoorK += (inside - indoorK) * Math.min(1, dt * 4);
+  if (wetGain) wetGain.gain.value = indoorK * 0.42;
+  if (ambient) ambient.g.gain.value = 0.045 * (1 - indoorK * 0.65);
+}
+
+// 적 보이스 (거리 감쇠 + 원거리 먹먹, 보스는 저음)
+function enemyVoice(e, kind) {
+  const dist = player.pos.distanceTo(e.pos);
+  if (dist > 42) return;
+  playBuf(kind === 'death' ? 'girlDeath' : 'girlHurt', {
+    vol: Math.max(0.06, 0.55 - dist * 0.012),
+    lp: Math.max(1400, 6000 - dist * 110),
+    rate: e.boss ? 0.85 : 1,
+    jitter: 0.07,
+  });
+}
+
 function noiseBurst({ dur = 0.15, freq = 900, q = 0.7, gain = 0.5, type = 'lowpass', decay = 30 }) {
   const ctx = audio();
   const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
@@ -771,7 +862,7 @@ function noiseBurst({ dur = 0.15, freq = 900, q = 0.7, gain = 0.5, type = 'lowpa
   const src = ctx.createBufferSource(); src.buffer = buf;
   const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
   const g = ctx.createGain(); g.gain.value = gain;
-  src.connect(f).connect(g).connect(ctx.destination);
+  src.connect(f).connect(g).connect(sfxBus);
   src.start();
 }
 function tone({ freq = 600, dur = 0.1, gain = 0.15, type = 'sine', slide = 0 }) {
@@ -781,7 +872,7 @@ function tone({ freq = 600, dur = 0.1, gain = 0.15, type = 'sine', slide = 0 }) 
   const g = ctx.createGain();
   g.gain.setValueAtTime(gain, ctx.currentTime);
   g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
-  o.connect(g).connect(ctx.destination);
+  o.connect(g).connect(sfxBus);
   o.start(); o.stop(ctx.currentTime + dur);
 }
 const sfx = {
@@ -1852,6 +1943,11 @@ function playEnemyOneShot(e, act, fade = 0.06) {
 // 피격 반응: 서서 교전 중이면 가끔 측면 회피 구르기, 아니면 부위별 Hit 원샷,
 // 이동/앉은 상태면 절차 flinch
 function enemyHitReact(e, headshot) {
+  const now = performance.now();
+  if (!e.voiceT || now - e.voiceT > 350) {
+    if (Math.random() < 0.6) enemyVoice(e, 'hurt');
+    e.voiceT = now;
+  }
   if (e.state === 'combat' && e.rollT <= 0 && Math.random() < 0.3 &&
       playEnemyOneShot(e, e.actRoll, 0.08)) {
     const toP = player.pos.clone().sub(e.pos); toP.y = 0; toP.normalize();
@@ -1887,6 +1983,7 @@ function killEnemy(e) {
   }
   state.kills++;
   sfx.enemyDeath();
+  enemyVoice(e, 'death');
   addFeed(e.boss ? '보스 사살! 시체에서 전리품을 회수하세요' : '스캐브 사살');
   if (e.boss) sfx.death(); // 저역 붐으로 강조
   e.flash.intensity = 0;
@@ -2582,6 +2679,7 @@ function startRaid() {
   dom.inventory.style.display = 'none';
 
   lockPointer();
+  bgmStop();
   ambientStart();
   const activeNames = extractions.map(e => e.name).join(', ');
   addFeed(`활성 탈출구: ${activeNames}`);
@@ -2602,6 +2700,7 @@ function endRaid(result, cause) {
   if (state.phase !== 'raid') return;
   state.phase = result === 'extract' ? 'extracted' : 'dead';
   ambientStop();
+  bgmStart();
   document.exitPointerLock?.(); // iOS Safari 는 Pointer Lock API 자체가 없음
   dom.hud.style.display = 'none';
   gun.triggerDown = false;
@@ -2923,6 +3022,7 @@ function loop() {
     updateGun(dt);
     for (const e of enemies) updateEnemy(e, dt);
     updateExtraction(dt);
+    updateAcoustics(dt);
     updateHUD();
   }
   updateEffects(dt);
@@ -2946,6 +3046,10 @@ window.__ex = {
   kill(i) { const e = enemies[i]; if (e && !e.dead) killEnemy(e); },
   hurt(n, hs = false) { damagePlayer(n, hs); },
 };
+
+document.addEventListener('pointerdown', () => {
+  if (state.phase !== 'raid') bgmStart();
+}, { capture: true });
 
 updateMenuStash();
 refreshInventoryUI();
