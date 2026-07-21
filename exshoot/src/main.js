@@ -351,10 +351,12 @@ async function loadAssets() {
     const aimDownRaw = clips.find((c) => /^aimdown/i.test(c.name)) || null;
     const aimNeutral = clips.find((c) => /^aimneutral/i.test(c.name)) || null;
     const walkC = clips.find((c) => /^walk/i.test(c.name)) || null;
+    const limp = clips.find((c) => /^limp/i.test(c.name)) || null;
+    const alert = clips.find((c) => /^alert/i.test(c.name)) || null;
     // 리타게팅 export 시 180°(w≈0) 부근 회전의 쿼터니언 부호(±q)가 프레임 간
     // 뒤집힐 수 있음 → 보간 시 관절이 꺾임. 부호 연속성 복구.
     for (const c of [idle, run, death, hitChest, hitHead, shoot, reload,
-      crouchIdle, roll, aimUpRaw, aimDownRaw, aimNeutral, walkC]) fixQuatContinuity(c);
+      crouchIdle, roll, aimUpRaw, aimDownRaw, aimNeutral, walkC, limp, alert]) fixQuatContinuity(c);
     // 고저차 조준: Aim_Up/Down 을 Neutral 기준 additive 로 변환 —
     // 어떤 기본 모션 위에도 가중치로 얹을 수 있음.
     // 주의: glTF 는 상수 트랙(scale 1 등)의 accessor 를 클립 간 공유하므로
@@ -364,7 +366,7 @@ async function loadAssets() {
       if (aimUpRaw) aimUp = THREE.AnimationUtils.makeClipAdditive(aimUpRaw.clone(), 0, aimNeutral);
       if (aimDownRaw) aimDown = THREE.AnimationUtils.makeClipAdditive(aimDownRaw.clone(), 0, aimNeutral);
     }
-    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown, walk: walkC };
+    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown, walk: walkC, limp, alert };
   }
 
   buildViewmodel();
@@ -1386,6 +1388,7 @@ function makeEnemyMesh() {
   const actIdle = clips.idle ? mixer.clipAction(clips.idle) : null;
   const actRun = clips.run ? mixer.clipAction(clips.run) : null;
   const actWalk = clips.walk ? mixer.clipAction(clips.walk) : null;
+  const actLimp = clips.limp ? mixer.clipAction(clips.limp) : null;
   // 원샷 액션 (사망/피격) — 마지막 프레임 유지, 피격은 finished 시 복귀
   const mkOnce = (clip) => {
     if (!clip) return null;
@@ -1400,6 +1403,7 @@ function makeEnemyMesh() {
   const actShoot = mkOnce(clips.shoot);
   const actReload = mkOnce(clips.reload);
   const actRoll = mkOnce(clips.roll);
+  const actAlert = mkOnce(clips.alert);
   const actCrouch = clips.crouchIdle ? mixer.clipAction(clips.crouchIdle) : null;
   // additive 조준 포즈 — 항상 재생, 가중치로만 제어
   const mkAim = (clip) => {
@@ -1450,7 +1454,7 @@ function makeEnemyMesh() {
   return {
     group: g, body, head, flash, model, mixer, actIdle, actRun,
     actDeath, actHitChest, actHitHead, actShoot, actReload,
-    actRoll, actCrouch, actAimUp, actAimDown, actWalk,
+    actRoll, actCrouch, actAimUp, actAimDown, actWalk, actLimp, actAlert,
     running: false, crouched: false, baseAct: actIdle, spine,
     flinch: 0, aimBlend: 0, oneShot: null, deathDone: false,
   };
@@ -1540,6 +1544,7 @@ function spawnBoss(avoidPos) {
     ...m,
     pos: m.group.position,
     hp: 300,
+    maxHp: 300,
     state: 'patrol',
     waypoint: randomOpenPoint(),
     idleTimer: 0,
@@ -1643,6 +1648,7 @@ function updateEnemy(e, dt) {
         e.state = 'combat';
         // 교전 스탠스: 일부는 앉아쏴 (피탄 면적 감소 + 명중률 보너스)
         e.stance = e.actCrouch && Math.random() < 0.4 ? 'crouch' : 'stand';
+        playEnemyOneShot(e, e.actAlert, 0.08); // 놀라 총 드는 텔레그래프 (서 있을 때만 성공)
       }
     } else if (e.state === 'combat') {
       e.lostTimer += 0.15;
@@ -1730,6 +1736,7 @@ function updateEnemy(e, dt) {
       while (dy < -Math.PI) dy += Math.PI * 2;
       e.group.rotation.y += THREE.MathUtils.clamp(dy, -dt * 5, dt * 5);
     }
+    if (e.actLimp && e.hp < (e.maxHp || ENEMY.hp) * 0.35 && e.rollT <= 0) speed = Math.min(speed, 0.62);
     const preX = e.pos.x, preZ = e.pos.z;
     e.pos.x += moveDir.x * speed * dt;
     e.pos.z += moveDir.z * speed * dt;
@@ -1765,9 +1772,12 @@ function updateEnemy(e, dt) {
   // --- 애니메이션 (전환 디바운스: 매 프레임 reset 반복 → 바인드포즈 고정 방지) ---
   if (e.actIdle && e.actRun && !e.oneShot) {
     const wantRun = !!moveDir;
+    const wounded = e.actLimp && e.hp < (e.maxHp || ENEMY.hp) * 0.35 && e.rollT <= 0;
     const wantWalk = wantRun && e.actWalk && speed <= ENEMY.walkSpeed + 0.01; // 순찰·후퇴 보행
     const wantCrouch = !wantRun && e.state === 'combat' && e.stance === 'crouch' && !!e.actCrouch;
-    const desired = wantRun ? (wantWalk ? e.actWalk : e.actRun) : (wantCrouch ? e.actCrouch : e.actIdle);
+    const desired = wantRun
+      ? (wounded ? e.actLimp : (wantWalk ? e.actWalk : e.actRun))
+      : (wantCrouch ? e.actCrouch : e.actIdle);
     if (desired !== e.baseAct) {
       e.animSwitchT = (e.animSwitchT || 0) + dt;
       if (e.animSwitchT > 0.12) {
@@ -1789,7 +1799,8 @@ function updateEnemy(e, dt) {
       e.animSwitchT = 0;
     }
     if (e.running) {
-      if (e.baseAct === e.actWalk) e.actWalk.timeScale = Math.max(0.5, speed / 1.0); // ARDY 원속 1.0m/s
+      if (e.baseAct === e.actLimp) e.actLimp.timeScale = Math.max(0.6, speed / 0.41); // ARDY 원속 0.41m/s
+      else if (e.baseAct === e.actWalk) e.actWalk.timeScale = Math.max(0.5, speed / 1.0); // ARDY 원속 1.0m/s
       else e.actRun.timeScale = Math.max(0.5, speed / 3.4);
     }
   }
@@ -1887,7 +1898,7 @@ function damagePlayer(dmg, headshot = false) {
 function playEnemyOneShot(e, act, fade = 0.06) {
   if (!act || e.running || e.crouched || e.dead) return false;
   // 진행 중인 다른 원샷은 페이드아웃 (그 액션의 finished 는 oneShot 불일치로 무시됨)
-  for (const a of [e.actHitChest, e.actHitHead, e.actShoot, e.actReload, e.actRoll]) {
+  for (const a of [e.actHitChest, e.actHitHead, e.actShoot, e.actReload, e.actRoll, e.actAlert]) {
     if (a && a !== act && a.isRunning()) a.fadeOut(fade);
   }
   if (e.baseAct && !e.oneShot) e.baseAct.fadeOut(fade);
@@ -1917,8 +1928,8 @@ function killEnemy(e) {
   e.dead = true;
   if (e.actDeath) {
     // UAL Death01 모션캡처 재생 (Hips 이동 포함 — 바닥까지 모션이 표현)
-    for (const a of [e.actIdle, e.actRun, e.actWalk, e.actCrouch, e.actHitChest, e.actHitHead,
-      e.actShoot, e.actReload, e.actRoll]) {
+    for (const a of [e.actIdle, e.actRun, e.actWalk, e.actLimp, e.actCrouch, e.actHitChest, e.actHitHead,
+      e.actShoot, e.actReload, e.actRoll, e.actAlert]) {
       if (a && a.isRunning()) a.fadeOut(0.1);
     }
     if (e.actAimUp) e.actAimUp.setEffectiveWeight(0);
