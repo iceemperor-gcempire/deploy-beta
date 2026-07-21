@@ -162,6 +162,44 @@
   .shop-row .equipped { color: #8fd98f; font-size: 12px; letter-spacing: 1px; padding: 4px 6px; }
   @media (max-width: 900px) { #shop { width: 300px; padding: 8px 10px; } }
 
+  /* ---------- 장비 커스텀 화면 ---------- */
+  #equip-screen { z-index: 30; }
+  #equip-body { display: flex; gap: 16px; align-items: stretch; text-align: left; }
+  #equip-weapons { width: 170px; display: flex; flex-direction: column; gap: 6px; }
+  #equip-weapons button {
+    font-size: 13px; letter-spacing: 1px; padding: 9px 10px; text-align: left;
+    background: rgba(20, 30, 20, 0.6); border: 1px solid rgba(255,255,255,0.16); border-radius: 4px;
+    color: #cfd8cf; cursor: pointer;
+  }
+  #equip-weapons button.sel { border-color: #8fd98f; color: #dfe8df; background: rgba(90, 130, 80, 0.3); }
+  #equip-center { width: 320px; }
+  #equip-canvas { width: 320px; height: 220px; background: rgba(10, 16, 12, 0.7); border: 1px solid rgba(255,255,255,0.14); border-radius: 6px; }
+  #equip-stats { margin-top: 10px; font-size: 12px; color: #9fb59f; line-height: 1.9; }
+  #equip-stats b { color: #dfe8df; font-weight: normal; }
+  #equip-stats .mod { color: #8fd98f; }
+  #equip-atts { width: 300px; display: flex; flex-direction: column; gap: 8px; }
+  .att-row {
+    background: rgba(10, 16, 10, 0.6); border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 5px; padding: 9px 12px; font-size: 13px;
+  }
+  .att-row .a-name { color: #dfe8df; }
+  .att-row .a-desc { font-size: 11px; color: #7f8f7f; margin: 2px 0 7px; }
+  .att-row button {
+    font-family: inherit; font-size: 12px; padding: 4px 12px; cursor: pointer;
+    color: #dfe8df; background: rgba(90, 120, 80, 0.25); border: 1px solid #6f8f5f; border-radius: 3px;
+  }
+  .att-row button:disabled { opacity: 0.4; cursor: default; }
+  .att-row button.on { background: rgba(120, 160, 100, 0.5); border-color: #8fd98f; }
+  .att-row .incompat { font-size: 11px; color: #7f6f5f; }
+  #equip-close { margin-top: 20px; }
+  @media (max-width: 900px) {
+    #equip-body { flex-direction: column; align-items: center; gap: 10px; max-height: 74vh; overflow-y: auto; }
+    #equip-weapons { width: 300px; flex-direction: row; flex-wrap: wrap; }
+    #equip-weapons button { font-size: 11px; padding: 6px 8px; }
+    #equip-canvas { width: 280px; height: 160px; }
+    #equip-center { width: 280px; }
+  }
+
   /* ---------- 에셋 로딩 진행 바 ---------- */
   #load-progress { width: 300px; margin-bottom: 18px; }
   #load-progress .bar { height: 8px; margin-bottom: 0; }
@@ -317,6 +355,7 @@
       <div class="bar"><div id="load-fill"></div></div>
     </div>
     <button id="btn-start">레이드 시작</button>
+    <button id="btn-equip" style="margin-top:10px; font-size:13px; padding:9px 30px;">장비 커스텀</button>
     <div class="keys">
       <b>WASD</b> 이동 · <b>Shift</b> 달리기 · <b>Space</b> 점프 · <b>마우스</b> 조준/사격<br>
       <b>R</b> 재장전 · <b>E</b> 루팅/상호작용 · <b>Q</b> 치료 · <b>Tab</b> 인벤토리 · <b>1~6</b> 무기 교체
@@ -325,6 +364,19 @@
       <b>왼쪽 조이스틱</b> 이동 (끝까지 밀면 달리기) · <b>오른쪽 화면 드래그</b> 시선<br>
       <b>발사 / 조준 / 장전 / 점프</b> 버튼 · 상자 근처에서 <b>열기</b> 버튼
     </div>
+  </div>
+
+  <div class="screen" id="equip-screen">
+    <h2 style="color:#9fb59f; font-size:20px;">장비 커스텀</h2>
+    <div id="equip-body">
+      <div id="equip-weapons"></div>
+      <div id="equip-center">
+        <canvas id="equip-canvas"></canvas>
+        <div id="equip-stats"></div>
+      </div>
+      <div id="equip-atts"></div>
+    </div>
+    <button id="equip-close">닫기</button>
   </div>
 
   <div class="screen" id="death-screen">

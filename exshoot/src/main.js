@@ -72,6 +72,50 @@ const WEAPONS = {
 };
 let GUN = WEAPONS.rifle;
 
+// 무기 부착물 — 구매(전역 소유) 후 무기별 장착, 사망 시 손실 (#98)
+const ATTACHMENTS = {
+  scope: {
+    key: 'scope', name: '스코프', model: 'attScope', price: 15000,
+    desc: '조준 배율 강화 (배율 +80%)',
+    compat: ['rifle', 'smg2', 'bullpup', 'revolver'],
+  },
+  silencer: {
+    key: 'silencer', name: '소음기', model: 'attSilencer', price: 20000,
+    desc: '총성 은폐 — 사격 시 적 감지 60m → 16m',
+    compat: ['rifle', 'revolver', 'smg2', 'shotgun', 'bullpup', 'sniper'],
+  },
+  grip: {
+    key: 'grip', name: '수직 그립', model: 'attGrip', price: 10000,
+    desc: '반동 40% 감소 · 이동 탄퍼짐 50% 감소',
+    compat: ['rifle', 'smg2', 'shotgun', 'bullpup', 'sniper'],
+  },
+};
+let currentAtt = []; // 현재 장착 무기의 부착물 (equipWeapon 에서 갱신)
+
+// 부착물 메시를 총 모델(m)의 자식으로 정확히 부착 — 부모의 회전(π/2)·스케일·중심이동을
+// worldToLocal 로 역변환. size/bb 는 정규화 직후 총의 월드 치수/바운즈.
+function attachToGun(m, size, bb, attKey) {
+  const att = ATTACHMENTS[attKey];
+  const am = instantiate(att.model);
+  const alen = attKey === 'silencer' ? 0.14 : (attKey === 'scope' ? 0.09 : 0.07);
+  const asz = normalizeModel(am, alen, 0); // 회전 없이 정규화 (부모가 이미 +X→-Z 회전)
+  brightenMaterials(am, 3.2);
+  am.traverse((o) => { o.frustumCulled = false; if (o.isMesh) { o.castShadow = false; o.receiveShadow = false; } });
+  let P;
+  if (attKey === 'silencer') P = new THREE.Vector3(0, size.y * 0.25, -size.z / 2 - alen / 2 + 0.01);
+  else if (attKey === 'scope') P = new THREE.Vector3(0, bb.max.y + asz.y / 2 - 0.004, -size.z * 0.12);
+  else P = new THREE.Vector3(0, size.y * 0.25 - 0.032, -size.z * 0.3); // grip: 총열(총구 높이) 바로 아래
+  m.updateMatrixWorld(true);
+  am.position.copy(m.worldToLocal(P));
+  am.scale.multiplyScalar(1 / m.scale.x);
+  m.add(am);
+  return { am, topExtra: asz.y - 0.004 };
+}
+function attLoadout(weaponKey) {
+  const st = loadStash();
+  return ((st.attachments || {})[weaponKey] || []).filter((a) => ATTACHMENTS[a] && ATTACHMENTS[a].compat.includes(weaponKey));
+}
+
 const ITEM_TABLE = [
   { name: '볼트',            value: 1500,  w: 18 },
   { name: '붕대',            value: 3000,  w: 16, heal: 25 },
@@ -238,6 +282,9 @@ const GLB_MANIFEST = {
   smg2: 'assets/smg2.glb',
   bullpup: 'assets/bullpup.glb',
   revolver: 'assets/revolver.glb',
+  attScope: 'assets/att_scope.glb',
+  attSilencer: 'assets/att_silencer.glb',
+  attGrip: 'assets/att_grip.glb',
   buildingA: 'assets/env/industrial/building-a.glb',
   buildingE: 'assets/env/industrial/building-e.glb',
   buildingH: 'assets/env/industrial/building-h.glb',
@@ -695,6 +742,127 @@ function renderShop() {
   }));
 }
 
+// ---------- 장비 커스텀 화면 ----------
+let equipRenderer = null, equipScene = null, equipCam = null, equipModel = null, equipRAF = 0;
+let equipSel = 'rifle';
+
+function equipStatText(w, atts) {
+  const scope = atts.includes('scope'), grip = atts.includes('grip'), sil = atts.includes('silencer');
+  const fov = Math.round(w.adsFov * (scope ? 0.55 : 1));
+  const rec = (w.recoil * (grip ? 0.6 : 1)).toFixed(2);
+  return `<b>${w.name}</b> — 데미지 ${w.damageBody}/${w.damageHead} · 연사 ${(1 / w.fireInterval).toFixed(1)}발/s · 탄창 ${w.magSize}<br>` +
+    `조준 FOV ${fov}${scope ? ' <span class="mod">(스코프)</span>' : ''} · 반동 ${rec}${grip ? ' <span class="mod">(그립)</span>' : ''} · ` +
+    `사격 시 감지 ${sil ? '<span class="mod">16m (소음기)</span>' : '60m'}`;
+}
+
+function equipBuildPreview() {
+  if (!equipScene) return;
+  if (equipModel) { equipScene.remove(equipModel); equipModel = null; }
+  const w = WEAPONS[equipSel];
+  if (!ASSETS[w.model]) return;
+  const g = new THREE.Group();
+  const m = instantiate(w.model);
+  const size = normalizeModel(m, 0.62, Math.PI / 2);
+  brightenMaterials(m, 3.2);
+  const bb = new THREE.Box3().setFromObject(m);
+  const atts = attLoadout(equipSel);
+  for (const ak of atts) attachToGun(m, size, bb, ak);
+  g.add(m);
+  equipModel = g;
+  equipScene.add(g);
+}
+
+function equipRender() {
+  if (!equipRenderer) return;
+  equipModel && (equipModel.rotation.y += 0.011);
+  equipRenderer.render(equipScene, equipCam);
+  equipRAF = requestAnimationFrame(equipRender);
+}
+
+function renderEquipUI() {
+  const st = loadStash();
+  const owned = st.weapons || ['rifle'];
+  if (!owned.includes(equipSel)) equipSel = 'rifle';
+  const wl = $('equip-weapons');
+  wl.innerHTML = '';
+  for (const w of Object.values(WEAPONS)) {
+    if (!owned.includes(w.key)) continue;
+    const b = document.createElement('button');
+    b.textContent = w.name;
+    if (w.key === equipSel) b.classList.add('sel');
+    b.addEventListener('click', () => { equipSel = w.key; renderEquipUI(); });
+    wl.appendChild(b);
+  }
+  const atts = attLoadout(equipSel);
+  $('equip-stats').innerHTML = equipStatText(WEAPONS[equipSel], atts);
+  const ar = $('equip-atts');
+  ar.innerHTML = '';
+  const ownedAtt = st.attOwned || [];
+  for (const att of Object.values(ATTACHMENTS)) {
+    const row = document.createElement('div');
+    row.className = 'att-row';
+    const compat = att.compat.includes(equipSel);
+    let right;
+    if (!compat) right = '<span class="incompat">이 무기와 호환 안 됨</span>';
+    else if (!ownedAtt.includes(att.key)) {
+      right = `<button data-buyatt="${att.key}" ${(st.roubles || 0) < att.price ? 'disabled' : ''}>구매 ₽${att.price.toLocaleString('ko-KR')}</button>`;
+    } else {
+      const on = atts.includes(att.key);
+      right = `<button data-togatt="${att.key}" class="${on ? 'on' : ''}">${on ? '장착 중 — 해제' : '장착'}</button>`;
+    }
+    row.innerHTML = `<div class="a-name">${att.name}</div><div class="a-desc">${att.desc}</div>${right}`;
+    ar.appendChild(row);
+  }
+  ar.querySelectorAll('[data-buyatt]').forEach((b) => b.addEventListener('click', () => {
+    const st2 = loadStash();
+    const att = ATTACHMENTS[b.dataset.buyatt];
+    if ((st2.roubles || 0) < att.price) return;
+    st2.roubles -= att.price;
+    st2.attOwned = [...new Set([...(st2.attOwned || []), att.key])];
+    st2.attachments = st2.attachments || {};
+    st2.attachments[equipSel] = [...new Set([...(st2.attachments[equipSel] || []), att.key])];
+    saveStash(st2);
+    sfx.pickup();
+    updateMenuStash();
+    renderEquipUI();
+    equipBuildPreview();
+  }));
+  ar.querySelectorAll('[data-togatt]').forEach((b) => b.addEventListener('click', () => {
+    const st2 = loadStash();
+    st2.attachments = st2.attachments || {};
+    const cur = st2.attachments[equipSel] || [];
+    const k = b.dataset.togatt;
+    st2.attachments[equipSel] = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k];
+    saveStash(st2);
+    sfx.reload2();
+    renderEquipUI();
+    equipBuildPreview();
+  }));
+  equipBuildPreview();
+}
+
+function openEquipScreen() {
+  $('equip-screen').style.display = 'flex'; // 먼저 표시 (display:none 상태선 canvas 크기 0)
+  const c = $('equip-canvas');
+  if (!equipRenderer) {
+    equipRenderer = new THREE.WebGLRenderer({ canvas: c, antialias: true, alpha: true });
+    equipRenderer.setSize(c.clientWidth, c.clientHeight, false);
+    equipRenderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    equipRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+    equipScene = new THREE.Scene();
+    equipScene.add(new THREE.HemisphereLight(0xcfdcec, 0x54483a, 1.4));
+    const d = new THREE.DirectionalLight(0xffe0b0, 2.2);
+    d.position.set(1, 2, 1.5);
+    equipScene.add(d);
+    equipCam = new THREE.PerspectiveCamera(34, c.clientWidth / c.clientHeight, 0.01, 10);
+    equipCam.position.set(0, 0.12, 0.85);
+    equipCam.lookAt(0, 0, 0);
+  }
+  renderEquipUI();
+  cancelAnimationFrame(equipRAF);
+  equipRender();
+}
+
 // ============================================================
 // 오디오 — 프리 에셋 샘플 (Kenney CC0 / OpenGameArt) + 절차 생성 폴백
 // ============================================================
@@ -857,7 +1025,8 @@ function tone({ freq = 600, dur = 0.1, gain = 0.15, type = 'sine', slide = 0 }) 
 }
 const sfx = {
   shoot() {
-    if (!playBuf('shoot', { vol: GUN.sfxVol, rate: GUN.sfxRate, jitter: 0.04 })) {
+    const sil = currentAtt.includes('silencer');
+    if (!playBuf('shoot', { vol: GUN.sfxVol * (sil ? 0.32 : 1), rate: GUN.sfxRate * (sil ? 1.06 : 1), lp: sil ? 1600 : 0, jitter: 0.04 })) {
       noiseBurst({ dur: 0.14, freq: 1400, gain: 0.35, decay: 22 });
       tone({ freq: 160, dur: 0.07, gain: 0.25, type: 'square', slide: -120 });
     }
@@ -2205,7 +2374,7 @@ function updatePlayer(dt) {
   }
 
   // ADS FOV
-  const targetFov = player.aiming ? GUN.adsFov : (player.sprinting ? 81 : 75);
+  const targetFov = player.aiming ? GUN.adsFov * (currentAtt.includes('scope') ? 0.55 : 1) : (player.sprinting ? 81 : 75);
   camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 12);
   camera.updateProjectionMatrix();
 
@@ -2258,10 +2427,21 @@ function buildViewmodel() {
     // ADS 정렬: 총 상단 능선(가늠선)이 카메라 y=0(탄도)에 오도록 실측 (#36 방식)
     m.updateMatrixWorld(true);
     const bb = new THREE.Box3().setFromObject(m);
+    // 부착물 메시 (기본 숨김 — equipWeapon 에서 로드아웃대로 표시)
+    const atts = {};
+    let scopeExtra = 0;
+    for (const att of Object.values(ATTACHMENTS)) {
+      if (!att.compat.includes(w.key)) continue;
+      const { am, topExtra } = attachToGun(m, size, bb, att.key);
+      if (att.key === 'scope') scopeExtra = topExtra;
+      am.visible = false;
+      atts[att.key] = am;
+    }
     VIEWMODELS[w.key] = {
       model: m,
       muzzle: new THREE.Vector3(0, size.y * 0.25, -size.z / 2),
       adsPos: new THREE.Vector3(0, -bb.max.y, -0.66),
+      atts, scopeExtra,
     };
   }
   equipWeapon(GUN.key, false);
@@ -2275,6 +2455,10 @@ function equipWeapon(key, announce = true) {
   vm.model.visible = true;
   muzzleLocal.copy(vm.muzzle);
   GUN_ADS.copy(vm.adsPos);
+  // 부착물 표시 + 스코프 장착 시 가늠선(스코프 상단) 정렬 보정
+  currentAtt = attLoadout(key);
+  for (const [ak, am] of Object.entries(vm.atts || {})) am.visible = currentAtt.includes(ak);
+  if (currentAtt.includes('scope')) GUN_ADS.y -= vm.scopeExtra || 0;
   // 무기별 탄약 상태 저장/복원 (레이드 중 교체 시 유지)
   if (GUN && GUN.key !== key && weaponAmmo[GUN.key]) {
     weaponAmmo[GUN.key] = { mag: gun.mag, reserve: gun.reserve };
@@ -2391,18 +2575,19 @@ const _shootRay = new THREE.Raycaster();
 function fireShot() {
   gun.mag--;
   gun.cooldown = GUN.fireInterval;
-  gun.recoil = Math.min(1.6, gun.recoil + GUN.recoil);
+  const gripK = currentAtt.includes('grip') ? 0.6 : 1;
+  gun.recoil = Math.min(1.6, gun.recoil + GUN.recoil * gripK);
   gun.semiLatch = true; // 단발 무기는 클릭당 1발
-  player.pitch += GUN.kick + Math.random() * 0.004;
+  player.pitch += GUN.kick * gripK + Math.random() * 0.004;
   player.yaw += (Math.random() - 0.5) * 0.004;
   sfx.shoot();
-  muzzleFlashLight.intensity = 40;
-  alertEnemiesAround(player.pos, 60);
+  muzzleFlashLight.intensity = currentAtt.includes('silencer') ? 10 : 40;
+  alertEnemiesAround(player.pos, currentAtt.includes('silencer') ? 16 : 60);
 
   // 탄퍼짐
   const hSpeed = Math.hypot(player.vel.x, player.vel.z);
   let spread = player.aiming ? GUN.spreadAds : GUN.spreadHip;
-  spread += Math.min(1, hSpeed / 8) * GUN.spreadMove;
+  spread += Math.min(1, hSpeed / 8) * GUN.spreadMove * (currentAtt.includes('grip') ? 0.5 : 1);
 
   const baseDir = new THREE.Vector3();
   camera.getWorldDirection(baseDir);
@@ -2742,6 +2927,8 @@ function endRaid(result, cause) {
     stash.equipped = 'rifle';
     stash.armorDur = 0;
     stash.helmet = false;
+    stash.attOwned = [];
+    stash.attachments = {};
     saveStash(stash);
     sfx.death();
     dom.deathCause.textContent = cause || '사망했습니다.';
@@ -2901,6 +3088,17 @@ document.addEventListener('pointerlockchange', () => {
     dom.btnStart.textContent = '레이드 계속';
     dom.menu.style.display = 'flex';
   }
+});
+
+document.getElementById('btn-equip').addEventListener('click', () => {
+  audio();
+  if (!assetsReady) return;
+  openEquipScreen();
+});
+document.getElementById('equip-close').addEventListener('click', () => {
+  $('equip-screen').style.display = 'none';
+  cancelAnimationFrame(equipRAF);
+  updateMenuStash();
 });
 
 dom.btnStart.addEventListener('click', () => {
