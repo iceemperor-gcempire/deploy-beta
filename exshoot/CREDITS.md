@@ -5,6 +5,7 @@
 모든 3D 에셋은 CC0 (퍼블릭 도메인) 라이선스입니다. 표기 의무는 없으나 감사의 뜻으로 기록합니다.
 
 - Universal Animation Library (Standard) — Quaternius — https://quaternius.com/packs/universalanimationlibrary.html (CC0) — 밀리터리 액션 애니메이션(권총 경계 Idle / 조깅 Run) 소스, VRoid 리그에 리타게팅
+- ARDY — NVIDIA (https://research.nvidia.com/labs/sil/projects/ardy/, 모델 가중치 NVIDIA Open Model Agreement) — 텍스트→모션 생성으로 순찰 경계 걷기 클립 제작 (로컬 GPU 추론, scripts/assets/ardy_to_glb.py 로 리타게팅 소스 변환)
 - 적 캐릭터 (애니메 걸 4종): VRoid Studio 공식 샘플 모델 (AvatarSample D/E/F/G) — VRoid/pixiv 이 CC0 로 공개, OpenGameArt 재배포판 — https://opengameart.org/content/vroid-studio-cc0-models (CC0) — Blender 로 데시메이션·본 rename·애니메이션 리타게팅 (scripts/assets/convert_vrm_girl.py)
 - City Kit: Industrial — Kenney — https://kenney.nl/assets/city-kit-industrial (CC0)
 - Survival Kit — Kenney — https://kenney.nl/assets/survival-kit (CC0)

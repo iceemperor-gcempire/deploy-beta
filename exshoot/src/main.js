@@ -350,10 +350,11 @@ async function loadAssets() {
     const aimUpRaw = clips.find((c) => /^aimup/i.test(c.name)) || null;
     const aimDownRaw = clips.find((c) => /^aimdown/i.test(c.name)) || null;
     const aimNeutral = clips.find((c) => /^aimneutral/i.test(c.name)) || null;
+    const walkC = clips.find((c) => /^walk/i.test(c.name)) || null;
     // 리타게팅 export 시 180°(w≈0) 부근 회전의 쿼터니언 부호(±q)가 프레임 간
     // 뒤집힐 수 있음 → 보간 시 관절이 꺾임. 부호 연속성 복구.
     for (const c of [idle, run, death, hitChest, hitHead, shoot, reload,
-      crouchIdle, roll, aimUpRaw, aimDownRaw, aimNeutral]) fixQuatContinuity(c);
+      crouchIdle, roll, aimUpRaw, aimDownRaw, aimNeutral, walkC]) fixQuatContinuity(c);
     // 고저차 조준: Aim_Up/Down 을 Neutral 기준 additive 로 변환 —
     // 어떤 기본 모션 위에도 가중치로 얹을 수 있음.
     // 주의: glTF 는 상수 트랙(scale 1 등)의 accessor 를 클립 간 공유하므로
@@ -363,7 +364,7 @@ async function loadAssets() {
       if (aimUpRaw) aimUp = THREE.AnimationUtils.makeClipAdditive(aimUpRaw.clone(), 0, aimNeutral);
       if (aimDownRaw) aimDown = THREE.AnimationUtils.makeClipAdditive(aimDownRaw.clone(), 0, aimNeutral);
     }
-    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown };
+    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown, walk: walkC };
   }
 
   buildViewmodel();
@@ -1346,7 +1347,7 @@ function spawnLoot() {
 const ENEMY = {
   count: 12,
   hp: 100,
-  walkSpeed: 2.0,
+  walkSpeed: 1.4,
   runSpeed: 4.3,
   sightRange: 48,
   fovCos: Math.cos(THREE.MathUtils.degToRad(75)),
@@ -1384,6 +1385,7 @@ function makeEnemyMesh() {
   mixer.timeScale = 0.95 + Math.random() * 0.1; // 개체 간 락스텝 방지
   const actIdle = clips.idle ? mixer.clipAction(clips.idle) : null;
   const actRun = clips.run ? mixer.clipAction(clips.run) : null;
+  const actWalk = clips.walk ? mixer.clipAction(clips.walk) : null;
   // 원샷 액션 (사망/피격) — 마지막 프레임 유지, 피격은 finished 시 복귀
   const mkOnce = (clip) => {
     if (!clip) return null;
@@ -1448,7 +1450,7 @@ function makeEnemyMesh() {
   return {
     group: g, body, head, flash, model, mixer, actIdle, actRun,
     actDeath, actHitChest, actHitHead, actShoot, actReload,
-    actRoll, actCrouch, actAimUp, actAimDown,
+    actRoll, actCrouch, actAimUp, actAimDown, actWalk,
     running: false, crouched: false, baseAct: actIdle, spine,
     flinch: 0, aimBlend: 0, oneShot: null, deathDone: false,
   };
@@ -1763,15 +1765,16 @@ function updateEnemy(e, dt) {
   // --- 애니메이션 (전환 디바운스: 매 프레임 reset 반복 → 바인드포즈 고정 방지) ---
   if (e.actIdle && e.actRun && !e.oneShot) {
     const wantRun = !!moveDir;
+    const wantWalk = wantRun && e.actWalk && speed <= ENEMY.walkSpeed + 0.01; // 순찰·후퇴 보행
     const wantCrouch = !wantRun && e.state === 'combat' && e.stance === 'crouch' && !!e.actCrouch;
-    const desired = wantRun ? e.actRun : (wantCrouch ? e.actCrouch : e.actIdle);
+    const desired = wantRun ? (wantWalk ? e.actWalk : e.actRun) : (wantCrouch ? e.actCrouch : e.actIdle);
     if (desired !== e.baseAct) {
       e.animSwitchT = (e.animSwitchT || 0) + dt;
       if (e.animSwitchT > 0.12) {
         e.animSwitchT = 0;
         e.baseAct.fadeOut(0.15);
         desired.reset().fadeIn(0.15).play();
-        if (desired === e.actRun) {
+        if (desired === e.actRun || desired === e.actWalk) {
           desired.time = Math.random() * desired.getClip().duration; // 위상 분산
         }
         e.baseAct = desired;
@@ -1785,7 +1788,10 @@ function updateEnemy(e, dt) {
     } else {
       e.animSwitchT = 0;
     }
-    if (e.running) e.actRun.timeScale = Math.max(0.5, speed / 3.4);
+    if (e.running) {
+      if (e.baseAct === e.actWalk) e.actWalk.timeScale = Math.max(0.5, speed / 1.0); // ARDY 원속 1.0m/s
+      else e.actRun.timeScale = Math.max(0.5, speed / 3.4);
+    }
   }
   // --- 고저차 조준 (additive Aim_Up/Down 가중치, mixer 갱신 전에 설정) ---
   const wantAim = e.state === 'combat' ? 1 : 0;
@@ -1911,7 +1917,7 @@ function killEnemy(e) {
   e.dead = true;
   if (e.actDeath) {
     // UAL Death01 모션캡처 재생 (Hips 이동 포함 — 바닥까지 모션이 표현)
-    for (const a of [e.actIdle, e.actRun, e.actCrouch, e.actHitChest, e.actHitHead,
+    for (const a of [e.actIdle, e.actRun, e.actWalk, e.actCrouch, e.actHitChest, e.actHitHead,
       e.actShoot, e.actReload, e.actRoll]) {
       if (a && a.isRunning()) a.fadeOut(0.1);
     }
