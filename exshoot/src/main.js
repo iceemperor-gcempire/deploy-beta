@@ -34,12 +34,33 @@ const WEAPONS = {
     spreadHip: 0.022, spreadAds: 0.005, spreadMove: 0.02,
     pellets: 1, auto: true, adsFov: 55, recoil: 0.35, kick: 0.006, sfxRate: 1, sfxVol: 0.45,
   },
+  revolver: {
+    key: 'revolver', name: '리볼버', model: 'revolver', price: 12000, viewLen: 0.34,
+    fireInterval: 0.5, magSize: 6, reserveMax: 24, reloadTime: 2.8,
+    damageBody: 60, damageHead: 170, range: 120,
+    spreadHip: 0.03, spreadAds: 0.006, spreadMove: 0.025,
+    pellets: 1, auto: false, adsFov: 60, recoil: 0.7, kick: 0.012, sfxRate: 1.15, sfxVol: 0.5,
+  },
+  smg2: {
+    key: 'smg2', name: 'SMG', model: 'smg2', price: 18000, viewLen: 0.5,
+    fireInterval: 0.07, magSize: 35, reserveMax: 105, reloadTime: 1.9,
+    damageBody: 22, damageHead: 55, range: 120,
+    spreadHip: 0.03, spreadAds: 0.012, spreadMove: 0.018,
+    pellets: 1, auto: true, adsFov: 62, recoil: 0.22, kick: 0.004, sfxRate: 1.3, sfxVol: 0.38,
+  },
   shotgun: {
     key: 'shotgun', name: '펌프 샷건', model: 'shotgun', price: 34000, viewLen: 0.60,
     fireInterval: 0.85, magSize: 6, reserveMax: 30, reloadTime: 2.6,
     damageBody: 13, damageHead: 24, range: 46,
     spreadHip: 0.055, spreadAds: 0.038, spreadMove: 0.02,
     pellets: 8, auto: false, adsFov: 62, recoil: 0.9, kick: 0.02, sfxRate: 0.7, sfxVol: 0.55,
+  },
+  bullpup: {
+    key: 'bullpup', name: '불펍 소총', model: 'bullpup', price: 55000, viewLen: 0.62,
+    fireInterval: 0.09, magSize: 36, reserveMax: 108, reloadTime: 2.0,
+    damageBody: 38, damageHead: 105, range: 220,
+    spreadHip: 0.02, spreadAds: 0.004, spreadMove: 0.018,
+    pellets: 1, auto: true, adsFov: 52, recoil: 0.32, kick: 0.005, sfxRate: 1.08, sfxVol: 0.45,
   },
   sniper: {
     key: 'sniper', name: '볼트액션 저격총', model: 'sniper', price: 90000, viewLen: 0.78,
@@ -214,6 +235,9 @@ const GLB_MANIFEST = {
   smg: 'assets/smg.glb',
   shotgun: 'assets/shotgun.glb',
   sniper: 'assets/sniper.glb',
+  smg2: 'assets/smg2.glb',
+  bullpup: 'assets/bullpup.glb',
+  revolver: 'assets/revolver.glb',
   buildingA: 'assets/env/industrial/building-a.glb',
   buildingE: 'assets/env/industrial/building-e.glb',
   buildingH: 'assets/env/industrial/building-h.glb',
@@ -589,7 +613,10 @@ function updateMenuStash() {
 // ---------- 장비 상점 (메뉴) ----------
 const WEAPON_DESC = {
   rifle: '자동 · 표준 탄퍼짐 · 기본 지급',
+  revolver: '단발 고데미지 · 6발 · 입문 업그레이드',
+  smg2: '고연사 · 저데미지 · 근중거리',
   shotgun: '8펠릿 · 근거리 고화력 · 단발',
+  bullpup: '자동 · 고성능 만능형',
   sniper: '고데미지 · 강줌 · 볼트액션',
 };
 function renderShop() {
@@ -2935,9 +2962,10 @@ document.addEventListener('keydown', (e) => {
     }
   }
   if (state.phase !== 'raid' || state.paused) return;
-  if (e.code === 'Digit1') switchWeapon(0);
-  if (e.code === 'Digit2') switchWeapon(1);
-  if (e.code === 'Digit3') switchWeapon(2);
+  if (e.code.startsWith('Digit')) {
+    const n = +e.code.slice(5);
+    if (n >= 1 && n <= 6) switchWeapon(n - 1);
+  }
   if (e.code === 'KeyR') startReload();
   if (e.code === 'KeyQ') useHeal();
   if (e.code === 'KeyE') {
