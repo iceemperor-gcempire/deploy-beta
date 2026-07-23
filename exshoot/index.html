@@ -20,6 +20,21 @@
     background: rgba(220, 235, 220, 0.9);
     box-shadow: 0 0 3px rgba(0,0,0,0.8);
   }
+  /* 스코프 조준 화면 (#104): 원형 렌즈 마스크 + 십자 레티클 */
+  #scope-overlay {
+    position: absolute; inset: 0; display: none; pointer-events: none;
+    --r: 44vmin;
+    background:
+      linear-gradient(to right, transparent calc(50% - 0.6px), rgba(10,12,10,0.92) calc(50% - 0.6px), rgba(10,12,10,0.92) calc(50% + 0.6px), transparent calc(50% + 0.6px)),
+      linear-gradient(to bottom, transparent calc(50% - 0.6px), rgba(10,12,10,0.92) calc(50% - 0.6px), rgba(10,12,10,0.92) calc(50% + 0.6px), transparent calc(50% + 0.6px)),
+      radial-gradient(circle at 50% 50%, transparent calc(var(--r) * 0.62), rgba(0,0,0,0.28) calc(var(--r) * 0.94), rgba(0,0,0,0.55) var(--r), transparent var(--r)),
+      radial-gradient(circle at 50% 50%, transparent var(--r), #05060a calc(var(--r) + 2px));
+  }
+  #scope-overlay::after { /* 렌즈 테두리 링 */
+    content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: calc(var(--r) * 2); height: calc(var(--r) * 2); border-radius: 50%;
+    border: 3px solid #0a0c12; box-sizing: border-box;
+  }
   #hitmarker {
     position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
     width: 22px; height: 22px; opacity: 0; transition: opacity 0.25s;
@@ -285,6 +300,7 @@
     <div id="damage-vignette"></div>
     <div id="lowhp-vignette"></div>
     <div id="crosshair"></div>
+    <div id="scope-overlay"></div>
     <div id="hitmarker"></div>
 
     <div id="topbar">

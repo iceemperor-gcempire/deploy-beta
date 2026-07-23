@@ -67,7 +67,7 @@ const WEAPONS = {
     fireInterval: 1.5, magSize: 5, reserveMax: 20, reloadTime: 2.9,
     damageBody: 110, damageHead: 260, range: 400,
     spreadHip: 0.05, spreadAds: 0.0012, spreadMove: 0.035,
-    pellets: 1, auto: false, adsFov: 28, recoil: 1.1, kick: 0.016, sfxRate: 0.82, sfxVol: 0.55,
+    pellets: 1, auto: false, adsFov: 18, recoil: 1.1, kick: 0.016, sfxRate: 0.82, sfxVol: 0.55,
   },
 };
 let GUN = WEAPONS.rifle;
@@ -97,7 +97,7 @@ let currentAtt = []; // 현재 장착 무기의 부착물 (equipWeapon 에서 �
 function attachToGun(m, size, bb, attKey) {
   const att = ATTACHMENTS[attKey];
   const am = instantiate(att.model);
-  const alen = attKey === 'silencer' ? 0.14 : (attKey === 'scope' ? 0.09 : 0.07);
+  const alen = attKey === 'silencer' ? 0.14 : (attKey === 'scope' ? 0.13 : 0.07); // 스코프 0.09→0.13 (#104 리얼 총기 비율)
   const asz = normalizeModel(am, alen, 0); // 회전 없이 정규화 (부모가 이미 +X→-Z 회전)
   brightenMaterials(am, 3.2);
   am.traverse((o) => { o.frustumCulled = false; if (o.isMesh) { o.castShadow = false; o.receiveShadow = false; } });
@@ -144,6 +144,7 @@ const dom = {
   menuStash: $('menu-stash'), btnStart: $('btn-start'),
   deathCause: $('death-cause'), deathLoot: $('death-loot'),
   extractStats: $('extract-stats'), extractLoot: $('extract-loot'),
+  scopeOverlay: $('scope-overlay'),
 };
 
 // ---------- 모바일 감지 ----------
@@ -2506,6 +2507,8 @@ camera.add(muzzleFlashLight);
 muzzleFlashLight.position.set(0.22, -0.18, -0.9);
 
 const GUN_HIP = new THREE.Vector3(0.27, -0.24, -0.58);
+let scopeHold = 0;   // 스코프 ADS 유지 시간 (#104)
+let scopeShown = false;
 // ADS 위치는 무기별로 equipWeapon 에서 실측 갱신 (#36 정렬 방식)
 const GUN_ADS = new THREE.Vector3(0, -0.126, -0.66);
 
@@ -2534,6 +2537,17 @@ function updateGun(dt) {
   // 뷰모델 위치 보간 (ADS/힙)
   const target = player.aiming ? GUN_ADS : GUN_HIP;
   gunGroup.position.lerp(target, Math.min(1, dt * 14));
+
+  // 스코프 조준 화면 (#104): 스코프 장착 무기·저격총은 조준이 자리잡으면
+  // 뷰모델이 시야를 가리므로 숨기고 오버레이(원형 마스크+레티클)로 전환
+  const scopeCapable = currentAtt.includes('scope') || GUN.key === 'sniper';
+  scopeHold = player.aiming && scopeCapable && state.phase === 'raid' ? scopeHold + dt : 0;
+  const scopedNow = scopeHold > 0.12;
+  if (scopedNow !== scopeShown) {
+    scopeShown = scopedNow;
+    dom.scopeOverlay.style.display = scopedNow ? 'block' : 'none';
+    gunGroup.visible = !scopedNow;
+  }
 
   // 스프린트 자세 (총구 내림) 블렌드
   const hSpeed = Math.hypot(player.vel.x, player.vel.z);
@@ -3195,8 +3209,8 @@ document.addEventListener('keyup', (e) => {
 // HUD 갱신
 // ============================================================
 function updateHUD() {
-  // ADS 중엔 가늠자로 조준 (크로스헤어 숨김) — 저격총은 스코프가 중앙을 가려 유지
-  document.getElementById('crosshair').style.display = player.aiming && GUN.key !== 'sniper' ? 'none' : 'block';
+  // ADS 중엔 가늠자(또는 스코프 오버레이 레티클)로 조준 — 크로스헤어 숨김
+  document.getElementById('crosshair').style.display = player.aiming ? 'none' : 'block';
   dom.hpFill.style.width = `${player.hp}%`;
   dom.stamFill.style.width = `${player.stamina}%`;
   const hasArmor = player.armorDur > 0 || player.helmet;
