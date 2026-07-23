@@ -28,7 +28,7 @@ const PLAYER = {
 // 무기 테이블 — GUN 은 현재 장착 무기를 가리킴 (equipWeapon 으로 교체)
 const WEAPONS = {
   rifle: {
-    key: 'rifle', name: 'SKS 소총', model: 'rifle', price: 0, viewLen: 0.62,
+    key: 'rifle', name: 'AK 소총', model: 'rifle', price: 0, viewLen: 0.62,
     fireInterval: 0.11, magSize: 30, reserveMax: 90, reloadTime: 2.2,
     damageBody: 34, damageHead: 95, range: 200,
     spreadHip: 0.022, spreadAds: 0.005, spreadMove: 0.02,
@@ -854,6 +854,15 @@ function openEquipScreen() {
     const d = new THREE.DirectionalLight(0xffe0b0, 2.2);
     d.position.set(1, 2, 1.5);
     equipScene.add(d);
+    // 리얼 PBR 총기(#101)는 환경맵 없이는 금속면이 검게 나옴 — 하늘 IBL 별도 생성 (renderer 별 GL 컨텍스트라 공유 불가)
+    {
+      const pm = new THREE.PMREMGenerator(equipRenderer);
+      const es = new THREE.Scene();
+      es.add(new THREE.Mesh(new THREE.SphereGeometry(10, 24, 12), skyMat));
+      equipScene.environment = pm.fromScene(es, 0.04).texture;
+      equipScene.environmentIntensity = 0.55;
+      pm.dispose();
+    }
     equipCam = new THREE.PerspectiveCamera(34, c.clientWidth / c.clientHeight, 0.01, 10);
     equipCam.position.set(0, 0.12, 0.85);
     equipCam.lookAt(0, 0, 0);
@@ -2395,7 +2404,12 @@ function brightenMaterials(model, factor) {
   model.traverse((o) => {
     if (o.isMesh && o.material && !seen.has(o.material)) {
       o.material = o.material.clone();
-      o.material.color.multiplyScalar(factor);
+      if (o.material.metalnessMap) {
+        // 리얼 PBR 총기(#101): 색 곱은 과노출 — 환경 반사만 보강 (scene.environmentIntensity 0.22 보상)
+        o.material.envMapIntensity = 1.0;
+      } else {
+        o.material.color.multiplyScalar(factor);
+      }
       seen.add(o.material);
     }
   });

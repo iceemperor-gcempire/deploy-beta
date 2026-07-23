@@ -13,6 +13,8 @@
 - Blaster Kit — Kenney — https://kenney.nl/assets/blaster-kit (CC0)
 - 50 Lowpoly Guns — Quaternius — https://quaternius.itch.io/50-lowpoly-guns (CC0)
 - Car Kit — Kenney — https://kenney.nl/assets/car-kit (CC0)
+- Free CC0 Guns & Explosives Pack — 3DModelsCC0 — https://3dmodelscc0.itch.io/free-cc0-guns-explosives-pack (CC0) — AK-47(소총)/M3 그리스건(SMG)/펌프 샷건/볼트액션 저격총 뷰모델 (FBX+2K PBR → 1K 다운스케일 GLB, scripts/assets/convert_gun_fbx.py)
+- Detective Special Revolver — OpenGameArt — https://opengameart.org/content/detective-special-revolver (CC0) — 리볼버 뷰모델
 
 ## 텍스처
 
