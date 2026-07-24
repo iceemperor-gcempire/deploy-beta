@@ -266,6 +266,7 @@ addEventListener('resize', () => {
 // ============================================================
 const ASSETS = {};   // key → gltf
 const GROUND_TEX = {}; // ground/gravel 컬러맵 (없으면 절차 생성 폴백)
+const BUILD_TEX = {};  // 건축 PBR 텍스처 (#107, ambientCG CC0) — key: { col, nrm }
 const CHAR_CLIPS = {}; // key(girl*) → { idle, run, death, hitChest, hitHead }
 // VRoid CC0 샘플 (OpenGameArt) → convert_vrm_girl.py 변환. 개체마다 랜덤 선택
 const GIRL_KEYS = ['girlA', 'girlB', 'girlC', 'girlD'];
@@ -286,6 +287,10 @@ const GLB_MANIFEST = {
   attScope: 'assets/att_scope.glb',
   attSilencer: 'assets/att_silencer.glb',
   attGrip: 'assets/att_grip.glb',
+  propDumpster: 'assets/env/city/prop_dumpster.glb',
+  propAcunit: 'assets/env/city/prop_acunit.glb',
+  propWatertower: 'assets/env/city/prop_watertower.glb',
+  propBench: 'assets/env/city/prop_bench.glb',
   buildingA: 'assets/env/industrial/building-a.glb',
   buildingE: 'assets/env/industrial/building-e.glb',
   buildingH: 'assets/env/industrial/building-h.glb',
@@ -405,6 +410,23 @@ async function loadAssets() {
       GROUND_TEX[key] = t;
     } catch { /* 폴백 */ }
   }));
+  // 건축 PBR 텍스처 (#107) — 실패 시 해당 재질만 단색 폴백
+  for (const key of ['brick', 'plaster', 'rooftile', 'corrugated', 'woodfloor', 'concrete']) {
+    jobs.push((async () => {
+      try {
+        const [col, nrm] = await Promise.all([
+          loadTex(`assets/textures/${key}_col.jpg`),
+          loadTex(`assets/textures/${key}_nrm.jpg`),
+        ]);
+        for (const t of [col, nrm]) {
+          t.wrapS = t.wrapT = THREE.RepeatWrapping;
+          t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+        }
+        col.colorSpace = THREE.SRGBColorSpace; // 노멀맵은 linear 유지
+        BUILD_TEX[key] = { col, nrm };
+      } catch { /* 폴백 */ }
+    })());
+  }
   await Promise.all(jobs);
 
   // UAL 리타게팅 클립은 클린 루프라 트리밍 불필요
@@ -484,6 +506,8 @@ const FLATTENS = [
   { x: 16, z: -6, hw: 26, hd: 21 },   // 컨테이너 야적장
   { x: 32, z: 34, hw: 19, hd: 16 },   // buildingA 앞마당
   { x: -30, z: -20, hw: 22, hd: 17 }, // 중앙 창고
+  { x: -58, z: 4, hw: 9, hd: 8 },     // 리얼 주택 A (#107)
+  { x: -47, z: 16, hw: 9, hd: 8 },    // 리얼 주택 B
   ...[
     [30, 32, 12], [44, -32, 10], [-48, 42, 9], [8, 55, 11], [-62, -56, 11],
     [58, 62, 9], [-44, -28, 7], [-10, -66, 10], [66, -12, 9], [-34, 64, 10],
@@ -998,6 +1022,8 @@ function ambientStop() {
 // 실내 구역 (사무동 / 게스트하우스 1층 / 중앙 창고) — 리버브·바람 덕킹용
 const INDOOR_RECTS = [
   { x: -14, z: -32, hw: 6, hd: 4.5 },
+  { x: -58, z: 4, hw: 4.3, hd: 3.3 },  // 리얼 주택 A (#107)
+  { x: -47, z: 16, hw: 4.3, hd: 3.3 }, // 리얼 주택 B
   { x: 56, z: 44, hw: 5, hd: 4 },
   { x: -28, z: -18, hw: 13, hd: 7.5 },
 ];
@@ -1114,6 +1140,53 @@ const MAT = {
   corpse: new THREE.MeshStandardMaterial({ color: 0x4d4a45, roughness: 1.0 }),
 };
 
+// ── 건축 PBR 재질 (#107): BoxGeometry UV 를 월드 미터로 재기록 + repeat=1/타일크기 ──
+// [colorTint, roughness, 타일 크기 m, 폴백 MAT]
+const TEXMAT_DEF = {
+  brick: [0xb8a898, 0.92, 2.4, 'brick'],
+  plaster: [0xcfc8ba, 0.95, 2.8, 'concrete'],
+  rooftile: [0xcabcb0, 0.85, 1.9, 'roof'],
+  corrugated: [0xa8a8a8, 0.6, 1.8, 'metalBlue'],
+  woodfloor: [0xb8a488, 0.85, 2.2, 'wood'],
+  concrete: [0xb0aca0, 0.95, 2.6, 'concrete'],
+};
+const TEXMAT = {};
+function buildTexMats() {
+  for (const [key, [tint, rough, tile, fb]] of Object.entries(TEXMAT_DEF)) {
+    if (!BUILD_TEX[key]) { TEXMAT[key] = MAT[fb]; continue; }
+    const col = BUILD_TEX[key].col.clone();
+    const nrm = BUILD_TEX[key].nrm.clone();
+    col.needsUpdate = nrm.needsUpdate = true;
+    col.repeat.set(1 / tile, 1 / tile);
+    nrm.repeat.set(1 / tile, 1 / tile);
+    const m = new THREE.MeshStandardMaterial({ map: col, normalMap: nrm, color: tint, roughness: rough });
+    m.userData.worldUV = true;
+    TEXMAT[key] = m;
+  }
+}
+function matOf(mat) { return typeof mat === 'string' ? (TEXMAT[mat] || MAT.concrete) : mat; }
+
+// BoxGeometry UV 를 면별 월드 치수(미터)로 — 모든 면 균일 텍셀 밀도
+function uvWorldBox(geo, w, h, d, cx = 0, cy = 0, cz = 0) {
+  // 면별 [u치수, v치수, u월드오프셋, v월드오프셋] — 분할 벽 세그먼트 간 패턴 연속
+  const dims = [
+    [d, h, cz - d / 2, cy - h / 2], // +x
+    [d, h, cz - d / 2, cy - h / 2], // -x
+    [w, d, cx - w / 2, cz - d / 2], // +y
+    [w, d, cx - w / 2, cz - d / 2], // -y
+    [w, h, cx - w / 2, cy - h / 2], // +z
+    [w, h, cx - w / 2, cy - h / 2], // -z
+  ];
+  const uv = geo.attributes.uv;
+  for (let f = 0; f < 6; f++) {
+    const [du, dv, ou, ov] = dims[f];
+    for (let i = f * 4; i < f * 4 + 4; i++) {
+      uv.setXY(i, uv.getX(i) * du + ou, uv.getY(i) * dv + ov);
+    }
+  }
+  uv.needsUpdate = true;
+}
+
 function makeGroundTexture() {
   const c = document.createElement('canvas'); c.width = c.height = 512;
   const g = c.getContext('2d');
@@ -1131,8 +1204,12 @@ function makeGroundTexture() {
 }
 
 // 정적 장애물 박스 하나 추가 (mesh + collider + LOS 차단)
+// mat 에 문자열 키('brick' 등)를 주면 월드 UV PBR 재질 (#107)
 function addBox(cx, cy, cz, w, h, d, mat, { collide = true, block = true, shadow = true } = {}) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  mat = matOf(mat);
+  const geo = new THREE.BoxGeometry(w, h, d);
+  if (mat.userData && mat.userData.worldUV) uvWorldBox(geo, w, h, d, cx, cy, cz);
+  const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(cx, cy, cz);
   mesh.castShadow = shadow; mesh.receiveShadow = true;
   scene.add(mesh);
@@ -1203,7 +1280,81 @@ function addContainer(cx, cz, rot90, mat) {
   addBox(cx, terrainH(cx, cz) + 1.3, cz, w, 2.6, d, mat);
 }
 
+// ── 리얼 주택 (#107): 절차 생성 골조 + ambientCG PBR 재질 ──
+// 남쪽 현관문 + 동쪽 뒷문, 북·서 창문 (사격 가능), 박공지붕 + 굴뚝, 실내 1룸
+function addHouse(hx, hz, { wall = 'brick' } = {}) {
+  const W = 9.2, D = 7.2, H = 2.9, t = 0.35;
+  const a = (26 * Math.PI) / 180;       // 지붕 경사
+  const halfD = D / 2 + 0.5;            // 처마 내밈 포함
+  const rise = Math.tan(a) * (D / 2);
+
+  // 기초 플린스 (실내 바닥 높이 0.4 — 문지방 스텝업)
+  addBox(hx, 0.15, hz, W + 0.5, 0.5, D + 0.5, 'concrete');
+  addBox(hx, 0.37, hz, W - 0.6, 0.06, D - 0.6, 'woodfloor', { collide: false, block: false, shadow: false });
+
+  // 벽: 남 현관 / 동 뒷문 / 북 창2 / 서 창1
+  addWallWithDoor(hx, hz + D / 2, W, H, 'x', wall, 1.6, 1.2);
+  addWallWithDoor(hx + W / 2, hz, D, H, 'z', wall, -1.6, 1.1);
+  const winN = [{ at: -2.4, w: 1.5 }, { at: 1.8, w: 1.5 }];
+  const winW = [{ at: 0.4, w: 1.5 }];
+  addWindowWall(hx, hz - D / 2, W, H, 'x', wall, winN);
+  addWindowWall(hx - W / 2, hz, D, H, 'z', wall, winW);
+
+  // 창턱/상인방 트림 (목재) — 디테일업
+  for (const o of winN) {
+    addBox(hx + o.at, 0.97, hz - D / 2, o.w + 0.34, 0.1, t + 0.16, MAT.woodDark, { collide: false, block: false });
+    addBox(hx + o.at, 2.03, hz - D / 2, o.w + 0.34, 0.1, t + 0.16, MAT.woodDark, { collide: false, block: false });
+  }
+  for (const o of winW) {
+    addBox(hx - W / 2, 0.97, hz + o.at, t + 0.16, 0.1, o.w + 0.34, MAT.woodDark, { collide: false, block: false });
+    addBox(hx - W / 2, 2.03, hz + o.at, t + 0.16, 0.1, o.w + 0.34, MAT.woodDark, { collide: false, block: false });
+  }
+
+  // 현관/뒷문 계단 + 문틀
+  addBox(hx + 1.6, 0.12, hz + D / 2 + 0.55, 1.7, 0.24, 0.8, 'concrete');
+  addBox(hx + W / 2 + 0.55, 0.12, hz - 1.6, 0.8, 0.24, 1.6, 'concrete');
+  addBox(hx + 1.6, 2.42, hz + D / 2, 1.5, 0.12, t + 0.14, MAT.woodDark, { collide: false, block: false });
+
+  // 박공지붕 (기와) — 도달 불가라 충돌 없음, 시야/총알은 차단
+  const slabW = halfD / Math.cos(a);
+  for (const s of [1, -1]) {
+    const geo = new THREE.BoxGeometry(W + 0.9, 0.12, slabW);
+    uvWorldBox(geo, W + 0.9, 0.12, slabW);
+    const mesh = new THREE.Mesh(geo, matOf('rooftile'));
+    mesh.position.set(hx, H + rise / 2 + 0.02, hz + (s * halfD) / 2);
+    mesh.rotation.x = s * a;
+    mesh.castShadow = mesh.receiveShadow = true;
+    scene.add(mesh);
+    obstacleMeshes.push(mesh);
+  }
+  addBox(hx, H + rise + 0.05, hz, W + 0.9, 0.12, 0.3, MAT.roof, { collide: false });
+
+  // 박공 삼각벽 (동/서)
+  for (const s of [1, -1]) {
+    const shape = new THREE.Shape();
+    shape.moveTo(-D / 2, 0); shape.lineTo(D / 2, 0); shape.lineTo(0, rise);
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false });
+    const mesh = new THREE.Mesh(geo, matOf(wall));
+    mesh.rotation.y = Math.PI / 2; // shape u축 → 월드 z, 압출 → 월드 +x
+    mesh.position.set(hx + (s * W) / 2 - t / 2, H, hz);
+    mesh.castShadow = mesh.receiveShadow = true;
+    scene.add(mesh);
+    obstacleMeshes.push(mesh);
+  }
+
+  // 천장 (실내에서 지붕 안 보이게) + 굴뚝
+  addBox(hx, H + 0.05, hz, W - 0.3, 0.1, D - 0.3, 'plaster', { collide: false });
+  const chH = rise + 1.4;
+  addBox(hx - W * 0.28, H - 0.3 + chH / 2, hz - D * 0.14, 0.75, chH, 0.75, 'brick', { collide: false });
+
+  // 실내 가구 (탁자) — 루팅 상자는 LOOT_SPOTS 에서 스폰
+  addBox(hx - 2.2, 1.11, hz - 1.2, 1.4, 0.08, 0.8, MAT.wood);
+  addBox(hx - 2.75, 0.75, hz - 1.2, 0.08, 0.66, 0.7, MAT.woodDark, { block: false });
+  addBox(hx - 1.65, 0.75, hz - 1.2, 0.08, 0.66, 0.7, MAT.woodDark, { block: false });
+}
+
 function buildStaticMap() {
+  buildTexMats(); // 건축 PBR 재질 (#107) — 텍스처 로드 후 1회
   // 지면 (ambientCG Ground048 — 없으면 절차 생성)
   let groundMat;
   if (GROUND_TEX.ground) {
@@ -1265,23 +1416,38 @@ function buildStaticMap() {
 
   // 외곽 콘크리트 벽
   const W = WORLD_HALF;
-  addBox(0, 2.5, -W, W * 2 + 2, 5, 1, MAT.concreteDark);
-  addBox(0, 2.5, W, W * 2 + 2, 5, 1, MAT.concreteDark);
-  addBox(-W, 2.5, 0, 1, 5, W * 2 + 2, MAT.concreteDark);
-  addBox(W, 2.5, 0, 1, 5, W * 2 + 2, MAT.concreteDark);
+  addBox(0, 2.5, -W, W * 2 + 2, 5, 1, 'concrete');
+  addBox(0, 2.5, W, W * 2 + 2, 5, 1, 'concrete');
+  addBox(-W, 2.5, 0, 1, 5, W * 2 + 2, 'concrete');
+  addBox(W, 2.5, 0, 1, 5, W * 2 + 2, 'concrete');
 
   // 중앙 창고 (진입 가능 — 절차 생성 유지)
-  addBuilding(-28, -18, 26, 15, 5.5, MAT.metalGreen);
+  addBuilding(-28, -18, 26, 15, 5.5, 'corrugated');
+
+  // 리얼 주택 단지 (#107): 벽돌/플라스터 2동 + 시티 소품 (3DModelsCC0)
+  addHouse(-58, 4, { wall: 'brick' });
+  addHouse(-47, 16, { wall: 'plaster' });
+  placeModel('propDumpster', -63.8, 8.5, { height: 1.3, rotY: Math.PI / 2 });
+  placeModel('propAcunit', -55.2, -0.1, { height: 0.75, rotY: Math.PI });
+  placeModel('propAcunit', -50.2, 12.2, { height: 0.75, rotY: -Math.PI / 2 });
+  placeModel('propBench', -44.2, 20.4, { height: 0.85, rotY: Math.PI });
+  placeModel('propBench', -11.5, -26.5, { height: 0.85, rotY: Math.PI }); // 사무동 앞 (벽에서 이격)
+  placeModel('propDumpster', -6.6, -35.8, { height: 1.3, rotY: 0.2 });    // 사무동 옆
+  { // 중앙 창고 옥상 급수탑 — 지붕 위 수동 배치 (도달 불가, 실루엣용)
+    const wt = placeModel('propWatertower', -24, -16, { height: 4.6, collide: false });
+    wt.position.y += 5.8;
+    wt.updateMatrixWorld(true);
+  }
 
   // 사무동 (진입 가능 2룸: 사무실 + 창고방) — 창문으로 사격 가능
   {
     const ox = -14, oz = -32, W2 = 12, D2 = 9, H2 = 3.0;
     // 북쪽: 정문 / 동쪽: 측면 출입구
-    addWallWithDoor(ox, oz + D2 / 2, W2, H2, 'x', MAT.brick, -3);
-    addWallWithDoor(ox + W2 / 2, oz, D2, H2, 'z', MAT.brick, 1.5);
+    addWallWithDoor(ox, oz + D2 / 2, W2, H2, 'x', 'brick', -3);
+    addWallWithDoor(ox + W2 / 2, oz, D2, H2, 'z', 'brick', 1.5);
     // 남쪽: 창 2개 / 서쪽: 창 1개
-    addWindowWall(ox, oz - D2 / 2, W2, H2, 'x', MAT.brick, [{ at: -3, w: 1.8 }, { at: 2.5, w: 1.8 }]);
-    addWindowWall(ox - W2 / 2, oz, D2, H2, 'z', MAT.brick, [{ at: 0.5, w: 1.8 }]);
+    addWindowWall(ox, oz - D2 / 2, W2, H2, 'x', 'brick', [{ at: -3, w: 1.8 }, { at: 2.5, w: 1.8 }]);
+    addWindowWall(ox - W2 / 2, oz, D2, H2, 'z', 'brick', [{ at: 0.5, w: 1.8 }]);
     // 내부 칸막이 (문 있는 벽) — 서쪽 사무실 / 동쪽 창고방
     addWallWithDoor(ox - 3 + W2 / 2 - 2, oz, D2, H2, 'z', MAT.woodDark, -2);
     // 평지붕 + 바닥 슬래브
@@ -1521,6 +1687,7 @@ const LOOT_SPOTS = [
   [16, -11], [-11, 25], [57, 13], [-57, -34], // 컨테이너 사이
   [0, 0], [-65, 60], [65, -55], [70, 68], [-70, -68], [40, 8],
   [-17.5, -33.5], [-10.5, -30],  // 사무동 실내
+  [-59, 2.5, 0.4], [-46, 14.5, 0.4], // 리얼 주택 실내 (#107)
   [24, -58],                     // 감시탑 아래
   [58, 45.5, 3.2],               // 게스트하우스 2층
 ];

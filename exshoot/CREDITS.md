@@ -15,10 +15,12 @@
 - Car Kit — Kenney — https://kenney.nl/assets/car-kit (CC0)
 - Free CC0 Guns & Explosives Pack — 3DModelsCC0 — https://3dmodelscc0.itch.io/free-cc0-guns-explosives-pack (CC0) — AK-47(소총)/M3 그리스건(SMG)/펌프 샷건/볼트액션 저격총 뷰모델 (FBX+2K PBR → 1K 다운스케일 GLB, scripts/assets/convert_gun_fbx.py)
 - Detective Special Revolver — OpenGameArt — https://opengameart.org/content/detective-special-revolver (CC0) — 리볼버 뷰모델
+- City Environment Pack — 3DModelsCC0 — https://3dmodelscc0.itch.io/city-environment-pack (CC0) — 쓰레기통/에어컨 실외기/옥상 급수탑/벤치 소품
 
 ## 텍스처
 
 - Ground048, Gravel023 — ambientCG — https://ambientcg.com (CC0) — 지면/자갈 마당 컬러맵 (1K JPG 재압축)
+- Bricks097, PaintedPlaster017, RoofingTiles012A, CorrugatedSteel007A, WoodFloor043, Concrete034 — ambientCG — https://ambientcg.com (CC0) — 리얼 주택/건물 PBR (Color+NormalGL 1K, #107)
 
 FBX → GLB 변환: Blender 5.1 headless (총기, 캐릭터+애니메이션).
 
