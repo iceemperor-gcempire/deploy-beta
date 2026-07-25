@@ -156,6 +156,49 @@
     pointer-events: auto; text-align: center;
   }
   .screen h1 { font-size: 44px; letter-spacing: 10px; color: #dfe8df; margin-bottom: 6px; font-weight: 800; }
+  /* ---------- 타이틀 화면 (#113) ---------- */
+  #menu-screen {
+    background:
+      linear-gradient(to bottom, rgba(5,8,5,0.30) 0%, rgba(5,8,5,0.16) 34%, rgba(5,8,5,0.62) 72%, rgba(4,6,4,0.88) 100%),
+      #0a0c0a url('assets/textures/title.jpg') center / cover no-repeat;
+    justify-content: flex-end; gap: 0;
+  }
+  #menu-top { margin: 7vh auto 0; }
+  #menu-screen h1 {
+    font-size: clamp(44px, 7vw, 64px); letter-spacing: 16px; text-indent: 16px;
+    color: #eef4ec; text-shadow: 0 2px 22px rgba(0,0,0,0.85), 0 0 46px rgba(81,255,122,0.18);
+    margin-bottom: 4px;
+  }
+  #menu-screen .sub { text-shadow: 0 1px 8px rgba(0,0,0,0.9); margin-bottom: 10px; }
+  #menu-screen .stash { text-shadow: 0 1px 8px rgba(0,0,0,0.9); margin-bottom: 0; }
+  #menu-cards {
+    display: flex; gap: 14px; justify-content: center; align-items: stretch;
+    margin: auto 0 16px; flex-wrap: wrap; padding: 0 16px;
+  }
+  .mcard {
+    display: flex; flex-direction: column; gap: 7px; width: 220px;
+    background: rgba(8, 13, 8, 0.72); border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 4px; padding: 16px 14px 12px;
+    backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+  }
+  .mcard button { width: 100%; padding: 12px 8px; font-size: 15px; }
+  .mcard .mdesc { font-size: 11.5px; color: #93a393; letter-spacing: 0.5px; }
+  .mcard.primary { border-color: rgba(81, 255, 122, 0.45); }
+  .mcard.primary button {
+    border-color: #51c96f; background: rgba(60, 140, 80, 0.32); font-weight: 700;
+  }
+  .mcard.primary button:hover:not(:disabled) { background: rgba(80, 180, 100, 0.45); }
+  #menu-screen .keys, #menu-screen .touch-keys { margin-bottom: 14px; }
+  #menu-screen #load-progress { margin: 14px auto 0; }
+  @media (max-height: 480px), (max-width: 700px) {
+    #menu-top { margin-top: 3vh; }
+    #menu-screen h1 { font-size: 34px; letter-spacing: 10px; text-indent: 10px; }
+    .mcard { width: 172px; padding: 10px 10px 8px; }
+    .mcard button { padding: 9px 6px; font-size: 13px; letter-spacing: 2px; }
+    .mcard .mdesc { font-size: 10px; }
+  }
+  #shop-screen #shop { max-height: 62vh; overflow-y: auto; }
+  #shop-screen, #equip-screen { background: #060906; }
   .screen h2 { font-size: 26px; letter-spacing: 4px; margin-bottom: 18px; }
   .screen .sub { font-size: 14px; color: #93a393; margin-bottom: 26px; line-height: 1.9; }
   .screen .stash { font-size: 15px; color: #d9c86a; margin-bottom: 26px; }
@@ -374,27 +417,43 @@
   </div>
 
   <div class="screen" id="menu-screen" style="display:flex">
-    <h1>EXSHOOT</h1>
-    <div class="sub">
-      스캐브를 뚫고 전리품을 챙긴 뒤, 탈출 지점까지 살아서 도달하십시오.<br>
-      사망하거나 시간이 초과되면 이번 레이드의 전리품을 전부 잃습니다.
+    <div id="menu-top">
+      <h1>EXSHOOT</h1>
+      <div class="sub">스캐브를 뚫고 루팅한 뒤, 살아서 탈출하십시오 — 죽으면 전부 잃습니다.</div>
+      <div class="stash" id="menu-stash"></div>
     </div>
-    <div class="stash" id="menu-stash"></div>
-    <div id="shop"></div>
     <div id="load-progress">
       <div id="load-label">에셋 로딩 중...</div>
       <div class="bar"><div id="load-fill"></div></div>
     </div>
-    <button id="btn-start">레이드 시작</button>
-    <button id="btn-equip" style="margin-top:10px; font-size:13px; padding:9px 30px;">장비 커스텀</button>
+    <div id="menu-cards">
+      <div class="mcard primary">
+        <button id="btn-start">레이드 시작</button>
+        <div class="mdesc">전장에 진입 — 루팅 · 교전 · 탈출</div>
+      </div>
+      <div class="mcard">
+        <button id="btn-equip">장비 커스텀</button>
+        <div class="mdesc">총기 선택 · 부착물 장착</div>
+      </div>
+      <div class="mcard">
+        <button id="btn-shop">보급소</button>
+        <div class="mdesc">무기 · 방어구 구매</div>
+      </div>
+    </div>
     <div class="keys">
-      <b>WASD</b> 이동 · <b>Shift</b> 달리기 · <b>Space</b> 점프 · <b>마우스</b> 조준/사격<br>
-      <b>R</b> 재장전 · <b>E</b> 루팅/상호작용 · <b>Q</b> 치료 · <b>Tab</b> 인벤토리 · <b>1~6</b> 무기 교체
+      <b>WASD</b> 이동 · <b>Shift</b> 달리기 · <b>Space</b> 점프 · <b>마우스</b> 조준/사격 ·
+      <b>R</b> 재장전 · <b>E</b> 상호작용 · <b>Q</b> 치료 · <b>Tab</b> 인벤토리 · <b>1~6</b> 무기
     </div>
     <div class="touch-keys">
-      <b>왼쪽 조이스틱</b> 이동 (끝까지 밀면 달리기) · <b>오른쪽 화면 드래그</b> 시선<br>
-      <b>발사 / 조준 / 장전 / 점프</b> 버튼 · 상자 근처에서 <b>열기</b> 버튼
+      <b>왼쪽 조이스틱</b> 이동 (끝까지 밀면 달리기) · <b>오른쪽 드래그</b> 시선 · 상자 근처 <b>열기</b> 버튼
     </div>
+  </div>
+
+  <div class="screen" id="shop-screen">
+    <h2 style="color:#9fb59f; font-size:20px;">보급소</h2>
+    <div class="stash" id="shop-stash"></div>
+    <div id="shop"></div>
+    <button id="shop-close">닫기</button>
   </div>
 
   <div class="screen" id="equip-screen">

@@ -17,6 +17,8 @@
 - Detective Special Revolver — OpenGameArt — https://opengameart.org/content/detective-special-revolver (CC0) — 리볼버 뷰모델
 - City Environment Pack — 3DModelsCC0 — https://3dmodelscc0.itch.io/city-environment-pack (CC0) — 쓰레기통/에어컨 실외기/옥상 급수탑/벤치 소품
 
+- 타이틀 키비주얼 (assets/textures/title.jpg, cover.png) — Nano Banana Pro (Gemini 3 Pro Image) 로 자체 생성 (#113)
+
 ## 텍스처
 
 - Ground048, Gravel023 — ambientCG — https://ambientcg.com (CC0) — 지면/자갈 마당 컬러맵 (1K JPG 재압축)

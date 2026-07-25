@@ -679,6 +679,8 @@ function updateMenuStash() {
   const r = s.roubles || 0, raids = s.raids || 0, ext = s.extracts || 0;
   dom.menuStash.textContent =
     `스태시 ₽ ${r.toLocaleString('ko-KR')} · 레이드 ${raids}회 · 생존 ${ext}회 · 누적 사살 ${s.kills || 0}`;
+  const ss = document.getElementById('shop-stash');
+  if (ss) ss.textContent = dom.menuStash.textContent;
   renderShop();
 }
 
@@ -3293,6 +3295,17 @@ document.getElementById('btn-equip').addEventListener('click', () => {
   audio();
   if (!assetsReady) return;
   openEquipScreen();
+});
+// 보급소 (#113) — 상점을 별도 화면으로
+document.getElementById('btn-shop').addEventListener('click', () => {
+  audio();
+  if (!assetsReady) return;
+  renderShop();
+  $('shop-screen').style.display = 'flex';
+});
+document.getElementById('shop-close').addEventListener('click', () => {
+  $('shop-screen').style.display = 'none';
+  updateMenuStash();
 });
 document.getElementById('equip-close').addEventListener('click', () => {
   $('equip-screen').style.display = 'none';
