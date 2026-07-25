@@ -144,7 +144,7 @@ const dom = {
   menuStash: $('menu-stash'), btnStart: $('btn-start'),
   deathCause: $('death-cause'), deathLoot: $('death-loot'),
   extractStats: $('extract-stats'), extractLoot: $('extract-loot'),
-  scopeOverlay: $('scope-overlay'),
+  scopeOverlay: $('scope-overlay'), healHint: $('heal-hint'),
 };
 
 // ---------- 모바일 감지 ----------
@@ -1854,7 +1854,7 @@ function isPointOpen(x, z, r) {
 function spawnEnemies(avoidPos) {
   for (let i = 0; i < ENEMY.count; i++) {
     let p;
-    do { p = randomOpenPoint(); } while (p.distanceTo(avoidPos) < 32);
+    do { p = randomOpenPoint(); } while (p.distanceTo(avoidPos) < 42); // 스폰 안전 반경 (#110)
     const m = makeEnemyMesh();
     m.group.position.copy(p);
     scene.add(m.group);
@@ -1863,7 +1863,11 @@ function spawnEnemies(avoidPos) {
       pos: m.group.position,
       hp: ENEMY.hp,
       state: 'patrol',
-      waypoint: randomOpenPoint(),
+      waypoint: (() => { // 첫 웨이포인트도 플레이어 스폰 근처 금지 — 스폰 직후 조우 완화 (#110)
+        let wp;
+        do { wp = randomOpenPoint(); } while (wp.distanceTo(avoidPos) < 35);
+        return wp;
+      })(),
       idleTimer: 0,
       detectTimer: Math.random() * 0.15,
       lastKnown: new THREE.Vector3(),
@@ -3378,6 +3382,16 @@ document.addEventListener('keyup', (e) => {
 function updateHUD() {
   // ADS 중엔 가늠자(또는 스코프 오버레이 레티클)로 조준 — 크로스헤어 숨김
   document.getElementById('crosshair').style.display = player.aiming ? 'none' : 'block';
+  // 저체력 치료 힌트 (#110): useHeal 과 같은 우선순위(붕대 먼저)로 다음 사용 아이템 안내
+  {
+    const low = player.hp < 45 && player.hp > 0 && state.phase === 'raid';
+    const item = low ? (inventory.find((i) => i.heal && i.heal <= 30) || inventory.find((i) => i.heal)) : null;
+    const txt = item ? `Q — ${item.name} 사용 (+${item.heal} HP)` : '';
+    if (dom.healHint.textContent !== txt) dom.healHint.textContent = txt;
+    dom.healHint.style.display = item ? 'block' : 'none';
+    const tb = document.getElementById('tb-heal');
+    if (tb) tb.classList.toggle('urgent', !!item);
+  }
   dom.hpFill.style.width = `${player.hp}%`;
   dom.stamFill.style.width = `${player.stamina}%`;
   const hasArmor = player.armorDur > 0 || player.helmet;

@@ -55,6 +55,20 @@
   #hp-fill { background: linear-gradient(90deg, #b83232, #d94f3d); width: 100%; }
   #stam-fill { background: linear-gradient(90deg, #7a8f4a, #a9c25f); width: 100%; }
   #armor-fill { background: linear-gradient(90deg, #4a6a8f, #5f8fc2); width: 100%; }
+  /* 저체력 치료 힌트 (#110) */
+  #heal-hint {
+    display: none; margin-top: 2px; font-size: 12px; font-weight: 700; color: #ffd54a;
+    text-shadow: 0 0 6px rgba(0,0,0,0.9);
+    animation: healPulse 1.1s ease-in-out infinite;
+  }
+  #tb-heal.urgent {
+    border-color: #ffd54a; color: #ffd54a;
+    animation: healPulse 1.1s ease-in-out infinite;
+  }
+  @keyframes healPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) {
+    #heal-hint, #tb-heal.urgent { animation: none; }
+  }
 
   #ammo {
     position: absolute; right: 28px; bottom: 22px; text-align: right;
@@ -320,6 +334,7 @@
       <div class="bar"><div id="stam-fill"></div></div>
       <div class="bar-label" id="armor-label" style="display:none">방탄</div>
       <div class="bar" id="armor-bar" style="display:none"><div id="armor-fill"></div></div>
+      <div id="heal-hint"></div>
     </div>
 
     <div id="ammo">
