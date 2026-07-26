@@ -466,13 +466,14 @@ async function loadAssets() {
     const aimUpRaw = clips.find((c) => /^aimup/i.test(c.name)) || null;
     const aimDownRaw = clips.find((c) => /^aimdown/i.test(c.name)) || null;
     const aimNeutral = clips.find((c) => /^aimneutral/i.test(c.name)) || null;
+    const aimPose = clips.find((c) => /^aim$/i.test(c.name)) || null; // ARDY 소총 견착 조준 (#122)
     const walkC = clips.find((c) => /^walk/i.test(c.name)) || null;
     const limp = clips.find((c) => /^limp/i.test(c.name)) || null;
     const alert = clips.find((c) => /^alert/i.test(c.name)) || null;
     // 리타게팅 export 시 180°(w≈0) 부근 회전의 쿼터니언 부호(±q)가 프레임 간
     // 뒤집힐 수 있음 → 보간 시 관절이 꺾임. 부호 연속성 복구.
     for (const c of [idle, run, death, hitChest, hitHead, shoot, reload,
-      crouchIdle, roll, aimUpRaw, aimDownRaw, aimNeutral, walkC, limp, alert]) fixQuatContinuity(c);
+      crouchIdle, roll, aimUpRaw, aimDownRaw, aimNeutral, walkC, limp, alert, aimPose]) fixQuatContinuity(c);
     // 고저차 조준: Aim_Up/Down 을 Neutral 기준 additive 로 변환 —
     // 어떤 기본 모션 위에도 가중치로 얹을 수 있음.
     // 주의: glTF 는 상수 트랙(scale 1 등)의 accessor 를 클립 간 공유하므로
@@ -482,7 +483,7 @@ async function loadAssets() {
       if (aimUpRaw) aimUp = THREE.AnimationUtils.makeClipAdditive(aimUpRaw.clone(), 0, aimNeutral);
       if (aimDownRaw) aimDown = THREE.AnimationUtils.makeClipAdditive(aimDownRaw.clone(), 0, aimNeutral);
     }
-    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown, walk: walkC, limp, alert };
+    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown, walk: walkC, limp, alert, aim: aimPose };
   }
 
   buildViewmodel();
@@ -2657,6 +2658,7 @@ function buildPlayerChar() {
   const actShoot = mkOnce(clips.shoot);
   const actReload = mkOnce(clips.reload);
   const actDeath = mkOnce(clips.death);
+  const actAim = clips.aim ? mixer.clipAction(clips.aim) : null; // 소총 견착 조준 base (#122)
   const mkAim = (clip) => { if (!clip) return null; const a = mixer.clipAction(clip); a.play(); a.setEffectiveWeight(0); return a; };
   const actAimUp = mkAim(clips.aimUp);
   const actAimDown = mkAim(clips.aimDown);
@@ -2678,8 +2680,9 @@ function buildPlayerChar() {
   const spine = model.getObjectByName('Spine') || null;
   pc = {
     group: g, model, mixer, hand, gunHolder, spine, spinePose: null,
-    actIdle, actRun, actWalk, actShoot, actReload, actDeath, actAimUp, actAimDown,
+    actIdle, actRun, actWalk, actShoot, actReload, actDeath, actAim, actAimUp, actAimDown,
     baseAct: actIdle, aimBlend: 0, oneShot: null, faceYaw: 0, animSwitchT: 0, curGun: null,
+    gunBase: gunHolder.rotation.clone(), gunKick: 0,
   };
   mixer.addEventListener('finished', (ev) => {
     if (pc && ev.action === pc.oneShot) {
@@ -2724,11 +2727,12 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   pc.group.visible = state.phase === 'raid' && !scopeShown;
   pc.group.position.set(player.pos.x, player.pos.y, player.pos.z);
 
-  // 향하는 방향: 조준/사격 중엔 카메라 정면, 그 외 이동 중엔 이동 방향
+  // 향하는 방향: 조준/사격(직후) 중엔 카메라 정면, 그 외 이동 중엔 이동 방향
+  pc.fireFaceT = Math.max(0, (pc.fireFaceT || 0) - dt);
   const camFace = Math.atan2(-Math.sin(player.yaw), -Math.cos(player.yaw));
   const moving = hSpeed > 0.6 && (moveDirX || moveDirZ);
   let targetFace;
-  if (player.aiming || pc.oneShot === pc.actShoot) targetFace = camFace;
+  if (player.aiming || pc.fireFaceT > 0) targetFace = camFace;
   else if (moving) targetFace = Math.atan2(moveDirX, moveDirZ);
   else targetFace = pc.faceYaw;
   let dy = targetFace - pc.faceYaw;
@@ -2737,10 +2741,13 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   pc.faceYaw += THREE.MathUtils.clamp(dy, -dt * 11, dt * 11);
   pc.group.rotation.y = pc.faceYaw;
 
-  // 로코모션 (디바운스 전환)
+  // 로코모션 (디바운스 전환) — 기본 이동(5m/s)은 조깅=달리기 클립, 저속(조준이동 2.75m/s)만 걷기 클립.
+  // (걷기 클립 원속 1m/s 라 5m/s 를 걷기로 재생하면 5배속으로 튀던 문제 수정)
   if (pc.actIdle && !pc.oneShot) {
-    const wantRun = moving && player.sprinting;
-    const desired = moving ? (wantRun && pc.actRun ? pc.actRun : (pc.actWalk || pc.actRun)) : pc.actIdle;
+    const jog = hSpeed > 3.2;
+    let desired;
+    if (player.aiming && pc.actAim) desired = pc.actAim; // 조준 시 소총 견착 포즈 (상체 우선)
+    else desired = moving ? (jog && pc.actRun ? pc.actRun : (pc.actWalk || pc.actRun)) : pc.actIdle;
     if (desired && desired !== pc.baseAct) {
       pc.animSwitchT += dt;
       if (pc.animSwitchT > 0.1) {
@@ -2750,9 +2757,9 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
         pc.baseAct = desired;
       }
     } else pc.animSwitchT = 0;
-    if (moving) {
-      if (pc.baseAct === pc.actWalk) pc.actWalk.timeScale = Math.max(0.6, hSpeed / 1.0);
-      else if (pc.baseAct === pc.actRun) pc.actRun.timeScale = Math.max(0.6, hSpeed / 3.4);
+    if (moving && !player.aiming) {
+      if (pc.baseAct === pc.actWalk) pc.actWalk.timeScale = THREE.MathUtils.clamp(hSpeed / 1.0, 0.7, 1.7);
+      else if (pc.baseAct === pc.actRun) pc.actRun.timeScale = THREE.MathUtils.clamp(hSpeed / 3.4, 0.9, 2.1);
     }
   }
 
@@ -2769,6 +2776,12 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   if (pc.spine && pc.spinePose) pc.spine.quaternion.copy(pc.spinePose);
   pc.mixer.update(dt);
   if (pc.spine) { if (!pc.spinePose) pc.spinePose = pc.spine.quaternion.clone(); else pc.spinePose.copy(pc.spine.quaternion); }
+
+  // 사격 반동: 몸 애니메이션 대신 총(gunHolder) 을 짧게 튀어오르게 — 팔 펄럭임 없이 반동 표현 (#122)
+  if (pc.gunBase) {
+    pc.gunKick = Math.max(0, (pc.gunKick || 0) - dt * 3.2);
+    pc.gunHolder.rotation.set(pc.gunBase.x - pc.gunKick, pc.gunBase.y, pc.gunBase.z + pc.gunKick * 0.35);
+  }
 }
 
 // 3인칭 오버숄더 카메라 — 궤도 + 벽 충돌 당김 (#116)
@@ -2940,7 +2953,7 @@ function fireShot() {
   player.pitch += GUN.kick * gripK + Math.random() * 0.004;
   player.yaw += (Math.random() - 0.5) * 0.004;
   sfx.shoot();
-  playPcOneShot(pc && pc.actShoot, 0.05); // 3인칭 사격 모션
+  if (pc) { pc.gunKick = Math.min(0.5, (pc.gunKick || 0) + 0.2); pc.fireFaceT = 0.4; } // 총 반동 킥 + 사격 중 몸 정렬 (#122)
   muzzleFlashLight.intensity = currentAtt.includes('silencer') ? 10 : 40;
   const muzzle = pcMuzzle();
   muzzleFlashLight.position.copy(muzzle);
