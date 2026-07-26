@@ -2,6 +2,10 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 
+// 배포 캐시버스팅 토큰: 이 모듈이 로드된 URL 의 ?v=<SHA> (index.html 이 배포 시 심음).
+// 에셋 fetch 에 전파해 배포 후 CDN/브라우저 캐시로 옛 파일이 도는 문제 방지 (#125)
+const ASSET_VER = new URL(import.meta.url).search || '';
+
 // ============================================================
 // EXSHOOT — Three.js 익스트랙션 슈터
 // 레이드 진입 → 루팅 → 스캐브 교전 → 탈출 지점 도달 → 스태시 누적
@@ -389,8 +393,11 @@ async function loadAssets() {
     );
     attempt(RETRIES);
   });
+  // 캐시버스팅 (#125): Cloudflare 가 .js/.jpg 를 4h 캐시해 배포 후 옛 파일이 도는 문제 방지.
+  // main.js 는 index.html 의 ?v=<SHA> 로, 텍스처(.jpg)는 아래에서 버스팅.
+  // .glb 는 origin/CDN 모두 max-age=0(ETag 재검증)이라 이미 최신 → 버스팅 불필요(30MB 재다운로드 회피).
   const loadGlb = (path) => withRetry((p, ok, prog, fail) => loader.load(p, ok, prog, fail), path);
-  const loadTex = (path) => withRetry((p, ok, prog, fail) => texLoader.load(p, ok, prog, fail), path);
+  const loadTex = (path) => withRetry((p, ok, prog, fail) => texLoader.load(p, ok, prog, fail), path + ASSET_VER);
 
   const jobs = Object.entries(GLB_MANIFEST).map(async ([key, path]) => {
     const gltf = await loadGlb(path);
