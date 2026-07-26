@@ -423,6 +423,15 @@ async function loadAssets() {
       GROUND_TEX[key] = t;
     } catch { /* 폴백 */ }
   }));
+  // 물리 엔진 (Rapier WASM) — 실패해도 게임은 폴백(물리 비활성)으로 동작 (#119)
+  jobs.push((async () => {
+    try {
+      const R = await import('@dimforge/rapier3d-compat');
+      await R.init();
+      RAPIER = R;
+      physReady = true;
+    } catch (e) { console.warn('Rapier init 실패 — 물리 비활성:', e && e.message); }
+  })());
   // 건축 PBR 텍스처 (#107) — 실패 시 해당 재질만 단색 폴백
   for (const key of ['brick', 'plaster', 'rooftile', 'corrugated', 'woodfloor', 'concrete']) {
     jobs.push((async () => {
@@ -677,6 +686,13 @@ let enemies = [];
 let interactables = [];   // {pos, mesh, items, opened, label}
 let extractions = [];     // {pos, mesh, ring}
 let tracers = [];         // {line, life}
+// 물리 (Rapier) — #119 Phase 2
+let RAPIER = null, physWorld = null, physReady = false;
+const physProps = [];     // { body, holder, mesh, halfH, explosive, exploded, mCol }
+const propMeshes = [];    // 총알 레이 타겟 (physProp 참조 userData)
+const ragdolls = [];      // { e, body, offset }
+let pendingExplosions = [];// { pos, opts } — 연쇄 폭발 프레임 분산
+let explosionsFX = [];    // { light, sphere, life, max }
 let flashes = [];         // {light, sprite?, life}
 let corpses = [];
 
@@ -2930,7 +2946,7 @@ function fireShot() {
   muzzleFlashLight.position.copy(muzzle);
   alertEnemiesAround(player.pos, currentAtt.includes('silencer') ? 16 : 60);
 
-  const targets = [...obstacleMeshes];
+  const targets = [...obstacleMeshes, ...propMeshes];
   for (const e of enemies) if (!e.dead) targets.push(e.body, e.head);
 
   // 조준점: 화면중앙(카메라)에서 레이 → 수렴점 (오버숄더 시차 보정)
@@ -2971,6 +2987,17 @@ function fireShot() {
         if (ud.enemy.hp <= 0) killEnemy(ud.enemy);
         else ud.enemy.state = 'combat';
         anyHit = true;
+      } else if (ud && ud.physProp && !ud.physProp.exploded) {
+        // 물리 배럴 피격 — 폭발통은 폭발, 일반통은 임펄스로 튐 (#119)
+        const p = ud.physProp;
+        if (p.explosive) {
+          p.exploded = true; blackenProp(p); removeMovementCollider(p);
+          explodeAt(propWorldPos(p).clone());
+        } else {
+          const m = p.body.mass();
+          p.body.applyImpulse({ x: dir.x * 5 * m, y: 1.5 * m, z: dir.z * 5 * m }, true);
+          p.body.applyTorqueImpulse({ x: (Math.random() - 0.5) * m, y: (Math.random() - 0.5) * m, z: (Math.random() - 0.5) * m }, true);
+        }
       }
     }
     spawnTracer(muzzle, endPoint, 0xffe0a0);
@@ -2997,7 +3024,202 @@ function spawnTracer(from, to, color) {
   tracers.push({ line, life: 0.07 });
 }
 
+// ============================================================
+// 물리 (Rapier) — 정적 콜라이더 / 동적 소품 / 폭발 / 래그돌 (#119)
+// ============================================================
+function quatY(yaw) { return { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }; }
+
+// 맵 확정 후 1회 — 지형 하이트필드 + 건물 OBB 를 Rapier 정적 콜라이더로 미러
+function buildPhysicsStatics() {
+  if (!physReady || physWorld) return;
+  physWorld = new RAPIER.World({ x: 0, y: -18, z: 0 });
+  physWorld.timestep = 1 / 60;
+  const N = 48, span = WORLD_HALF * 2;
+  const heights = new Float32Array((N + 1) * (N + 1));
+  for (let i = 0; i <= N; i++) {
+    for (let j = 0; j <= N; j++) {
+      // Rapier heightfield: 행(i)=z, 열(j)=x 로 매핑됨 (실측으로 확정)
+      const x = (j / N - 0.5) * span, z = (i / N - 0.5) * span;
+      heights[i + j * (N + 1)] = terrainH(x, z);
+    }
+  }
+  const gb = physWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+  physWorld.createCollider(RAPIER.ColliderDesc.heightfield(N, N, heights, { x: span, y: 1, z: span }).setFriction(0.9), gb);
+  for (const b of colliders) {
+    if (b.maxY - b.minY < 0.4) continue;
+    const yaw = Math.atan2(b.s, b.c);
+    const rb = physWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed()
+      .setTranslation(b.cx, (b.minY + b.maxY) / 2, b.cz).setRotation(quatY(yaw)));
+    physWorld.createCollider(RAPIER.ColliderDesc.cuboid(b.hx, (b.maxY - b.minY) / 2, b.hz), rb);
+  }
+}
+
+// 레이드마다 동적 물리 배럴 배치 (일부는 폭발통)
+const PHYS_BARRELS = [
+  [5, -25, true], [7, -25.8, false], [-42, 10, true], [30, -50, false],
+  [-25, 35, false], [62, -45, true], [18, 20, false], [-65, 55, false],
+  [-6, -35.8, true], [-63.8, 8.5, false], [33, 34, true], [-30, -20, false],
+];
+function spawnPhysProps() {
+  if (!physReady || !physWorld) return;
+  for (const [x, z, expl] of PHYS_BARRELS) spawnPhysBarrel(x, z, expl);
+}
+
+function spawnPhysBarrel(x, z, explosive) {
+  const mesh = instantiate('barrel');
+  let bb = new THREE.Box3().setFromObject(mesh);
+  const targetH = 1.15;
+  mesh.scale.setScalar(targetH / Math.max(0.001, bb.max.y - bb.min.y));
+  mesh.updateMatrixWorld(true);
+  bb = new THREE.Box3().setFromObject(mesh);
+  const ctr = bb.getCenter(new THREE.Vector3());
+  mesh.position.sub(ctr); // 지오메트릭 중심을 원점으로 (물리 바디 중심과 일치)
+  const halfH = (bb.max.y - bb.min.y) / 2;
+  const rad = Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z) / 2 * 0.92;
+  mesh.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true; o.frustumCulled = false;
+      if (explosive) { o.material = o.material.clone(); o.material.color.setHex(0x9a3324); if (o.material.emissive) o.material.emissive.setHex(0x160400); }
+    }
+  });
+  const holder = new THREE.Group();
+  holder.add(mesh);
+  const gy = terrainH(x, z) + halfH + 0.02;
+  holder.position.set(x, gy, z);
+  scene.add(holder);
+
+  const body = physWorld.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(x, gy, z).setLinearDamping(0.35).setAngularDamping(0.55));
+  physWorld.createCollider(RAPIER.ColliderDesc.cylinder(halfH, rad)
+    .setDensity(explosive ? 1.4 : 2.6).setFriction(0.85).setRestitution(0.18), body);
+
+  const mCol = axisCollider(x - rad, x + rad, terrainH(x, z), terrainH(x, z) + targetH, z - rad, z + rad);
+  colliders.push(mCol);
+  const prop = { body, holder, mesh, halfH, rad, explosive, exploded: false, mCol };
+  holder.userData.physProp = prop;
+  mesh.traverse((o) => { if (o.isMesh) { o.userData.physProp = prop; propMeshes.push(o); } });
+  physProps.push(prop);
+}
+
+function removeMovementCollider(p) {
+  if (!p.mCol) return;
+  const i = colliders.indexOf(p.mCol); if (i >= 0) colliders.splice(i, 1);
+  p.mCol = null;
+}
+function blackenProp(p) {
+  p.mesh.traverse((o) => { if (o.isMesh && o.material) { o.material = o.material.clone(); o.material.color.multiplyScalar(0.25); if (o.material.emissive) o.material.emissive.setHex(0); } });
+}
+
+const _v3 = new THREE.Vector3();
+function propWorldPos(p) { const t = p.body.translation(); return _v3.set(t.x, t.y, t.z); }
+
+// 폭발: VFX + 범위 데미지(적/플레이어) + 동적 바디 임펄스 + 폭발통 연쇄
+function explodeAt(pos, { radius = 6.5, damage = 95, force = 30 } = {}) {
+  spawnExplosionFX(pos);
+  playBuf('deathBoom', { vol: 0.85, rate: 0.9 + Math.random() * 0.2 });
+  alertEnemiesAround(pos, 45);
+  for (const p of physProps) {
+    const t = p.body.translation();
+    const d = Math.hypot(t.x - pos.x, t.y - pos.y, t.z - pos.z);
+    if (d >= radius) continue;
+    const k = (1 - d / radius) * force, m = p.body.mass();
+    const dir = new THREE.Vector3(t.x - pos.x, (t.y - pos.y) + 0.5, t.z - pos.z);
+    if (dir.lengthSq() < 1e-4) dir.set(Math.random() - 0.5, 1, Math.random() - 0.5);
+    dir.normalize();
+    p.body.applyImpulse({ x: dir.x * k * m, y: (dir.y * k + 3) * m, z: dir.z * k * m }, true);
+    p.body.applyTorqueImpulse({ x: (Math.random() - 0.5) * k * m * 0.4, y: (Math.random() - 0.5) * k * m * 0.4, z: (Math.random() - 0.5) * k * m * 0.4 }, true);
+    if (p.explosive && !p.exploded && d < radius * 0.85) {
+      p.exploded = true; blackenProp(p); removeMovementCollider(p);
+      pendingExplosions.push({ pos: new THREE.Vector3(t.x, t.y, t.z), opts: { radius, damage, force } });
+    }
+  }
+  for (const e of enemies) {
+    if (e.dead) continue;
+    const d = e.pos.distanceTo(pos);
+    if (d < radius) {
+      e.hp -= damage * (1 - d / radius);
+      if (e.hp <= 0) { killEnemy(e); launchRagdoll(e, pos, force); }
+      else e.state = 'combat';
+    }
+  }
+  const pd = player.pos.distanceTo(pos);
+  if (pd < radius && state.phase === 'raid') damagePlayer(damage * (1 - pd / radius) * 0.85);
+}
+
+// 폭발로 사살된 적 → 물리 바디로 날려버림 (스티프 래그돌)
+function launchRagdoll(e, blastPos, force) {
+  if (!physWorld || e.ragdollBody) return;
+  e.mixer.timeScale = 0; // 현재 포즈 고정
+  const cx = e.pos.x, cy = e.pos.y + 0.95, cz = e.pos.z;
+  const body = physWorld.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(cx, cy, cz).setLinearDamping(0.2).setAngularDamping(0.35));
+  physWorld.createCollider(RAPIER.ColliderDesc.capsule(0.5, 0.32).setDensity(1.0).setFriction(0.7).setRestitution(0.25), body);
+  const dir = new THREE.Vector3(e.pos.x - blastPos.x, 0, e.pos.z - blastPos.z);
+  if (dir.lengthSq() < 0.01) dir.set(Math.random() - 0.5, 0, Math.random() - 0.5);
+  dir.normalize();
+  const m = body.mass(), k = force * 0.9;
+  body.applyImpulse({ x: dir.x * k * m, y: (7 + Math.random() * 3) * m, z: dir.z * k * m }, true);
+  body.applyTorqueImpulse({ x: (Math.random() - 0.5) * 3 * m, y: (Math.random() - 0.5) * 2 * m, z: (Math.random() - 0.5) * 3 * m }, true);
+  e.ragdollBody = body;
+  ragdolls.push({ e, body, offset: new THREE.Vector3(0, -0.95, 0) });
+}
+
+function spawnExplosionFX(pos) {
+  const light = new THREE.PointLight(0xffb04a, 400, 20, 2);
+  light.position.copy(pos).setY(pos.y + 0.8);
+  scene.add(light);
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0xffd27a, transparent: true, opacity: 0.9 }));
+  sphere.position.copy(pos).setY(pos.y + 0.7);
+  scene.add(sphere);
+  explosionsFX.push({ light, sphere, life: 0.5, max: 0.5 });
+}
+
+// 물리 스텝 + 소품/래그돌 동기화 + 연쇄 폭발 처리
+function updatePhysics(dt) {
+  if (!physWorld) return;
+  const queue = pendingExplosions; pendingExplosions = [];
+  for (const q of queue) explodeAt(q.pos, q.opts);
+  physWorld.step();
+  for (const p of physProps) {
+    const t = p.body.translation(), r = p.body.rotation();
+    p.holder.position.set(t.x, t.y, t.z);
+    p.holder.quaternion.set(r.x, r.y, r.z, r.w);
+    // 정지한 배럴은 이동 콜라이더 위치 갱신 불필요(정지 가정) — 성능
+  }
+  for (const rd of ragdolls) {
+    const t = rd.body.translation(), r = rd.body.rotation();
+    const q = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+    const off = rd.offset.clone().applyQuaternion(q);
+    rd.e.group.position.set(t.x + off.x, t.y + off.y, t.z + off.z);
+    rd.e.group.quaternion.copy(q);
+  }
+}
+
+function clearPhysics() {
+  for (const p of physProps) { scene.remove(p.holder); removeMovementCollider(p); if (physWorld) physWorld.removeRigidBody(p.body); }
+  physProps.length = 0;
+  for (const rd of ragdolls) { if (physWorld) physWorld.removeRigidBody(rd.body); }
+  ragdolls.length = 0;
+  for (const fx of explosionsFX) { scene.remove(fx.light); scene.remove(fx.sphere); }
+  explosionsFX.length = 0;
+  propMeshes.length = 0;
+  pendingExplosions = [];
+}
+
 function updateEffects(dt) {
+  // 폭발 VFX 감쇠
+  for (let i = explosionsFX.length - 1; i >= 0; i--) {
+    const fx = explosionsFX[i];
+    fx.life -= dt;
+    const k = Math.max(0, fx.life / fx.max);
+    fx.light.intensity = 400 * k * k;
+    const s = 1 + (1 - k) * 5;
+    fx.sphere.scale.setScalar(s);
+    fx.sphere.material.opacity = k * 0.9;
+    if (fx.life <= 0) { scene.remove(fx.light); scene.remove(fx.sphere); fx.sphere.geometry.dispose(); fx.sphere.material.dispose(); explosionsFX.splice(i, 1); }
+  }
   for (let i = tracers.length - 1; i >= 0; i--) {
     const t = tracers[i];
     t.life -= dt;
@@ -3169,11 +3391,12 @@ function clearRaidObjects() {
   tracers = [];
   for (const c of corpses) scene.remove(c);
   corpses = [];
+  clearPhysics(); // 물리 소품/래그돌 정리 (#119)
 }
 
 function startRaid() {
   if (!assetsReady) return;
-  if (!staticBuilt) { buildStaticMap(); staticBuilt = true; }
+  if (!staticBuilt) { buildStaticMap(); buildPhysicsStatics(); staticBuilt = true; }
   clearRaidObjects();
 
   const spawn = SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)];
@@ -3221,6 +3444,7 @@ function startRaid() {
   state.paused = false;
 
   spawnLoot();
+  spawnPhysProps(); // 동적 물리 배럴/폭발통 (#119)
   spawnEnemies(spawn);
   setupExtractions(spawn);
   setupCompass();
@@ -3623,6 +3847,7 @@ function loop() {
     updatePlayer(dt);
     updateGun(dt);
     for (const e of enemies) updateEnemy(e, dt);
+    updatePhysics(dt); // Rapier 스텝 + 소품/래그돌 동기화 (#119)
     updateExtraction(dt);
     updateAcoustics(dt);
     updateHUD();
@@ -3647,6 +3872,11 @@ window.__ex = {
   WEAPONS,
   kill(i) { const e = enemies[i]; if (e && !e.dead) killEnemy(e); },
   hurt(n, hs = false) { damagePlayer(n, hs); },
+  // 물리 디버그 (#119)
+  get physReady() { return physReady; },
+  get physProps() { return physProps.map((p) => { const t = p.body.translation(); return { x: t.x, y: t.y, z: t.z, explosive: p.explosive, exploded: p.exploded, sleeping: p.body.isSleeping() }; }); },
+  get ragdolls() { return ragdolls.length; },
+  explodeAt(x, y, z, opts) { explodeAt(new THREE.Vector3(x, y, z), opts || {}); },
 };
 
 updateMenuStash();

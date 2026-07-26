@@ -35,3 +35,8 @@ FBX → GLB 변환: Blender 5.1 headless (총기, 캐릭터+애니메이션).
 - Gunshot Sounds — Vincent Sevedge — https://opengameart.org/content/gunshot-sounds (CC-BY 3.0) — 소총(SKS)/권총(CZ) 총성. 단발 구간을 잘라 mono WAV 로 사용.
 
 총성 전처리: 연속 사격 녹음에서 onset 검출로 단발 추출 후 페이드아웃/정규화 (Python).
+
+## 라이브러리
+
+- three.js — https://threejs.org (MIT) — 3D 렌더링 (CDN jsdelivr @0.169.0)
+- Rapier — Dimforge — https://rapier.rs (Apache-2.0) — 물리 엔진 (rapier3d-compat WASM, CDN @0.14.0): 동적 배럴/폭발통, 폭발 임펄스·연쇄, 사망 래그돌 (#119)
