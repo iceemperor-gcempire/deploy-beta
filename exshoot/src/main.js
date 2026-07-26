@@ -474,13 +474,14 @@ async function loadAssets() {
     const aimDownRaw = clips.find((c) => /^aimdown/i.test(c.name)) || null;
     const aimNeutral = clips.find((c) => /^aimneutral/i.test(c.name)) || null;
     const aimPose = clips.find((c) => /^aim$/i.test(c.name)) || null; // ARDY 소총 견착 조준 (#122)
+    const idleGun = clips.find((c) => /^idlegun$/i.test(c.name)) || null; // ARDY 총 내린 대기 (#128)
     const walkC = clips.find((c) => /^walk/i.test(c.name)) || null;
     const limp = clips.find((c) => /^limp/i.test(c.name)) || null;
     const alert = clips.find((c) => /^alert/i.test(c.name)) || null;
     // 리타게팅 export 시 180°(w≈0) 부근 회전의 쿼터니언 부호(±q)가 프레임 간
     // 뒤집힐 수 있음 → 보간 시 관절이 꺾임. 부호 연속성 복구.
     for (const c of [idle, run, death, hitChest, hitHead, shoot, reload,
-      crouchIdle, roll, aimUpRaw, aimDownRaw, aimNeutral, walkC, limp, alert, aimPose]) fixQuatContinuity(c);
+      crouchIdle, roll, aimUpRaw, aimDownRaw, aimNeutral, walkC, limp, alert, aimPose, idleGun]) fixQuatContinuity(c);
     // 고저차 조준: Aim_Up/Down 을 Neutral 기준 additive 로 변환 —
     // 어떤 기본 모션 위에도 가중치로 얹을 수 있음.
     // 주의: glTF 는 상수 트랙(scale 1 등)의 accessor 를 클립 간 공유하므로
@@ -490,7 +491,7 @@ async function loadAssets() {
       if (aimUpRaw) aimUp = THREE.AnimationUtils.makeClipAdditive(aimUpRaw.clone(), 0, aimNeutral);
       if (aimDownRaw) aimDown = THREE.AnimationUtils.makeClipAdditive(aimDownRaw.clone(), 0, aimNeutral);
     }
-    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown, walk: walkC, limp, alert, aim: aimPose };
+    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown, walk: walkC, limp, alert, aim: aimPose, idleGun };
   }
 
   buildViewmodel();
@@ -2666,10 +2667,12 @@ function buildPlayerChar() {
   const actReload = mkOnce(clips.reload);
   const actDeath = mkOnce(clips.death);
   const actAim = clips.aim ? mixer.clipAction(clips.aim) : null; // 소총 견착 조준 base (#122)
+  const actIdleGun = clips.idleGun ? mixer.clipAction(clips.idleGun) : null; // 총 내린 대기 base (#128)
   const mkAim = (clip) => { if (!clip) return null; const a = mixer.clipAction(clip); a.play(); a.setEffectiveWeight(0); return a; };
   const actAimUp = mkAim(clips.aimUp);
   const actAimDown = mkAim(clips.aimDown);
-  if (actIdle) actIdle.play();
+  const pcIdle = actIdleGun || actIdle; // 총 내린 대기 우선 (#128)
+  if (pcIdle) pcIdle.play();
 
   // 손 본에 무기 홀더 (적 캐릭터와 동일한 파지 보정값)
   const gunHolder = new THREE.Group();
@@ -2687,8 +2690,8 @@ function buildPlayerChar() {
   const spine = model.getObjectByName('Spine') || null;
   pc = {
     group: g, model, mixer, hand, gunHolder, spine, spinePose: null,
-    actIdle, actRun, actWalk, actShoot, actReload, actDeath, actAim, actAimUp, actAimDown,
-    baseAct: actIdle, aimBlend: 0, oneShot: null, faceYaw: 0, animSwitchT: 0, curGun: null,
+    actIdle, actIdleGun, actRun, actWalk, actShoot, actReload, actDeath, actAim, actAimUp, actAimDown,
+    baseAct: pcIdle, aimBlend: 0, oneShot: null, faceYaw: 0, animSwitchT: 0, curGun: null,
     gunBase: gunHolder.rotation.clone(), gunKick: 0,
   };
   mixer.addEventListener('finished', (ev) => {
@@ -2752,9 +2755,10 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   // (걷기 클립 원속 1m/s 라 5m/s 를 걷기로 재생하면 5배속으로 튀던 문제 수정)
   if (pc.actIdle && !pc.oneShot) {
     const jog = hSpeed > 3.2;
+    const idleBase = pc.actIdleGun || pc.actIdle; // 총 내린 대기 (#128)
     let desired;
     if (player.aiming && pc.actAim) desired = pc.actAim; // 조준 시 소총 견착 포즈 (상체 우선)
-    else desired = moving ? (jog && pc.actRun ? pc.actRun : (pc.actWalk || pc.actRun)) : pc.actIdle;
+    else desired = moving ? (jog && pc.actRun ? pc.actRun : (pc.actWalk || pc.actRun)) : idleBase;
     if (desired && desired !== pc.baseAct) {
       pc.animSwitchT += dt;
       if (pc.animSwitchT > 0.1) {
@@ -3429,7 +3433,8 @@ function startRaid() {
     pc.group.rotation.y = pc.faceYaw;
     pc.group.visible = true;
     if (pc.oneShot) { pc.oneShot.stop(); pc.oneShot = null; }
-    if (pc.baseAct !== pc.actIdle && pc.actIdle) { pc.baseAct && pc.baseAct.stop(); pc.baseAct = pc.actIdle; pc.actIdle.reset().play(); }
+    const idleBase = pc.actIdleGun || pc.actIdle;
+    if (pc.baseAct !== idleBase && idleBase) { pc.baseAct && pc.baseAct.stop(); pc.baseAct = idleBase; idleBase.reset().play(); }
   }
   player.hp = PLAYER.maxHp;
   player.stamina = 100;
