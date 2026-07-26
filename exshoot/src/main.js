@@ -25,6 +25,19 @@ const PLAYER = {
   maxHp: 100,
 };
 
+// 3인칭(TPS) 카메라 (#116)
+const CAM = {
+  dist: 3.4,        // 기본 궤도 거리
+  distAim: 1.85,    // 조준 시 당김
+  pivotH: 1.5,      // 피벗(어깨) 높이
+  shoulder: 0.5,    // 우측 오프셋 (오버숄더)
+  shoulderAim: 0.42,
+  minDist: 0.55,    // 벽 충돌 시 최소 거리
+  pitchMin: -1.15,  // 아래로
+  pitchMax: 0.95,   // 위로
+};
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+
 // 무기 테이블 — GUN 은 현재 장착 무기를 가리킴 (equipWeapon 으로 교체)
 const WEAPONS = {
   rifle: {
@@ -464,6 +477,7 @@ async function loadAssets() {
   }
 
   buildViewmodel();
+  buildPlayerChar();
   assetsReady = true;
   hideLoadUI();
   dom.btnStart.disabled = false;
@@ -2535,17 +2549,16 @@ function updatePlayer(dt) {
   // 착지음
   if (!wasGrounded && player.grounded && fallVel < -4) sfx.land();
 
-  // --- 카메라 ---
-  camera.position.set(player.pos.x, player.pos.y + PLAYER.eye, player.pos.z);
-  camera.rotation.y = player.yaw;
-  camera.rotation.x = player.pitch;
-
-  // 이동 헤드밥 + 발소리 — 의도 속도(vel)가 아닌 실제 변위 기준
-  // (벽에 막혀 제자리인데 발소리/밥이 계속 나던 문제)
+  // 실제 변위 기준 수평 속도 (벽에 막히면 0)
   const hSpeed = Math.hypot(player.pos.x - prevPX, player.pos.z - prevPZ) / Math.max(dt, 1e-4);
+
+  // --- 3인칭 캐릭터 + 오버숄더 카메라 (#116) ---
+  updatePlayerChar(dt, hSpeed, wish.x, wish.z);
+  updateTPSCamera(dt);
+
+  // 발소리 (3인칭이므로 헤드밥 제거)
   if (player.grounded && hSpeed > 0.5) {
     bobPhase += dt * hSpeed * 1.7;
-    camera.position.y += Math.sin(bobPhase) * 0.028 * (player.sprinting ? 1.4 : 1);
     stepAcc += hSpeed * dt;
     const stepLen = player.sprinting ? 3.1 : 2.3;
     if (stepAcc >= stepLen) {
@@ -2602,6 +2615,174 @@ function normalizeModel(model, targetLen, rotY) {
   return bb.getSize(new THREE.Vector3());
 }
 
+// ============================================================
+// 플레이어 캐릭터 (3인칭 미소녀) — #116
+// ============================================================
+let pc = null;               // 플레이어 캐릭터 객체
+const PC_KEY = 'girlA';      // 주인공 모델 고정
+function buildPlayerChar() {
+  const model = SkeletonUtils.clone(ASSETS[PC_KEY].scene);
+  const bb = new THREE.Box3().setFromObject(model);
+  const s = CHAR_HEIGHT / Math.max(0.001, bb.max.y - bb.min.y);
+  model.scale.setScalar(s);
+  model.position.y = -bb.min.y * s;
+  model.traverse((o) => { if (o.isMesh || o.isSkinnedMesh) { o.castShadow = true; o.frustumCulled = false; } });
+  const g = new THREE.Group();
+  g.add(model);
+  g.visible = false;
+  scene.add(g);
+
+  const clips = CHAR_CLIPS[PC_KEY];
+  const mixer = new THREE.AnimationMixer(model);
+  const actIdle = clips.idle ? mixer.clipAction(clips.idle) : null;
+  const actRun = clips.run ? mixer.clipAction(clips.run) : null;
+  const actWalk = clips.walk ? mixer.clipAction(clips.walk) : null;
+  const mkOnce = (clip) => { if (!clip) return null; const a = mixer.clipAction(clip); a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; return a; };
+  const actShoot = mkOnce(clips.shoot);
+  const actReload = mkOnce(clips.reload);
+  const actDeath = mkOnce(clips.death);
+  const mkAim = (clip) => { if (!clip) return null; const a = mixer.clipAction(clip); a.play(); a.setEffectiveWeight(0); return a; };
+  const actAimUp = mkAim(clips.aimUp);
+  const actAimDown = mkAim(clips.aimDown);
+  if (actIdle) actIdle.play();
+
+  // 손 본에 무기 홀더 (적 캐릭터와 동일한 파지 보정값)
+  const gunHolder = new THREE.Group();
+  const hand = model.getObjectByName('RightHand');
+  if (hand) {
+    gunHolder.scale.setScalar(1 / s);
+    gunHolder.position.set(0, 0.05, 0.02);
+    gunHolder.rotation.set(-0.1612, 1.3828, -1.4543);
+    hand.add(gunHolder);
+  } else {
+    gunHolder.position.set(0.22, 1.18, 0.3);
+    g.add(gunHolder);
+  }
+
+  const spine = model.getObjectByName('Spine') || null;
+  pc = {
+    group: g, model, mixer, hand, gunHolder, spine, spinePose: null,
+    actIdle, actRun, actWalk, actShoot, actReload, actDeath, actAimUp, actAimDown,
+    baseAct: actIdle, aimBlend: 0, oneShot: null, faceYaw: 0, animSwitchT: 0, curGun: null,
+  };
+  mixer.addEventListener('finished', (ev) => {
+    if (pc && ev.action === pc.oneShot) {
+      const back = pc.oneShot; pc.oneShot = null;
+      if (pc.baseAct) { back.fadeOut(0.12); pc.baseAct.reset().fadeIn(0.12).play(); }
+    }
+  });
+  setPlayerGun(GUN.key);
+}
+
+// 장착 무기 모델을 손에 반영 (equipWeapon 연동)
+function setPlayerGun(key) {
+  if (!pc) return;
+  if (pc.curGun) { pc.gunHolder.remove(pc.curGun); pc.curGun = null; }
+  const w = WEAPONS[key]; if (!w) return;
+  const m = instantiate(w.model);
+  normalizeModel(m, 0.55, -Math.PI / 2);
+  brightenMaterials(m, 3.2);
+  m.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
+  pc.gunHolder.add(m);
+  pc.curGun = m;
+}
+
+// 사격/재장전 원샷 모션
+function playPcOneShot(act, fade = 0.06) {
+  if (!pc || !act) return;
+  for (const a of [pc.actShoot, pc.actReload]) if (a && a !== act && a.isRunning()) a.fadeOut(fade);
+  if (pc.baseAct && !pc.oneShot) pc.baseAct.fadeOut(fade);
+  pc.oneShot = act;
+  act.reset().fadeIn(fade).play();
+}
+
+// 캐릭터 총구 근사 위치 (트레이서/화염 원점)
+function pcMuzzle() {
+  const fy = pc ? pc.faceYaw : player.yaw;
+  return new THREE.Vector3(0.22, 1.32, 0.55).applyEuler(new THREE.Euler(0, fy, 0)).add(player.pos);
+}
+
+// 3인칭 캐릭터 갱신 — 위치/회전/애니메이션
+function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
+  if (!pc) return;
+  pc.group.visible = state.phase === 'raid' && !scopeShown;
+  pc.group.position.set(player.pos.x, player.pos.y, player.pos.z);
+
+  // 향하는 방향: 조준/사격 중엔 카메라 정면, 그 외 이동 중엔 이동 방향
+  const camFace = Math.atan2(-Math.sin(player.yaw), -Math.cos(player.yaw));
+  const moving = hSpeed > 0.6 && (moveDirX || moveDirZ);
+  let targetFace;
+  if (player.aiming || pc.oneShot === pc.actShoot) targetFace = camFace;
+  else if (moving) targetFace = Math.atan2(moveDirX, moveDirZ);
+  else targetFace = pc.faceYaw;
+  let dy = targetFace - pc.faceYaw;
+  while (dy > Math.PI) dy -= Math.PI * 2;
+  while (dy < -Math.PI) dy += Math.PI * 2;
+  pc.faceYaw += THREE.MathUtils.clamp(dy, -dt * 11, dt * 11);
+  pc.group.rotation.y = pc.faceYaw;
+
+  // 로코모션 (디바운스 전환)
+  if (pc.actIdle && !pc.oneShot) {
+    const wantRun = moving && player.sprinting;
+    const desired = moving ? (wantRun && pc.actRun ? pc.actRun : (pc.actWalk || pc.actRun)) : pc.actIdle;
+    if (desired && desired !== pc.baseAct) {
+      pc.animSwitchT += dt;
+      if (pc.animSwitchT > 0.1) {
+        pc.animSwitchT = 0;
+        pc.baseAct.fadeOut(0.15);
+        desired.reset().fadeIn(0.15).play();
+        pc.baseAct = desired;
+      }
+    } else pc.animSwitchT = 0;
+    if (moving) {
+      if (pc.baseAct === pc.actWalk) pc.actWalk.timeScale = Math.max(0.6, hSpeed / 1.0);
+      else if (pc.baseAct === pc.actRun) pc.actRun.timeScale = Math.max(0.6, hSpeed / 3.4);
+    }
+  }
+
+  // 조준 additive (상하 조준)
+  const wantAim = player.aiming ? 1 : 0;
+  pc.aimBlend += (wantAim - pc.aimBlend) * Math.min(1, dt * 6);
+  const aimPitch = THREE.MathUtils.clamp(player.pitch, -0.6, 0.6);
+  if (pc.actAimUp && pc.actAimDown) {
+    const k = pc.aimBlend * (pc.oneShot && pc.oneShot !== pc.actShoot ? 0 : 1);
+    pc.actAimUp.setEffectiveWeight(Math.max(0, aimPitch / 0.6) * k);
+    pc.actAimDown.setEffectiveWeight(Math.max(0, -aimPitch / 0.6) * k);
+  }
+  // PropertyMixer 상수트랙 누적 방지 (#31 과 동일 패턴)
+  if (pc.spine && pc.spinePose) pc.spine.quaternion.copy(pc.spinePose);
+  pc.mixer.update(dt);
+  if (pc.spine) { if (!pc.spinePose) pc.spinePose = pc.spine.quaternion.clone(); else pc.spinePose.copy(pc.spine.quaternion); }
+}
+
+// 3인칭 오버숄더 카메라 — 궤도 + 벽 충돌 당김 (#116)
+const _camRay = new THREE.Raycaster();
+let camAimBlend = 0;
+function updateTPSCamera(dt) {
+  player.pitch = THREE.MathUtils.clamp(player.pitch, CAM.pitchMin, CAM.pitchMax);
+  camAimBlend += ((player.aiming ? 1 : 0) - camAimBlend) * Math.min(1, dt * 10);
+  const dist = THREE.MathUtils.lerp(CAM.dist, CAM.distAim, camAimBlend);
+  const shoulder = THREE.MathUtils.lerp(CAM.shoulder, CAM.shoulderAim, camAimBlend);
+
+  // 카메라 방향은 FPS 와 동일(yaw/pitch) → 화면중앙=시선 유지
+  camera.rotation.set(player.pitch, player.yaw, 0);
+  const camFwd = new THREE.Vector3();
+  camera.getWorldDirection(camFwd);
+  const camRight = new THREE.Vector3().crossVectors(camFwd, WORLD_UP).normalize();
+
+  const pivot = new THREE.Vector3(player.pos.x, player.pos.y + CAM.pivotH, player.pos.z)
+    .addScaledVector(camRight, shoulder);
+  const back = camFwd.clone().negate();
+  _camRay.set(pivot, back);
+  _camRay.far = dist + 0.3;
+  const hit = _camRay.intersectObjects(obstacleMeshes, false)[0];
+  const d = hit ? Math.max(CAM.minDist, hit.distance - 0.25) : dist;
+  camera.position.copy(pivot).addScaledVector(back, d);
+  // 지면 관통 방지
+  const camGround = terrainH(camera.position.x, camera.position.z) + 0.3;
+  if (camera.position.y < camGround) camera.position.y = camGround;
+}
+
 // 뷰모델 (Quaternius 총기) — 무기별로 1회 구성, equipWeapon 으로 전환
 const VIEWMODELS = {}; // key → { model, muzzle, adsPos }
 function buildViewmodel() {
@@ -2652,6 +2833,7 @@ function equipWeapon(key, announce = true) {
     weaponAmmo[GUN.key] = { mag: gun.mag, reserve: gun.reserve };
   }
   GUN = w;
+  setPlayerGun(key); // 3인칭 손 무기 반영 (#116)
   const ammo = weaponAmmo[key];
   gun.mag = ammo ? ammo.mag : w.magSize;
   gun.reserve = ammo ? ammo.reserve : w.reserveMax;
@@ -2674,10 +2856,10 @@ function switchWeapon(slot) {
   equipWeapon(key);
 }
 camera.add(gunGroup);
+gunGroup.visible = false; // 3인칭 전환 — FPS 뷰모델 숨김 (#116)
 scene.add(camera);
 const muzzleFlashLight = new THREE.PointLight(0xffc070, 0, 8, 2);
-camera.add(muzzleFlashLight);
-muzzleFlashLight.position.set(0.22, -0.18, -0.9);
+scene.add(muzzleFlashLight); // 3인칭: 캐릭터 총구 위치로 매 발사 이동
 
 const GUN_HIP = new THREE.Vector3(0.27, -0.24, -0.58);
 let scopeHold = 0;   // 스코프 ADS 유지 시간 (#104)
@@ -2707,60 +2889,18 @@ function updateGun(dt) {
     else { sfx.dryFire(); gun.cooldown = 0.25; startReload(); }
   }
 
-  // 뷰모델 위치 보간 (ADS/힙)
-  const target = player.aiming ? GUN_ADS : GUN_HIP;
-  gunGroup.position.lerp(target, Math.min(1, dt * 14));
-
-  // 스코프 조준 화면 (#104): 스코프 장착 무기·저격총은 조준이 자리잡으면
-  // 뷰모델이 시야를 가리므로 숨기고 오버레이(원형 마스크+레티클)로 전환
+  // 스코프 조준 화면 (#104): 스코프 무기·저격총 ADS 시 오버레이(줌 조준) 표시
+  // — 3인칭에서는 캐릭터를 숨겨 시야 확보 (updatePlayerChar 가 scopeShown 반영)
   const scopeCapable = currentAtt.includes('scope') || GUN.key === 'sniper';
   scopeHold = player.aiming && scopeCapable && state.phase === 'raid' ? scopeHold + dt : 0;
   const scopedNow = scopeHold > 0.12;
   if (scopedNow !== scopeShown) {
     scopeShown = scopedNow;
     dom.scopeOverlay.style.display = scopedNow ? 'block' : 'none';
-    gunGroup.visible = !scopedNow;
   }
 
-  // 스프린트 자세 (총구 내림) 블렌드
-  const hSpeed = Math.hypot(player.vel.x, player.vel.z);
-  const wantSprintPose = player.sprinting && !player.aiming && hSpeed > 3 ? 1 : 0;
-  gun.sprintBlend += (wantSprintPose - gun.sprintBlend) * Math.min(1, dt * 8);
-  const sp = gun.sprintBlend;
-  gunGroup.position.x += sp * 0.06;
-  gunGroup.position.y += sp * -0.05;
-  gunGroup.position.z += sp * 0.10;
-
-  // 재장전 모션: 내려가며 굴렀다가 (탄창 교체) 올라옴
-  let rlRotZ = 0, rlRotX = 0;
-  if (gun.reloading > 0) {
-    const p = 1 - gun.reloading / GUN.reloadTime; // 0→1
-    const dip = Math.sin(Math.PI * Math.min(1, p * 1.12)); // 위상 살짝 앞당겨 마지막에 원위치
-    gunGroup.position.y -= dip * 0.16;
-    gunGroup.position.x += dip * 0.05;
-    rlRotZ = -dip * 0.55;
-    rlRotX = dip * 0.25 + (p > 0.45 && p < 0.6 ? Math.sin((p - 0.45) / 0.15 * Math.PI) * 0.07 : 0); // 탄창 삽입 툭
-  }
-
-  // 스웨이 감쇠
-  gun.swayX += -gun.swayX * Math.min(1, dt * 9);
-  gun.swayY += -gun.swayY * Math.min(1, dt * 9);
-  const swayScale = player.aiming ? 0.35 : 1;
-  gunGroup.position.x += gun.swayX * 0.6 * swayScale;
-  gunGroup.position.y += gun.swayY * 0.5 * swayScale;
-
-  // 반동 회복 + 밥 + 회전 합성
+  // 반동 회복
   gun.recoil = Math.max(0, gun.recoil - dt * 3);
-  gunGroup.position.z += gun.recoil * 0.06;
-  gunGroup.rotation.set(
-    gun.recoil * 0.10 + rlRotX + sp * 0.35 + gun.swayY * 1.4 * swayScale,
-    gun.swayX * 1.6 * swayScale + sp * 0.25,
-    rlRotZ + sp * -0.12,
-  );
-  if (player.grounded && hSpeed > 0.5 && !player.aiming) {
-    gunGroup.position.y += Math.sin(bobPhase * 0.98) * (0.006 + sp * 0.006);
-    gunGroup.position.x += Math.cos(bobPhase * 0.49) * 0.004;
-  }
 
   muzzleFlashLight.intensity *= Math.pow(0.001, dt * 6);
   if (muzzleFlashLight.intensity < 0.5) muzzleFlashLight.intensity = 0;
@@ -2770,9 +2910,11 @@ function startReload() {
   if (gun.reloading > 0 || gun.mag >= GUN.magSize || gun.reserve <= 0) return;
   gun.reloading = GUN.reloadTime;
   sfx.reload1();
+  playPcOneShot(pc && pc.actReload, 0.1); // 3인칭 재장전 모션
 }
 
 const _shootRay = new THREE.Raycaster();
+const _aimRay = new THREE.Raycaster();
 function fireShot() {
   gun.mag--;
   gun.cooldown = GUN.fireInterval;
@@ -2782,32 +2924,40 @@ function fireShot() {
   player.pitch += GUN.kick * gripK + Math.random() * 0.004;
   player.yaw += (Math.random() - 0.5) * 0.004;
   sfx.shoot();
+  playPcOneShot(pc && pc.actShoot, 0.05); // 3인칭 사격 모션
   muzzleFlashLight.intensity = currentAtt.includes('silencer') ? 10 : 40;
+  const muzzle = pcMuzzle();
+  muzzleFlashLight.position.copy(muzzle);
   alertEnemiesAround(player.pos, currentAtt.includes('silencer') ? 16 : 60);
+
+  const targets = [...obstacleMeshes];
+  for (const e of enemies) if (!e.dead) targets.push(e.body, e.head);
+
+  // 조준점: 화면중앙(카메라)에서 레이 → 수렴점 (오버숄더 시차 보정)
+  const camDir = new THREE.Vector3();
+  camera.getWorldDirection(camDir);
+  _aimRay.set(camera.position, camDir);
+  _aimRay.far = GUN.range;
+  const aimHits = _aimRay.intersectObjects(targets, false);
+  const aimPoint = aimHits.length ? aimHits[0].point.clone()
+    : camera.position.clone().addScaledVector(camDir, GUN.range);
 
   // 탄퍼짐
   const hSpeed = Math.hypot(player.vel.x, player.vel.z);
   let spread = player.aiming ? GUN.spreadAds : GUN.spreadHip;
   spread += Math.min(1, hSpeed / 8) * GUN.spreadMove * (currentAtt.includes('grip') ? 0.5 : 1);
 
-  const baseDir = new THREE.Vector3();
-  camera.getWorldDirection(baseDir);
-  const origin = playerEyePos();
-  const muzzle = gunGroup.localToWorld(muzzleLocal.clone());
-  const targets = [...obstacleMeshes];
-  for (const e of enemies) if (!e.dead) targets.push(e.body, e.head);
-
   let anyHit = false;
   for (let p = 0; p < GUN.pellets; p++) {
-    const dir = baseDir.clone();
+    const dir = aimPoint.clone().sub(muzzle).normalize();
     dir.x += (Math.random() - 0.5) * spread * 2;
     dir.y += (Math.random() - 0.5) * spread * 2;
     dir.z += (Math.random() - 0.5) * spread * 2;
     dir.normalize();
-    _shootRay.set(origin, dir);
+    _shootRay.set(muzzle, dir);
     _shootRay.far = GUN.range;
     const hits = _shootRay.intersectObjects(targets, false);
-    let endPoint = origin.clone().add(dir.clone().multiplyScalar(GUN.range));
+    let endPoint = muzzle.clone().add(dir.clone().multiplyScalar(GUN.range));
     if (hits.length > 0) {
       const h = hits[0];
       endPoint = h.point;
@@ -3031,6 +3181,13 @@ function startRaid() {
   player.vel.set(0, 0, 0);
   player.yaw = Math.atan2(spawn.x, spawn.z); // 맵 중앙(0,0)을 바라보게
   player.pitch = 0;
+  if (pc) { // 3인칭 캐릭터 초기 정렬 (#116)
+    pc.faceYaw = Math.atan2(-Math.sin(player.yaw), -Math.cos(player.yaw));
+    pc.group.rotation.y = pc.faceYaw;
+    pc.group.visible = true;
+    if (pc.oneShot) { pc.oneShot.stop(); pc.oneShot = null; }
+    if (pc.baseAct !== pc.actIdle && pc.actIdle) { pc.baseAct && pc.baseAct.stop(); pc.baseAct = pc.actIdle; pc.actIdle.reset().play(); }
+  }
   player.hp = PLAYER.maxHp;
   player.stamina = 100;
 
@@ -3100,6 +3257,7 @@ function endRaid(result, cause) {
   document.exitPointerLock?.(); // iOS Safari 는 Pointer Lock API 자체가 없음
   dom.hud.style.display = 'none';
   gun.triggerDown = false;
+  if (pc) pc.group.visible = false; // 3인칭 캐릭터 숨김 (#116)
 
   const stash = loadStash();
   stash.raids = (stash.raids || 0) + 1;
@@ -3394,7 +3552,7 @@ document.addEventListener('keyup', (e) => {
 // ============================================================
 function updateHUD() {
   // ADS 중엔 가늠자(또는 스코프 오버레이 레티클)로 조준 — 크로스헤어 숨김
-  document.getElementById('crosshair').style.display = player.aiming ? 'none' : 'block';
+  document.getElementById('crosshair').style.display = scopeShown ? 'none' : 'block';
   // 저체력 치료 힌트 (#110): useHeal 과 같은 우선순위(붕대 먼저)로 다음 사용 아이템 안내
   {
     const low = player.hp < 45 && player.hp > 0 && state.phase === 'raid';
