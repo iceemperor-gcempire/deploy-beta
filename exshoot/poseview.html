@@ -1,0 +1,96 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EXSHOOT 포즈 뷰어</title>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+}}
+</script>
+<style>
+  html,body{margin:0;height:100%;background:#2b3038;font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;overflow:hidden}
+  #c{width:100%;height:100%;display:block}
+  #ui{position:fixed;left:12px;top:12px;display:flex;flex-wrap:wrap;gap:6px;max-width:60vw;z-index:2}
+  #ui button{font:inherit;font-size:13px;padding:6px 12px;border-radius:4px;cursor:pointer;
+    color:#dfe8df;background:rgba(20,28,20,.75);border:1px solid rgba(255,255,255,.18)}
+  #ui button.on{border-color:#6f8f5f;background:rgba(120,160,100,.45);color:#fff}
+  #opt{position:fixed;right:12px;top:12px;display:flex;flex-direction:column;gap:6px;z-index:2}
+  #opt label{font-size:12px;color:#cfd8cf;background:rgba(20,28,20,.7);padding:5px 10px;border-radius:4px;display:flex;gap:6px;align-items:center}
+  #hint{position:fixed;left:12px;bottom:10px;font-size:12px;color:rgba(207,216,207,.6);z-index:2}
+</style></head>
+<body><canvas id="c"></canvas>
+<div id="ui"></div>
+<div id="opt">
+  <label><input type="checkbox" id="gunck" checked> 총 표시</label>
+  <label>조준 각 <input type="range" id="pitch" min="-40" max="40" value="0" style="width:90px"></label>
+</div>
+<div id="hint">마우스 드래그: 회전 · 휠: 확대/축소 · 위 버튼: 자세 선택</div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+function resize(){ renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); }
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x3a4048);
+const camera = new THREE.PerspectiveCamera(35, innerWidth/innerHeight, 0.05, 100);
+camera.position.set(0, 1.3, 3.4);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.05, 0); controls.update();
+addEventListener('resize', resize); resize();
+scene.add(new THREE.HemisphereLight(0xcfe0ec, 0x40382c, 2.2));
+const dl = new THREE.DirectionalLight(0xffffff, 2.2); dl.position.set(2,4,3); scene.add(dl);
+scene.add(new THREE.GridHelper(6, 12, 0x8895a0, 0x5a636d));
+
+const CHAR_H = 1.75;
+const GLB = new URLSearchParams(location.search).get('glb') || './assets/girls/girlA.glb';
+const loader = new GLTFLoader();
+const [girl, rifle] = await Promise.all([ loader.loadAsync(GLB), loader.loadAsync('./assets/rifle.glb') ]);
+const model = SkeletonUtils.clone(girl.scene);
+const bb = new THREE.Box3().setFromObject(model);
+const s = CHAR_H/(bb.max.y-bb.min.y); model.scale.setScalar(s); model.position.y = -bb.min.y*s;
+model.traverse(o=>{ if(o.isMesh||o.isSkinnedMesh) o.frustumCulled=false; });
+model.rotation.y = Math.PI; // 정면(-Z)이 카메라를 보게
+scene.add(model);
+const mixer = new THREE.AnimationMixer(model);
+const clips = {}; for (const c of girl.animations) clips[c.name] = c;
+const handR = model.getObjectByName('RightHand');
+
+// 총 (오른손 그립 + faceYaw 방향, 게임과 동일)
+const gunPivot = new THREE.Group(); scene.add(gunPivot);
+const g = rifle.scene.clone(true);
+{ const gb=new THREE.Box3().setFromObject(g); const gs=0.82/Math.max(gb.max.x-gb.min.x,gb.max.y-gb.min.y,gb.max.z-gb.min.z);
+  g.scale.setScalar(gs); g.rotation.y=-Math.PI/2; g.updateMatrixWorld(true);
+  const gb2=new THREE.Box3().setFromObject(g); g.position.sub(gb2.getCenter(new THREE.Vector3())); g.position.z += (gb2.max.z-gb2.min.z)*0.28; }
+gunPivot.add(g);
+let aimPitch = 0;
+function updateGun(){
+  if(!handR) return;
+  const rh=new THREE.Vector3(); handR.getWorldPosition(rh);
+  const yaw=Math.PI, cy=Math.cos(aimPitch);
+  const bz=new THREE.Vector3(Math.sin(yaw)*cy, Math.sin(aimPitch), Math.cos(yaw)*cy).normalize();
+  const bx=new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0),bz); if(bx.lengthSq()<1e-5)bx.set(1,0,0); bx.normalize();
+  const by=new THREE.Vector3().crossVectors(bz,bx).normalize();
+  gunPivot.position.copy(rh);
+  gunPivot.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(bx,by,bz));
+}
+
+let cur=null;
+function play(name){ if(cur) cur.fadeOut(0.15); cur=mixer.clipAction(clips[name]); cur.reset().fadeIn(0.15).play();
+  document.querySelectorAll('#ui button').forEach(b=>b.classList.toggle('on', b.textContent===name)); }
+// 버튼: 게임에서 쓰는 주요 클립 우선 정렬
+const ORDER = ['Aim','IdleGun','ReadyGun','Idle','Run','Walk','Reload','Shoot','Death','Alert','Limp'];
+const names = Object.keys(clips).sort((a,b)=>{ const ia=ORDER.indexOf(a),ib=ORDER.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib); });
+for(const n of names){ const btn=document.createElement('button'); btn.textContent=n; btn.onclick=()=>play(n); document.getElementById('ui').appendChild(btn); }
+document.getElementById('gunck').onchange=e=>gunPivot.visible=e.target.checked;
+document.getElementById('pitch').oninput=e=>aimPitch=e.target.value*Math.PI/180;
+play(clips['Aim']?'Aim':names[0]);
+
+let last=performance.now();
+function loop(){ requestAnimationFrame(loop); const now=performance.now(); mixer.update((now-last)/1000); last=now;
+  model.updateWorldMatrix(true,true); updateGun(); controls.update(); renderer.render(scene,camera); }
+loop();
+</script></body></html>
