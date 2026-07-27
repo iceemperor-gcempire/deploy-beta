@@ -6,6 +6,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
 // 배포 캐시버스팅 토큰: 이 모듈이 로드된 URL 의 ?v=<SHA> (index.html 이 배포 시 심음).
 // 에셋 fetch 에 전파해 배포 후 CDN/브라우저 캐시로 옛 파일이 도는 문제 방지 (#125)
@@ -309,14 +310,31 @@ function setupPostFX() {
     try {
       gtaoPass = new GTAOPass(scene, camera, size.x, size.y);
       gtaoPass.output = GTAOPass.OUTPUT.Default;
-      gtaoPass.blendIntensity = 1.0;
-      try { gtaoPass.updateGtaoMaterial({ radius: 0.5, scale: 1.2, samples: 16 }); } catch {}
+      gtaoPass.blendIntensity = 0.9;
+      try { gtaoPass.updateGtaoMaterial({ radius: 0.5, scale: 1.1, samples: 16 }); } catch {}
       composer.addPass(gtaoPass);
     } catch (e) { console.warn('GTAO 생략:', e && e.message); }
   }
-  bloomPass = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.65, 0.7, 0.75); // strength, radius, threshold (강화 #145)
+  // 블룸: 아주 밝은 부분만 은은하게 (너무 세던 값 하향, #148)
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.22, 0.5, 0.9); // strength, radius, threshold
   composer.addPass(bloomPass);
-  composer.addPass(new OutputPass()); // 톤매핑/sRGB 는 항상 유지 (효과 OFF 여도) — 색 일관성
+  composer.addPass(new OutputPass()); // 톤매핑/sRGB (항상 유지 — 효과 OFF 여도 색 일관)
+  // 컬러 그레이딩 + 비네트 (톤매핑 후, 시네마틱 톤) — 한 패스, 저비용 (#148)
+  composer.addPass(new ShaderPass({
+    uniforms: { tDiffuse: { value: null }, uContrast: { value: 1.07 }, uSat: { value: 1.12 }, uVig: { value: 1.0 } },
+    vertexShader: 'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+    fragmentShader: `
+      uniform sampler2D tDiffuse; uniform float uContrast, uSat, uVig; varying vec2 vUv;
+      void main(){
+        vec4 c = texture2D(tDiffuse, vUv);
+        c.rgb = (c.rgb - 0.5) * uContrast + 0.5;                 // 대비
+        float l = dot(c.rgb, vec3(0.299,0.587,0.114));
+        c.rgb = mix(vec3(l), c.rgb, uSat);                       // 채도
+        vec2 p = (vUv - 0.5) * uVig;                             // 비네트
+        c.rgb *= mix(0.68, 1.0, smoothstep(0.85, 0.28, length(p)));
+        gl_FragColor = c;
+      }`,
+  }));
 }
 setupPostFX();
 
