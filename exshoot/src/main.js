@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 // 배포 캐시버스팅 토큰: 이 모듈이 로드된 URL 의 ?v=<SHA> (index.html 이 배포 시 심음).
 // 에셋 fetch 에 전파해 배포 후 CDN/브라우저 캐시로 옛 파일이 도는 문제 방지 (#125)
@@ -176,7 +181,12 @@ renderer.setSize(innerWidth, innerHeight);
 // — 실행 중 자동 변경은 화면 깜박임을 유발해 제거함.
 const BASE_PR = Math.min(devicePixelRatio, IS_MOBILE ? 1.5 : 2);
 let renderScale = 1.0;
-function applyRenderScale() { renderer.setPixelRatio(BASE_PR * renderScale); }
+let composer = null; // 포스트프로세싱 (#139) — setupPostFX 에서 생성
+function applyRenderScale() {
+  const pr = BASE_PR * renderScale;
+  renderer.setPixelRatio(pr);
+  if (composer) { composer.setPixelRatio(pr); composer.setSize(innerWidth, innerHeight); }
+}
 applyRenderScale();
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -240,8 +250,7 @@ const skyMat = new THREE.ShaderMaterial({
         col = mix(col, cloudCol, cov * 0.55);
       }
       gl_FragColor = vec4(col, 1.0);
-      #include <tonemapping_fragment>
-      #include <colorspace_fragment>
+      // 톤매핑/색공간은 포스트프로세싱 OutputPass 가 일괄 처리 (#139) — 여기서 이중 적용 금지
     }`,
 });
 const skyMesh = new THREE.Mesh(new THREE.SphereGeometry(360, 24, 12), skyMat);
@@ -281,7 +290,32 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  if (composer) composer.setSize(innerWidth, innerHeight);
 });
+
+// 포스트프로세싱 파이프라인 (#139) — RenderPass → GTAO(AO) → Bloom → OutputPass(톤매핑/sRGB)
+// scene 은 이 시점에 아직 비어 있어도 무방(패스는 참조만 보유). 조명/환경 설정 후 호출.
+let gtaoPass = null, bloomPass = null;
+function setupPostFX() {
+  const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+  const rt = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: IS_MOBILE ? 0 : 4 });
+  composer = new EffectComposer(renderer, rt);
+  composer.setSize(innerWidth, innerHeight);
+  composer.setPixelRatio(BASE_PR * renderScale);
+  composer.addPass(new RenderPass(scene, camera));
+  if (!IS_MOBILE) {
+    try {
+      gtaoPass = new GTAOPass(scene, camera, size.x, size.y);
+      gtaoPass.output = GTAOPass.OUTPUT.Default;
+      gtaoPass.blendIntensity = 0.65;
+      composer.addPass(gtaoPass);
+    } catch (e) { console.warn('GTAO 생략:', e && e.message); }
+  }
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.42, 0.6, 0.85); // strength, radius, threshold
+  composer.addPass(bloomPass);
+  composer.addPass(new OutputPass()); // 톤매핑/sRGB 는 항상 유지 (효과 OFF 여도) — 색 일관성
+}
+setupPostFX();
 
 // ============================================================
 // 에셋 (Kenney / Quaternius CC0 — CREDITS.md 참조)
@@ -3935,7 +3969,8 @@ function loop() {
   // 하늘: 카메라 추종(구면 클리핑 방지) + 구름 드리프트
   skyMesh.position.copy(camera.position);
   skyUniforms.uTime.value = now / 1000;
-  renderer.render(scene, camera);
+  if (composer) composer.render();       // 항상 컴포저 경유 (톤매핑 일관) — 효과 OFF 는 GTAO/블룸 패스만 비활성
+  else renderer.render(scene, camera);
 }
 
 // 해상도는 고정 설정값(High/Med/Low)으로만 바꿈 — 실행 중 자동 변경은 버퍼 리사이즈로 화면이
@@ -3945,7 +3980,13 @@ function setResolution(level) {
   renderScale = RES_LEVELS[level] || 1.0;
   applyRenderScale();
   try { localStorage.setItem('exshoot_res', level); } catch {}
-  document.querySelectorAll('#res-row button').forEach((b) => b.classList.toggle('active', b.dataset.res === level));
+  document.querySelectorAll('#res-row button[data-res]').forEach((b) => b.classList.toggle('active', b.dataset.res === level));
+}
+function setPostfx(on) {
+  if (gtaoPass) gtaoPass.enabled = !!on;   // 무거운 AO/블룸만 토글, RenderPass+OutputPass 는 유지
+  if (bloomPass) bloomPass.enabled = !!on;
+  try { localStorage.setItem('exshoot_fx', on ? 'on' : 'off'); } catch {}
+  document.querySelectorAll('#res-row button[data-fx]').forEach((b) => b.classList.toggle('active', b.dataset.fx === (on ? 'on' : 'off')));
 }
 
 // QA/디버그 훅 (콘솔에서 위치 이동 등)
@@ -3967,6 +4008,7 @@ window.__ex = {
   get ragdolls() { return ragdolls.length; },
   get renderScale() { return renderScale; },
   set renderScale(v) { renderScale = THREE.MathUtils.clamp(v, 0.5, 1); applyRenderScale(); },
+  set postfx(v) { setPostfx(!!v); },
   explodeAt(x, y, z, opts) { explodeAt(new THREE.Vector3(x, y, z), opts || {}); },
   _dbgFire() {
     const m = pcMuzzle();
@@ -3977,12 +4019,12 @@ window.__ex = {
 initExplosionPool(); // 폭발 VFX 풀 미리 생성 (셰이더 재컴파일 방지, #132)
 // 해상도 설정 (#136): 저장값 적용 + 버튼 배선
 {
-  let saved = 'high';
-  try { saved = localStorage.getItem('exshoot_res') || 'high'; } catch {}
-  document.querySelectorAll('#res-row button').forEach((b) => {
-    b.addEventListener('click', () => { audio(); setResolution(b.dataset.res); });
-  });
-  setResolution(RES_LEVELS[saved] ? saved : 'high');
+  let savedRes = 'high', savedFx = 'on';
+  try { savedRes = localStorage.getItem('exshoot_res') || 'high'; savedFx = localStorage.getItem('exshoot_fx') || 'on'; } catch {}
+  document.querySelectorAll('#res-row button[data-res]').forEach((b) => b.addEventListener('click', () => { audio(); setResolution(b.dataset.res); }));
+  document.querySelectorAll('#res-row button[data-fx]').forEach((b) => b.addEventListener('click', () => { audio(); setPostfx(b.dataset.fx === 'on'); }));
+  setResolution(RES_LEVELS[savedRes] ? savedRes : 'high');
+  setPostfx(savedFx !== 'off');
 }
 updateMenuStash();
 refreshInventoryUI();
