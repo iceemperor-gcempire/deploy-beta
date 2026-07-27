@@ -172,9 +172,10 @@ if (IS_MOBILE) document.body.classList.add('mobile');
 const canvas = $('game-canvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setSize(innerWidth, innerHeight);
-// 동적 렌더 해상도 (#132): 기본 픽셀비 × renderScale. FPS 낮으면 자동 축소.
+// 렌더 해상도 (#132/#136): 기본 픽셀비 × renderScale. 메뉴에서 고정 레벨(High/Med/Low)로만 변경
+// — 실행 중 자동 변경은 화면 깜박임을 유발해 제거함.
 const BASE_PR = Math.min(devicePixelRatio, IS_MOBILE ? 1.5 : 2);
-let renderScale = 1.0; // 0.6 ~ 1.0
+let renderScale = 1.0;
 function applyRenderScale() { renderer.setPixelRatio(BASE_PR * renderScale); }
 applyRenderScale();
 renderer.shadowMap.enabled = true;
@@ -3231,13 +3232,15 @@ function launchRagdoll(e, blastPos, force) {
 const explosionPool = [];
 function initExplosionPool() {
   for (let i = 0; i < 3; i++) {
+    // 조명·구체 모두 항상 visible=true 로 씬에 상주 — three.js 는 visible 한 조명만 세어
+    // 셰이더를 컴파일하므로, 처음부터 켜두어(밝기 0) 첫 폭발에서 조명 개수가 안 바뀌게 함(#136).
     const light = new THREE.PointLight(0xffb04a, 0, 20, 2);
-    light.visible = false;
     scene.add(light);
     const sphere = new THREE.Mesh(
       new THREE.SphereGeometry(1, 16, 12),
-      new THREE.MeshBasicMaterial({ color: 0xffd27a, transparent: true, opacity: 0 }));
-    sphere.visible = false;
+      new THREE.MeshBasicMaterial({ color: 0xffd27a, transparent: true, opacity: 0, depthWrite: false }));
+    sphere.scale.setScalar(0.0001); // 사실상 안 보이지만 렌더돼 재질이 사전 컴파일됨
+    sphere.renderOrder = 2;
     scene.add(sphere);
     explosionPool.push({ light, sphere, life: 0, max: 0.5, active: false });
   }
@@ -3247,10 +3250,10 @@ function spawnExplosionFX(pos) {
   if (!fx) return;
   fx.active = true; fx.life = fx.max;
   fx.light.position.copy(pos).setY(pos.y + 0.8);
-  fx.light.intensity = 400; fx.light.visible = true;
+  fx.light.intensity = 400; // visible 토글 없음 — 밝기만 (재컴파일 방지)
   fx.sphere.position.copy(pos).setY(pos.y + 0.7);
   fx.sphere.scale.setScalar(1);
-  fx.sphere.material.opacity = 0.9; fx.sphere.visible = true;
+  fx.sphere.material.opacity = 0.9;
 }
 
 // 물리 스텝 + 소품/래그돌 동기화 + 연쇄 폭발 처리
@@ -3279,7 +3282,7 @@ function clearPhysics() {
   physProps.length = 0;
   for (const rd of ragdolls) { if (physWorld) physWorld.removeRigidBody(rd.body); }
   ragdolls.length = 0;
-  for (const fx of explosionPool) { fx.active = false; fx.light.visible = false; fx.light.intensity = 0; fx.sphere.visible = false; }
+  for (const fx of explosionPool) { fx.active = false; fx.light.intensity = 0; fx.sphere.scale.setScalar(0.0001); fx.sphere.material.opacity = 0; }
   propMeshes.length = 0;
   pendingExplosions = [];
 }
@@ -3293,7 +3296,7 @@ function updateEffects(dt) {
     fx.light.intensity = 400 * k * k;
     fx.sphere.scale.setScalar(1 + (1 - k) * 5);
     fx.sphere.material.opacity = k * 0.9;
-    if (fx.life <= 0) { fx.active = false; fx.light.visible = false; fx.light.intensity = 0; fx.sphere.visible = false; }
+    if (fx.life <= 0) { fx.active = false; fx.light.intensity = 0; fx.sphere.scale.setScalar(0.0001); fx.sphere.material.opacity = 0; } // visible 토글 금지 (#136)
   }
   for (let i = tracers.length - 1; i >= 0; i--) {
     const t = tracers[i];
@@ -3933,23 +3936,16 @@ function loop() {
   skyMesh.position.copy(camera.position);
   skyUniforms.uTime.value = now / 1000;
   renderer.render(scene, camera);
-  updateDynamicResolution(now);
 }
 
-// 동적 해상도 (#132): 최근 FPS 가 낮으면 렌더 스케일을 낮춰 성능 확보, 회복되면 서서히 복원.
-let _dynFrames = 0, _dynT0 = 0, _dynSettle = 0;
-function updateDynamicResolution(now) {
-  if (_dynT0 === 0) { _dynT0 = now; return; }
-  _dynFrames++;
-  const elapsed = now - _dynT0;
-  if (elapsed < 1000) return;
-  const fps = _dynFrames * 1000 / elapsed;
-  _dynFrames = 0; _dynT0 = now;
-  if (_dynSettle > 0) { _dynSettle--; return; } // 스케일 변경 직후 한 구간 관망
-  let ns = renderScale;
-  if (fps < 45 && renderScale > 0.6) ns = Math.max(0.6, renderScale - 0.12);
-  else if (fps > 57 && renderScale < 1.0) ns = Math.min(1.0, renderScale + 0.06);
-  if (ns !== renderScale) { renderScale = ns; applyRenderScale(); _dynSettle = 1; }
+// 해상도는 고정 설정값(High/Med/Low)으로만 바꿈 — 실행 중 자동 변경은 버퍼 리사이즈로 화면이
+// 깜박여서 폐기(#136). 사용자가 메뉴에서 선택, localStorage 저장.
+const RES_LEVELS = { high: 1.0, medium: 0.82, low: 0.66 };
+function setResolution(level) {
+  renderScale = RES_LEVELS[level] || 1.0;
+  applyRenderScale();
+  try { localStorage.setItem('exshoot_res', level); } catch {}
+  document.querySelectorAll('#res-row button').forEach((b) => b.classList.toggle('active', b.dataset.res === level));
 }
 
 // QA/디버그 훅 (콘솔에서 위치 이동 등)
@@ -3979,6 +3975,15 @@ window.__ex = {
 };
 
 initExplosionPool(); // 폭발 VFX 풀 미리 생성 (셰이더 재컴파일 방지, #132)
+// 해상도 설정 (#136): 저장값 적용 + 버튼 배선
+{
+  let saved = 'high';
+  try { saved = localStorage.getItem('exshoot_res') || 'high'; } catch {}
+  document.querySelectorAll('#res-row button').forEach((b) => {
+    b.addEventListener('click', () => { audio(); setResolution(b.dataset.res); });
+  });
+  setResolution(RES_LEVELS[saved] ? saved : 'high');
+}
 updateMenuStash();
 refreshInventoryUI();
 dom.btnStart.disabled = true;

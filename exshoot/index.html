@@ -189,6 +189,16 @@
   }
   .mcard.primary button:hover:not(:disabled) { background: rgba(80, 180, 100, 0.45); }
   #menu-screen .keys, #menu-screen .touch-keys { margin-bottom: 14px; }
+  #res-row {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    font-size: 11px; letter-spacing: 1px; color: rgba(207,216,207,0.6); margin-bottom: 10px;
+  }
+  #res-row button {
+    pointer-events: auto; cursor: pointer; font-family: inherit;
+    font-size: 11px; letter-spacing: 1px; padding: 4px 12px; border-radius: 3px;
+    color: #cfd8cf; background: rgba(90,120,80,0.18); border: 1px solid rgba(255,255,255,0.14);
+  }
+  #res-row button.active { border-color: #6f8f5f; background: rgba(120,160,100,0.35); color: #eef4ec; }
   #menu-screen #load-progress { margin: 14px auto 0; }
   @media (max-height: 480px), (max-width: 700px) {
     #menu-top { margin-top: 3vh; }
@@ -440,6 +450,9 @@
         <div class="mdesc">무기 · 방어구 구매</div>
       </div>
     </div>
+    <div id="res-row">해상도
+      <button data-res="high">높음</button><button data-res="medium">중간</button><button data-res="low">낮음</button>
+    </div>
     <div class="keys">
       <b>WASD</b> 이동 · <b>Shift</b> 달리기 · <b>Space</b> 점프 · <b>마우스</b> 조준/사격 ·
       <b>R</b> 재장전 · <b>E</b> 상호작용 · <b>Q</b> 치료 · <b>Tab</b> 인벤토리 · <b>1~6</b> 무기
@@ -492,6 +505,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=5d3634d"></script>
+  <script type="module" src="./src/main.js?v=0fcd056"></script>
 </body>
 </html>
