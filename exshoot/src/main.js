@@ -46,6 +46,8 @@ const CAM = {
   pitchMax: 0.95,   // 위로
 };
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
+let viewMode = 'tps'; // 'tps' | 'fps' — V 키로 전환 (#145)
+try { viewMode = localStorage.getItem('exshoot_view') === 'fps' ? 'fps' : 'tps'; } catch {}
 
 // 무기 테이블 — GUN 은 현재 장착 무기를 가리킴 (equipWeapon 으로 교체)
 const WEAPONS = {
@@ -307,11 +309,12 @@ function setupPostFX() {
     try {
       gtaoPass = new GTAOPass(scene, camera, size.x, size.y);
       gtaoPass.output = GTAOPass.OUTPUT.Default;
-      gtaoPass.blendIntensity = 0.65;
+      gtaoPass.blendIntensity = 1.0;
+      try { gtaoPass.updateGtaoMaterial({ radius: 0.5, scale: 1.2, samples: 16 }); } catch {}
       composer.addPass(gtaoPass);
     } catch (e) { console.warn('GTAO 생략:', e && e.message); }
   }
-  bloomPass = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.42, 0.6, 0.85); // strength, radius, threshold
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.65, 0.7, 0.75); // strength, radius, threshold (강화 #145)
   composer.addPass(bloomPass);
   composer.addPass(new OutputPass()); // 톤매핑/sRGB 는 항상 유지 (효과 OFF 여도) — 색 일관성
 }
@@ -2617,9 +2620,10 @@ function updatePlayer(dt) {
   // 실제 변위 기준 수평 속도 (벽에 막히면 0)
   const hSpeed = Math.hypot(player.pos.x - prevPX, player.pos.z - prevPZ) / Math.max(dt, 1e-4);
 
-  // --- 3인칭 캐릭터 + 오버숄더 카메라 (#116) ---
+  // --- 캐릭터 + 카메라 (3인칭/1인칭 전환, #145) ---
   updatePlayerChar(dt, hSpeed, wish.x, wish.z);
-  updateTPSCamera(dt);
+  if (viewMode === 'fps') updateFPSCamera();
+  else updateTPSCamera(dt);
 
   // 발소리 (3인칭이므로 헤드밥 제거)
   if (player.grounded && hSpeed > 0.5) {
@@ -2801,7 +2805,7 @@ function pcMuzzle() {
 // 3인칭 캐릭터 갱신 — 위치/회전/애니메이션
 function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   if (!pc) return;
-  pc.group.visible = state.phase === 'raid' && !scopeShown;
+  pc.group.visible = state.phase === 'raid' && !scopeShown && viewMode === 'tps'; // FPS 는 캐릭터 숨김 (#145)
   if (pc.gunPivot) pc.gunPivot.visible = pc.group.visible;
   pc.group.position.set(player.pos.x, player.pos.y, player.pos.z);
 
@@ -2849,12 +2853,13 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
     }
   }
 
-  // 조준 additive (상하 조준)
+  // 조준 additive (상하 조준) — 약하게만. 가늠 총구는 updateGunHold 가 피치로 처리하므로
+  // 상체 additive 를 세게 주면 조준 포즈(AimV2)가 왜곡됨 → 0.35 로 억제 (#145)
   const wantAim = player.aiming ? 1 : 0;
   pc.aimBlend += (wantAim - pc.aimBlend) * Math.min(1, dt * 6);
   const aimPitch = THREE.MathUtils.clamp(player.pitch, -0.6, 0.6);
   if (pc.actAimUp && pc.actAimDown) {
-    const k = pc.aimBlend * (pc.oneShot && pc.oneShot !== pc.actShoot ? 0 : 1);
+    const k = 0.35 * pc.aimBlend * (pc.oneShot && pc.oneShot !== pc.actShoot ? 0 : 1);
     pc.actAimUp.setEffectiveWeight(Math.max(0, aimPitch / 0.6) * k);
     pc.actAimDown.setEffectiveWeight(Math.max(0, -aimPitch / 0.6) * k);
   }
@@ -2871,6 +2876,13 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
 // 3인칭 오버숄더 카메라 — 궤도 + 벽 충돌 당김 (#116)
 const _camRay = new THREE.Raycaster();
 let camAimBlend = 0;
+// 1인칭 카메라 — 눈 위치에서 yaw/pitch (#145)
+function updateFPSCamera() {
+  player.pitch = THREE.MathUtils.clamp(player.pitch, -1.5, 1.5);
+  camera.rotation.set(player.pitch, player.yaw, 0);
+  camera.position.set(player.pos.x, player.pos.y + PLAYER.eye, player.pos.z);
+}
+
 function updateTPSCamera(dt) {
   player.pitch = THREE.MathUtils.clamp(player.pitch, CAM.pitchMin, CAM.pitchMax);
   camAimBlend += ((player.aiming ? 1 : 0) - camAimBlend) * Math.min(1, dt * 10);
@@ -3015,8 +3027,25 @@ function updateGun(dt) {
   // 반동 회복
   gun.recoil = Math.max(0, gun.recoil - dt * 3);
 
+  // FPS 뷰모델 (#145): 1인칭일 때만 표시·위치. 3인칭은 캐릭터가 총을 듦.
+  if (viewMode === 'fps') {
+    gunGroup.visible = !scopeShown && state.phase === 'raid';
+    const target = player.aiming ? GUN_ADS : GUN_HIP;
+    gunGroup.position.lerp(target, Math.min(1, dt * 14));
+    gunGroup.position.z += gun.recoil * 0.05;
+    gunGroup.rotation.set(gun.recoil * 0.08, 0, 0);
+  } else {
+    gunGroup.visible = false;
+  }
+
   muzzleFlashLight.intensity *= Math.pow(0.001, dt * 6);
   if (muzzleFlashLight.intensity < 0.5) muzzleFlashLight.intensity = 0;
+}
+
+function toggleViewMode() {
+  viewMode = viewMode === 'tps' ? 'fps' : 'tps';
+  try { localStorage.setItem('exshoot_view', viewMode); } catch {}
+  addFeed(viewMode === 'fps' ? '1인칭 시점' : '3인칭 시점');
 }
 
 function startReload() {
@@ -3039,7 +3068,8 @@ function fireShot() {
   sfx.shoot();
   if (pc) { pc.gunKick = Math.min(0.5, (pc.gunKick || 0) + 0.2); pc.fireFaceT = 0.4; } // 총 반동 킥 + 사격 중 몸 정렬 (#122)
   muzzleFlashLight.intensity = currentAtt.includes('silencer') ? 10 : 40;
-  const muzzle = pcMuzzle();
+  // 총구: FPS 는 뷰모델 총구, TPS 는 캐릭터 총구 (#145)
+  const muzzle = (viewMode === 'fps' && gunGroup.visible) ? gunGroup.localToWorld(muzzleLocal.clone()) : pcMuzzle();
   muzzleFlashLight.position.copy(muzzle);
   alertEnemiesAround(player.pos, currentAtt.includes('silencer') ? 16 : 60);
 
@@ -3873,6 +3903,7 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.code === 'KeyR') startReload();
   if (e.code === 'KeyQ') useHeal();
+  if (e.code === 'KeyV') toggleViewMode();
   if (e.code === 'KeyE') {
     const it = nearestInteractable();
     if (it) lootInteractable(it);
