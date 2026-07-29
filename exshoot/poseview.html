@@ -58,25 +58,39 @@ scene.add(model);
 const mixer = new THREE.AnimationMixer(model);
 const clips = {}; for (const c of girl.animations) clips[c.name] = c;
 const handR = model.getObjectByName('RightHand');
+const handL = model.getObjectByName('LeftHand');
 
-// 총 (오른손 그립 + faceYaw 방향, 게임과 동일)
-const gunPivot = new THREE.Group(); scene.add(gunPivot);
+// 총을 오른손 본에 직접 부착(리지드) — mocap 손 방향을 그대로 따름. #150
+// 로컬 회전은 Aim 포즈에서 (오른손→왼손)=총열축 기준으로 자가 캘리브레이션.
+const gunPivot = new THREE.Group();
 const g = rifle.scene.clone(true);
 { const gb=new THREE.Box3().setFromObject(g); const gs=0.82/Math.max(gb.max.x-gb.min.x,gb.max.y-gb.min.y,gb.max.z-gb.min.z);
   g.scale.setScalar(gs); g.rotation.y=-Math.PI/2; g.updateMatrixWorld(true);
   const gb2=new THREE.Box3().setFromObject(g); g.position.sub(gb2.getCenter(new THREE.Vector3())); g.position.z += (gb2.max.z-gb2.min.z)*0.28; }
 gunPivot.add(g);
-let aimPitch = 0;
-function updateGun(){
-  if(!handR) return;
-  const rh=new THREE.Vector3(); handR.getWorldPosition(rh);
-  const yaw=Math.PI, cy=Math.cos(aimPitch);
-  const bz=new THREE.Vector3(Math.sin(yaw)*cy, Math.sin(aimPitch), Math.cos(yaw)*cy).normalize();
-  const bx=new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0),bz); if(bx.lengthSq()<1e-5)bx.set(1,0,0); bx.normalize();
-  const by=new THREE.Vector3().crossVectors(bz,bx).normalize();
-  gunPivot.position.copy(rh);
-  gunPivot.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(bx,by,bz));
+if (handR) { handR.add(gunPivot); gunPivot.scale.setScalar(1/s); }
+else { scene.add(gunPivot); }
+
+const _rh=new THREE.Vector3(), _lh=new THREE.Vector3(), _bx=new THREE.Vector3(), _by=new THREE.Vector3(), _bz=new THREE.Vector3(), _qh=new THREE.Quaternion(), _qt=new THREE.Quaternion(), _m4=new THREE.Matrix4();
+// Aim 포즈를 결정적으로 샘플링해 총의 손-로컬 회전을 1회 산출 (탭 가시성/rAF 무관). #150
+function calibrateGun(){
+  if(!handR || !handL || !clips['Aim']) return;
+  const act = mixer.clipAction(clips['Aim']); mixer.stopAllAction(); act.reset().play();
+  mixer.setTime(0.6); model.updateWorldMatrix(true, true);
+  handR.getWorldPosition(_rh); handL.getWorldPosition(_lh);
+  _bz.copy(_lh).sub(_rh);                 // 총열축: 오른손(그립)→왼손(총열)
+  if(_bz.lengthSq() < 1e-6){ _bz.set(0,0,1); }
+  _bz.normalize();                        // fwd = 총열 방향 (총 메시 배럴축 = gunPivot +Z)
+  _bx.crossVectors(new THREE.Vector3(0,1,0), _bz); if(_bx.lengthSq()<1e-5)_bx.set(1,0,0); _bx.normalize(); // right
+  _by.crossVectors(_bz,_bx).normalize();  // up
+  _qt.setFromRotationMatrix(_m4.makeBasis(_bx,_by,_bz)); // local+Z→fwd(배럴)
+  handR.getWorldQuaternion(_qh);
+  gunPivot.quaternion.copy(_qh.invert().multiply(_qt));   // 손 로컬 프레임 기준 회전
+  mixer.stopAllAction();
+  const q=gunPivot.quaternion;
+  console.log('[gun-calib] localQuat', q.x.toFixed(4), q.y.toFixed(4), q.z.toFixed(4), q.w.toFixed(4));
 }
+calibrateGun();
 
 let cur=null;
 function play(name){ if(cur) cur.fadeOut(0.15); cur=mixer.clipAction(clips[name]); cur.reset().fadeIn(0.15).play();
@@ -86,11 +100,16 @@ const ORDER = ['Aim','IdleGun','ReadyGun','Idle','Run','Walk','Reload','Shoot','
 const names = Object.keys(clips).sort((a,b)=>{ const ia=ORDER.indexOf(a),ib=ORDER.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib); });
 for(const n of names){ const btn=document.createElement('button'); btn.textContent=n; btn.onclick=()=>play(n); document.getElementById('ui').appendChild(btn); }
 document.getElementById('gunck').onchange=e=>gunPivot.visible=e.target.checked;
-document.getElementById('pitch').oninput=e=>aimPitch=e.target.value*Math.PI/180;
+document.getElementById('pitch').parentElement.style.display='none'; // 손 본 부착 방식에선 조준 각을 mocap 이 처리
 play(clips['Aim']?'Aim':names[0]);
 
+window.__pv = { camera, controls, model, handR, handL, gunPivot, mixer, clips, play,
+  front(){ camera.position.set(0,1.3,-3.4); controls.target.set(0,1.05,0); controls.update(); },
+  back(){ camera.position.set(0,1.3,3.4); controls.target.set(0,1.05,0); controls.update(); } };
 let last=performance.now();
-function loop(){ requestAnimationFrame(loop); const now=performance.now(); mixer.update((now-last)/1000); last=now;
-  model.updateWorldMatrix(true,true); updateGun(); controls.update(); renderer.render(scene,camera); }
+function loop(){ requestAnimationFrame(loop); const now=performance.now();
+  const dt=Math.min((now-last)/1000, 0.05); last=now;   // dt 클램프 (백그라운드 복귀 시 점프 방지)
+  mixer.update(dt); model.updateWorldMatrix(true,true);
+  controls.update(); renderer.render(scene,camera); }
 loop();
 </script></body></html>

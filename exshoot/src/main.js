@@ -88,7 +88,7 @@ const WEAPONS = {
     pellets: 1, auto: true, adsFov: 52, recoil: 0.32, kick: 0.005, sfxRate: 1.08, sfxVol: 0.45,
   },
   sniper: {
-    key: 'sniper', name: '볼트액션 저격총', model: 'sniper', price: 90000, viewLen: 0.78,
+    key: 'sniper', name: '볼트액션 저격총', model: 'sniper', price: 90000, viewLen: 0.78, tpsScale: 1.2,
     fireInterval: 1.5, magSize: 5, reserveMax: 20, reloadTime: 2.9,
     damageBody: 110, damageHead: 260, range: 400,
     spreadHip: 0.05, spreadAds: 0.0012, spreadMove: 0.035,
@@ -383,6 +383,7 @@ const GLB_MANIFEST = {
   treePineB: 'assets/env/nature/tree_pineDefaultB.glb',
   treeOak: 'assets/env/nature/tree_default.glb',
   rock: 'assets/env/nature/rock_largeA.glb',
+  // Quaternius Ultimate Stylized Nature (CC0) — Blender 로 변형별 개별 GLB 분리 (#165, split_nature.py)
   buildingB: 'assets/env/industrial/building-b.glb',
   buildingF: 'assets/env/industrial/building-f.glb',
   buildingG: 'assets/env/industrial/building-g.glb',
@@ -405,6 +406,13 @@ const GLB_MANIFEST = {
   carDelivery: 'assets/env/cars/delivery-flat.glb',
   carTire: 'assets/env/cars/debris-tire.glb',
 };
+
+// Quaternius 개별 나무·바위 등록 (split_nature.py 산출) + 숲 나무 구성 (#165)
+const NATURE_SPLIT_DIR = 'assets/env/nature/quaternius/split/';
+const TREE_KEYS = { pine: [], maple: [], birch: [], normal: [], dead: [], rock: [] };
+for (const [t, file] of [['pine', 'pinetree'], ['maple', 'mapletree'], ['birch', 'birchtree'], ['normal', 'normaltree'], ['dead', 'deadtree'], ['rock', 'rock']]) {
+  for (let i = 1; i <= 5; i++) { const k = `q_${t}${i}`; GLB_MANIFEST[k] = `${NATURE_SPLIT_DIR}${file}_${i}.glb`; TREE_KEYS[t].push(k); }
+}
 
 // ── 로딩 진행 바 ──
 // path → { loaded, total, done } (total 은 Content-Length 없으면 0)
@@ -466,9 +474,18 @@ async function loadAssets() {
       if (o.isMesh) {
         o.castShadow = true; o.receiveShadow = true;
         if (o.material && !isGirl) {
-          // 일부 에셋이 alphaMode:MASK + alpha 0 으로 나와 전부 투명해짐 → 불투명 강제
-          // (VRoid 캐릭터는 알파를 실제로 사용하므로 제외)
-          o.material.alphaTest = 0; o.material.transparent = false; o.material.opacity = 1;
+          const mn = (o.material.name || '').toLowerCase();
+          if (/leaf|leaves|foliage|bush|plant/.test(mn)) {
+            // 잎/수풀: 텍스처 알파로 잎 실루엣만 남기는 컷아웃 (BLEND 카드가 사각 종이로 보이는 문제) #165
+            o.material.transparent = false;
+            o.material.alphaTest = 0.4;
+            o.material.depthWrite = true;
+            o.material.side = THREE.DoubleSide;
+          } else {
+            // 일부 에셋이 alphaMode:MASK + alpha 0 으로 나와 전부 투명해짐 → 불투명 강제
+            // (VRoid 캐릭터는 알파를 실제로 사용하므로 제외)
+            o.material.alphaTest = 0; o.material.transparent = false; o.material.opacity = 1;
+          }
         }
         if (o.material && isGirl && o.material.transparent) {
           // 반투명(BLEND) 파츠는 컷아웃으로 — 헤어/속눈썹 소팅 아티팩트 방지
@@ -567,6 +584,7 @@ function instantiate(key) {
   return ASSETS[key].scene.clone(true);
 }
 
+
 function fixQuatContinuity(clip) {
   if (!clip) return;
   for (const t of clip.tracks) {
@@ -595,7 +613,7 @@ function vnoise(x, z) {
        + (vhash(ix, iz + 1) * (1 - ux) + vhash(ix + 1, iz + 1) * ux) * uz;
 }
 // 평탄 유지 구역: r = 원형 반경, hw/hd = 사각 반폭
-const FLATTENS = [
+let FLATTENS = [
   { x: 16, z: -6, hw: 26, hd: 21 },   // 컨테이너 야적장
   { x: 32, z: 34, hw: 19, hd: 16 },   // buildingA 앞마당
   { x: -30, z: -20, hw: 22, hd: 17 }, // 중앙 창고
@@ -704,10 +722,13 @@ function placeModel(key, x, z, { rotY = 0, height = null, width = null, collide 
 }
 
 // 나무: 시야/총알은 잎까지 차단, 이동 충돌은 줄기만
-function placeTree(key, x, z, height) {
+// 나무: 시야/총알은 잎까지 차단(mesh), 이동 충돌·엄폐는 줄기 콜라이더만.
+// trunkR 를 주면 굵은 줄기(엄폐목)로 — 총알·시야를 서서 막을 수 있게 콜라이더 상단도 높인다.
+function placeTree(key, x, z, height, trunkR = 0.35) {
   const m = placeModel(key, x, z, { height, collide: false, block: true, rotY: Math.random() * Math.PI * 2 });
   const gy = terrainH(x, z);
-  colliders.push(axisCollider(x - 0.35, x + 0.35, gy, gy + 3, z - 0.35, z + 0.35));
+  const top = gy + Math.min(4, Math.max(3, height * 0.35)); // 줄기 콜라이더 높이(서서 엄폐)
+  colliders.push(axisCollider(x - trunkR, x + trunkR, gy, top, z - trunkR, z + trunkR));
   return m;
 }
 
@@ -1455,7 +1476,7 @@ function addHouse(hx, hz, { wall = 'brick' } = {}) {
   addBox(hx - 1.65, 0.75, hz - 1.2, 0.08, 0.66, 0.7, MAT.woodDark, { block: false });
 }
 
-function buildStaticMap() {
+function buildIndustrialMap() {
   buildTexMats(); // 건축 PBR 재질 (#107) — 텍스처 로드 후 1회
   // 지면 (ambientCG Ground048 — 없으면 절차 생성)
   let groundMat;
@@ -1595,12 +1616,12 @@ function buildStaticMap() {
   const drums = [[5, -25], [7, -25.8], [-42, 10], [30, -50], [-25, 35], [62, -45], [18, 20], [-65, 55]];
   for (const [x, z] of drums) placeModel('barrel', x, z, { height: 1.1, rotY: Math.random() * Math.PI * 2 });
 
-  // 나무 (Kenney nature-kit)
+  // 나무 (Quaternius 스타일라이즈드 — 산업지대는 침엽/일반/고사목/자작 위주로 황량하게) #165
   const trees = [[-70, -60], [-75, 20], [70, 60], [65, -60], [-20, 70], [50, 70], [-70, 70], [75, -20], [-40, -70], [20, -68], [-5, -55], [68, 30]];
-  const treeKinds = ['treePineA', 'treePineB', 'treeOak'];
+  const treeKinds = [...TREE_KEYS.pine, ...TREE_KEYS.pine, ...TREE_KEYS.normal, ...TREE_KEYS.dead, ...TREE_KEYS.dead, ...TREE_KEYS.birch];
   for (const [x, z] of trees) {
     const kind = treeKinds[Math.floor(Math.random() * treeKinds.length)];
-    placeTree(kind, x, z, kind === 'treeOak' ? 5.5 + Math.random() * 1.5 : 7.5 + Math.random() * 2.5);
+    placeTree(kind, x, z, 6 + Math.random() * 3.5);
   }
 
   // 바위
@@ -1783,7 +1804,7 @@ function rollItems(min, max) {
   return Array.from({ length: n }, rollItem);
 }
 
-const LOOT_SPOTS = [
+let LOOT_SPOTS = [
   [-28, -18], [-34, -14], [-22, -21],       // 창고 내부
   [30, 32], [44, -32], [-48, 42], [8, 55],  // 주택 내부
   [16, -11], [-11, 25], [57, 13], [-57, -34], // 컨테이너 사이
@@ -2454,7 +2475,7 @@ function alertEnemiesAround(pos, range) {
 // ============================================================
 // 탈출 지점
 // ============================================================
-const EXTRACT_CANDIDATES = [
+let EXTRACT_CANDIDATES = [
   { name: '북동 게이트', pos: new THREE.Vector3(76, 0, -76) },
   { name: '남서 통로', pos: new THREE.Vector3(-76, 0, 76) },
   { name: '남동 담장', pos: new THREE.Vector3(76, 0, 76) },
@@ -2742,7 +2763,8 @@ function buildPlayerChar() {
   const handR = model.getObjectByName('RightHand');
   const handL = model.getObjectByName('LeftHand');
   const gunPivot = new THREE.Group();
-  scene.add(gunPivot);
+  if (handR) { handR.add(gunPivot); gunPivot.scale.setScalar(1 / s); } // 오른손 본에 리지드 부착 (#150)
+  else scene.add(gunPivot);
 
   const spine = model.getObjectByName('Spine') || null;
   pc = {
@@ -2757,7 +2779,32 @@ function buildPlayerChar() {
       if (pc.baseAct) { back.fadeOut(0.12); pc.baseAct.reset().fadeIn(0.12).play(); }
     }
   });
+  // 총 로컬 회전 캘리브레이션: Aim 포즈에서 (오른손→왼손)=총열축 기준 1회 산출 (#150)
+  pc.gunLocalQuat = calibrateGunLocal(model, mixer, actAim, handR, handL, pcIdle);
   setPlayerGun(GUN.key);
+}
+
+// Aim 포즈를 임시 100% 적용해 총(오른손 부착)의 손-로컬 회전을 결정적으로 산출 (#150)
+function calibrateGunLocal(model, mixer, actAim, handR, handL, pcIdle) {
+  const q = new THREE.Quaternion();
+  if (!actAim || !handR || !handL) return q;
+  actAim.reset().play(); actAim.setEffectiveWeight(1); actAim.time = 0.6;
+  if (pcIdle) pcIdle.setEffectiveWeight(0);
+  mixer.update(0);
+  model.updateWorldMatrix(true, true);
+  const rh = handR.getWorldPosition(new THREE.Vector3());
+  const lh = handL.getWorldPosition(new THREE.Vector3());
+  const bz = lh.sub(rh); if (bz.lengthSq() < 1e-6) bz.set(0, 0, 1); bz.normalize(); // 총열축
+  const bx = new THREE.Vector3().crossVectors(WORLD_UP, bz); if (bx.lengthSq() < 1e-5) bx.set(1, 0, 0); bx.normalize();
+  const by = new THREE.Vector3().crossVectors(bz, bx).normalize();
+  const qt = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(bx, by, bz));
+  const qh = handR.getWorldQuaternion(new THREE.Quaternion());
+  q.copy(qh.invert().multiply(qt)); // 손 로컬 프레임 기준 (총 배럴 = gunPivot +Z)
+  // 원상 복구: Aim 정지, 대기 자세 재개
+  actAim.stop();
+  if (pcIdle) { pcIdle.setEffectiveWeight(1); pcIdle.play(); }
+  mixer.update(0);
+  return q;
 }
 
 // 장착 무기 모델을 gunPivot 에 반영 (equipWeapon 연동). gunPivot 은 매 프레임 두 손으로 정렬.
@@ -2766,7 +2813,10 @@ function setPlayerGun(key) {
   if (pc.curGun) { pc.gunPivot.remove(pc.curGun); pc.curGun = null; }
   const w = WEAPONS[key]; if (!w) return;
   const m = instantiate(w.model);
-  const size = normalizeModel(m, 0.82, -Math.PI / 2); // 실측 비율(총구 +Z), 중심이 원점
+  // TPS 총 길이는 무기별 viewLen 에 비례 (라이플 0.62→0.82 유지, 리볼버 등은 그에 맞춰 축소). #150
+  // 기존 모든 무기 0.82 고정은 리볼버가 라이플 크기가 되는 문제가 있었음.
+  const tpsLen = (w.viewLen || 0.62) * (0.82 / 0.62) * (w.tpsScale || 1); // tpsScale: 무기별 TPS 크기 미세보정
+  const size = normalizeModel(m, tpsLen, -Math.PI / 2); // 실측 비율(총구 +Z), 중심이 원점
   // 그립을 gunPivot 원점(=오른손)에 맞춤: 그립은 중심보다 뒤(-Z)라 +Z 로 이동
   m.position.z += size.z * 0.28;
   m.position.y += 0.02; // 손바닥 위에 얹히도록 살짝
@@ -2777,27 +2827,26 @@ function setPlayerGun(key) {
   pc.curGun = m;
 }
 
-// 매 프레임 총을 오른손(그립)에 두고 캐릭터 정면+피치 방향으로 겨눔 — #131
-// (총구가 항상 앞을 향하도록 faceYaw 기준. 왼손은 총열 부근에 대략 위치)
-const _rh = new THREE.Vector3(), _bx = new THREE.Vector3(), _by = new THREE.Vector3(), _bz = new THREE.Vector3(), _m4 = new THREE.Matrix4();
+// 총은 오른손 본에 리지드 부착(#150). 위치(그립)는 mocap 손을 상속하고,
+// 방향은 비조준=mocap 손 방향 / 조준=실제 사격선(카메라 전방)으로 정렬 → 총열↔명중선 일치.
+const _ghCamDir = new THREE.Vector3(), _ghBx = new THREE.Vector3(), _ghBy = new THREE.Vector3(),
+  _ghM4 = new THREE.Matrix4(), _ghQt = new THREE.Quaternion(), _ghQh = new THREE.Quaternion(), _ghAimLocal = new THREE.Quaternion();
 function updateGunHold() {
-  if (!pc || !pc.handR || !pc.curGun) return;
-  pc.handR.getWorldPosition(_rh);
-  const yaw = pc.faceYaw;
-  // 총구 상하각: 조준=카메라 피치, 편한 대기=총구 내림, 그 외=살짝 아래
-  let gp;
-  if (player.aiming) gp = player.pitch;
-  else if (pc.baseAct === pc.actIdleGun) gp = -0.5;
-  else gp = -0.14;
-  const cy = Math.cos(gp);
-  _bz.set(Math.sin(yaw) * cy, Math.sin(gp), Math.cos(yaw) * cy).normalize();
-  _bx.crossVectors(WORLD_UP, _bz);
-  if (_bx.lengthSq() < 1e-5) _bx.set(1, 0, 0);
-  _bx.normalize();
-  _by.crossVectors(_bz, _bx).normalize();
-  _m4.makeBasis(_bx, _by, _bz);
-  pc.gunPivot.position.copy(_rh);
-  pc.gunPivot.quaternion.setFromRotationMatrix(_m4);
+  if (!pc || !pc.gunPivot || !pc.gunLocalQuat) return;
+  pc.gunPivot.quaternion.copy(pc.gunLocalQuat); // 기본: mocap 손 방향 (캘리브레이션 로컬 회전)
+  // 조준 중엔 배럴(+Z)을 카메라 전방으로 정렬 — 그립은 손에 유지, 사격방향과 시각 일치 (#150)
+  const ab = THREE.MathUtils.clamp(pc.aimBlend || 0, 0, 1);
+  if (ab > 0.01 && pc.handR) {
+    camera.getWorldDirection(_ghCamDir);
+    const bz = _ghCamDir.normalize();
+    _ghBx.crossVectors(WORLD_UP, bz); if (_ghBx.lengthSq() < 1e-5) _ghBx.set(1, 0, 0); _ghBx.normalize();
+    _ghBy.crossVectors(bz, _ghBx).normalize();
+    _ghM4.makeBasis(_ghBx, _ghBy, bz);
+    _ghQt.setFromRotationMatrix(_ghM4);                 // 목표 월드 회전 (배럴=카메라 전방)
+    pc.handR.getWorldQuaternion(_ghQh);
+    _ghAimLocal.copy(_ghQh.invert().multiply(_ghQt));   // 손 로컬 프레임 기준
+    pc.gunPivot.quaternion.slerp(_ghAimLocal, ab);      // mocap→조준 블렌드
+  }
   if (pc.gunKick > 0.001) pc.gunPivot.rotateX(-pc.gunKick); // 반동 젖힘
 }
 
@@ -2810,11 +2859,15 @@ function playPcOneShot(act, fade = 0.06) {
   act.reset().fadeIn(fade).play();
 }
 
-// 캐릭터 총구 위치 (트레이서/화염 원점) — gunPivot 그립에서 총열(+Z) 방향으로
+// 캐릭터 총구 위치 (트레이서/화염 원점) — gunPivot 그립에서 총열(+Z) 방향으로 (월드 변환)
+const _muzWp = new THREE.Vector3(), _muzWq = new THREE.Quaternion();
 function pcMuzzle() {
-  if (pc && pc.curGun) {
-    const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(pc.gunPivot.quaternion);
-    return pc.gunPivot.position.clone().addScaledVector(fwd, pc.gunLen || 0.7);
+  if (pc && pc.curGun && pc.gunPivot) {
+    pc.gunPivot.updateWorldMatrix(true, false);
+    pc.gunPivot.getWorldPosition(_muzWp);
+    pc.gunPivot.getWorldQuaternion(_muzWq);
+    const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(_muzWq);
+    return _muzWp.clone().addScaledVector(fwd, pc.gunLen || 0.7);
   }
   const fy = pc ? pc.faceYaw : player.yaw;
   return new THREE.Vector3(0.22, 1.32, 0.55).applyEuler(new THREE.Euler(0, fy, 0)).add(player.pos);
@@ -3200,7 +3253,7 @@ function buildPhysicsStatics() {
 }
 
 // 레이드마다 동적 물리 배럴 배치 (일부는 폭발통)
-const PHYS_BARRELS = [
+let PHYS_BARRELS = [
   [5, -25, true], [7, -25.8, false], [-42, 10, true], [30, -50, false],
   [-25, 35, false], [62, -45, true], [18, 20, false], [-65, 55, false],
   [-6, -35.8, true], [-63.8, 8.5, false], [33, 34, true], [-30, -20, false],
@@ -3530,12 +3583,227 @@ function updateCompass() {
 // ============================================================
 // 레이드 라이프사이클
 // ============================================================
-const SPAWN_POINTS = [
+let SPAWN_POINTS = [
   new THREE.Vector3(0, 0, 82), new THREE.Vector3(0, 0, -82),
   new THREE.Vector3(82, 0, 0), new THREE.Vector3(-82, 0, 0),
 ];
 
-let staticBuilt = false;
+// ── 숲 속 고등학교 맵 (#165) ──────────────────────────────
+// 오픈월드풍 나무 (Quaternius 개별 GLB) — 침엽(소나무)·활엽(단풍/일반/자작) 혼합 + 고사목 소량
+let FOREST_TREES = [...TREE_KEYS.pine, ...TREE_KEYS.pine, ...TREE_KEYS.maple, ...TREE_KEYS.maple, ...TREE_KEYS.normal, ...TREE_KEYS.birch, ...TREE_KEYS.dead];
+
+// 절차적 고등학교 건물 — 1층 진입 가능(중앙 현관+복도+교실), 2~3층 창 파사드 매스, 옥상 파라펫
+function buildSchoolBuilding(cx, cz) {
+  const L = 46, Dp = 12, FH = 3.4, t = 0.35;   // 길이(X)/깊이(Z)/층고
+  const halfL = L / 2, halfD = Dp / 2;
+  const wall = 'plaster';                       // 외벽: 도색 콘크리트
+  const zF = cz + halfD, zB = cz - halfD;       // 남(정면 +Z)/북(후면)
+  const entW = 4.2;                              // 중앙 현관 폭
+
+  // 기초 슬래브 + 실내 바닥
+  addBox(cx, 0.15, cz, L + 1.0, 0.5, Dp + 1.0, 'concrete');
+  addBox(cx, 0.34, cz, L - 0.6, 0.05, Dp - 0.6, 'woodfloor', { collide: false, block: false, shadow: false });
+
+  // ── 1층 ──
+  // 정면(남): 좌우 창문벽 + 중앙 현관 개구부(상인방만)
+  const sideLen = (L - entW) / 2;
+  const winsFrontL = [{ at: -sideLen / 2 - 1, w: 1.8 }, { at: 0, w: 1.8 }, { at: sideLen / 2 + 1, w: 1.8 }];
+  const winsFrontR = winsFrontL;
+  addWindowWall(cx - (entW / 2 + sideLen / 2), zF, sideLen, FH, 'x', wall, [{ at: 0, w: 1.8 }, { at: -sideLen / 2 + 1.4, w: 1.8 }]);
+  addWindowWall(cx + (entW / 2 + sideLen / 2), zF, sideLen, FH, 'x', wall, [{ at: 0, w: 1.8 }, { at: sideLen / 2 - 1.4, w: 1.8 }]);
+  addBox(cx, FH - 0.35, zF, entW + 0.4, 0.7, t, wall);        // 현관 상인방
+  addBox(cx, 0.1, zF + 0.9, entW + 1.2, 0.2, 1.8, 'concrete'); // 현관 계단/포치
+  // 후면(북): 교실 창문 밴드
+  const winsBack = [];
+  for (let i = -2; i <= 2; i++) winsBack.push({ at: i * 8.4, w: 2.6 });
+  addWindowWall(cx, zB, L, FH, 'x', wall, winsBack);
+  // 양 끝벽(동/서): 비상문
+  addWallWithDoor(cx - halfL, cz, Dp, FH, 'z', wall, halfD - 2.2, 1.4);
+  addWallWithDoor(cx + halfL, cz, Dp, FH, 'z', wall, -(halfD - 2.2), 1.4);
+
+  // 내부: 복도벽(정면쪽 오프셋) + 교실 칸막이 + 교실문
+  const corrZ = cz + halfD - 3.0;      // 복도는 정면쪽 3m 폭
+  // 복도-교실 경계벽 (교실문 5개)
+  const roomCount = 5, roomW = L / roomCount;
+  for (let r = 0; r < roomCount; r++) {
+    const rx = cx - halfL + roomW * (r + 0.5);
+    addWallWithDoor(rx, corrZ, roomW, FH, 'x', wall, roomW * 0.28, 1.3); // 복도쪽 교실문
+    if (r > 0) addWall(cx - halfL + roomW * r, (cz - halfD + corrZ) / 2, corrZ - (cz - halfD), FH, 'z', wall); // 교실 칸막이
+  }
+  // 1층 천장 슬래브 (2층 바닥) — 실내 상부 폐쇄
+  addBox(cx, FH + 0.12, cz, L + 0.6, 0.24, Dp + 0.6, 'concrete', { collide: false });
+
+  // ── 2~3층: 창 밴드 파사드 (진입 불가 매스) ──
+  for (let f = 1; f <= 2; f++) {
+    const by = FH * f;
+    const winsRow = [];
+    for (let i = -2; i <= 2; i++) winsRow.push({ at: i * 8.4, w: 3.0 });
+    addWindowWall(cx, zF, L, FH, 'x', wall, winsRow, by);
+    addWindowWall(cx, zB, L, FH, 'x', wall, winsRow, by);
+    addBox(cx - halfL, by + FH / 2, cz, t, FH, Dp, wall, { collide: false }); // 끝벽(상층, baseY)
+    addBox(cx + halfL, by + FH / 2, cz, t, FH, Dp, wall, { collide: false });
+    addBox(cx, by + FH + 0.12, cz, L + 0.6, 0.24, Dp + 0.6, 'concrete', { collide: false }); // 층 슬래브
+  }
+  // 옥상 파라펫
+  const roofY = FH * 3;
+  for (const [ox, oz, w, d] of [[0, halfD, L + 0.6, 0.3], [0, -halfD, L + 0.6, 0.3], [-halfL, 0, 0.3, Dp + 0.6], [halfL, 0, 0.3, Dp + 0.6]]) {
+    addBox(cx + ox, roofY + 0.5, cz + oz, w, 1.0, d, 'concrete', { collide: false });
+  }
+}
+
+// 숲 배치: 격자+지터, 건물/운동장 플래튼·경계 회피.
+// 일부는 대형 엄폐목(굵은 활엽수 줄기) — 플레이어가 서서 은엄폐로 쓸 수 있게. #172
+function scatterForest(cx0, cz0, cx1, cz1) {
+  const step = 6.5;
+  const coverKinds = [...TREE_KEYS.normal, ...TREE_KEYS.maple]; // 활엽수 = 상대적으로 굵은 줄기
+  for (let x = cx0; x <= cx1; x += step) {
+    for (let z = cz0; z <= cz1; z += step) {
+      const jx = x + (Math.random() - 0.5) * step * 0.8;
+      const jz = z + (Math.random() - 0.5) * step * 0.8;
+      if (Math.abs(jx) > WORLD_HALF - 4 || Math.abs(jz) > WORLD_HALF - 4) continue;
+      if (terrainH(jx, jz) === 0 && insideAnyFlatten(jx, jz)) continue; // 플래튼(운동장/건물) 내부는 비움
+      if (Math.random() < 0.28) continue; // 성김
+      if (Math.random() < 0.16) {
+        // 대형 엄폐목: 큰 키 + 굵은 줄기 콜라이더(서서 뒤에 숨음)
+        const kind = coverKinds[Math.floor(Math.random() * coverKinds.length)];
+        placeTree(kind, jx, jz, 13 + Math.random() * 4, 0.62); // 13~17m, 줄기반경 0.62m
+      } else {
+        const kind = FOREST_TREES[Math.floor(Math.random() * FOREST_TREES.length)];
+        placeTree(kind, jx, jz, 6.5 + Math.random() * 4.5); // 6.5~11m, 얇은 줄기
+      }
+    }
+  }
+}
+function insideAnyFlatten(x, z) {
+  for (const f of FLATTENS) {
+    if (f.r !== undefined) { if (Math.hypot(x - f.x, z - f.z) < f.r + 3) return true; }
+    else if (Math.abs(x - f.x) < f.hw + 3 && Math.abs(z - f.z) < f.hd + 3) return true;
+  }
+  return false;
+}
+
+// 하이트필드 변위 지면 타일 (산업/학교 공용) — tint 로 색조
+function buildGroundTiles(tint) {
+  let groundMat;
+  if (GROUND_TEX.ground) { const t = GROUND_TEX.ground.clone(); t.needsUpdate = true; t.repeat.set(26, 26); groundMat = new THREE.MeshStandardMaterial({ map: t, color: tint, roughness: 1.0 }); }
+  else groundMat = new THREE.MeshStandardMaterial({ map: makeGroundTexture(), color: tint, roughness: 1.0 });
+  const full = WORLD_HALF * 2 + 24, TILES = 6, tw = full / TILES;
+  for (let ti = 0; ti < TILES; ti++) {
+    for (let tj = 0; tj < TILES; tj++) {
+      const cx = -full / 2 + tw * (ti + 0.5), cz = -full / 2 + tw * (tj + 0.5);
+      const geo = new THREE.PlaneGeometry(tw, tw, 14, 14);
+      geo.rotateX(-Math.PI / 2);
+      const p = geo.attributes.position, n = geo.attributes.normal;
+      for (let i = 0; i < p.count; i++) {
+        const wx = cx + p.getX(i), wz = cz + p.getZ(i);
+        p.setY(i, terrainH(wx, wz));
+        const e = 0.8;
+        const nx = terrainH(wx - e, wz) - terrainH(wx + e, wz);
+        const nz = terrainH(wx, wz - e) - terrainH(wx, wz + e);
+        const inv = 1 / Math.hypot(nx, 2 * e, nz);
+        n.setXYZ(i, nx * inv, 2 * e * inv, nz * inv);
+      }
+      const tile = new THREE.Mesh(geo, groundMat);
+      tile.position.set(cx, 0, cz);
+      tile.receiveShadow = true;
+      tile.userData.terrainTile = true;
+      scene.add(tile);
+      obstacleMeshes.push(tile);
+    }
+  }
+}
+
+function buildSchoolMap() {
+  buildTexMats();
+  buildGroundTiles(0xa9ac82);          // 숲 바닥 (올리브-탄, 붉은기 완화)
+  // 외곽 경계벽 (나무로 가림)
+  const W = WORLD_HALF;
+  addBox(0, 2.5, -W, W * 2 + 2, 5, 1, 'concrete', { shadow: false });
+  addBox(0, 2.5, W, W * 2 + 2, 5, 1, 'concrete', { shadow: false });
+  addBox(-W, 2.5, 0, 1, 5, W * 2 + 2, 'concrete', { shadow: false });
+  addBox(W, 2.5, 0, 1, 5, W * 2 + 2, 'concrete', { shadow: false });
+
+  // 운동장 (흙바닥) + 학교 건물
+  const yard = new THREE.Mesh(new THREE.PlaneGeometry(56, 40),
+    new THREE.MeshStandardMaterial({ map: GROUND_TEX.ground ? GROUND_TEX.ground.clone() : makeGroundTexture(), color: 0xbaa889, roughness: 1 }));
+  yard.rotation.x = -Math.PI / 2; yard.position.set(0, 0.03, 30); yard.receiveShadow = true;
+  scene.add(yard);
+  buildSchoolBuilding(0, 0);
+
+  // 숲: 맵 전역 산포
+  scatterForest(-W + 6, -W + 6, W - 6, W - 6);
+
+  losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile);
+}
+
+// 학교 맵 데이터
+const SCHOOL_FLATTENS = [
+  { x: 0, z: 0, hw: 26, hd: 9 },     // 학교 건물 패드
+  { x: 0, z: 30, hw: 29, hd: 21 },   // 운동장
+  ...[[0, 80, 8], [74, -46, 8], [-74, -46, 8], [64, 66, 8], [-64, 66, 8], [80, 80, 7], [-80, 80, 7], [80, -80, 7], [-80, -80, 7]].map(([x, z, r]) => ({ x, z, r })),
+];
+const MAP_SCHOOL = {
+  key: 'school', name: '숲속 고등학교', desc: '숲으로 둘러싸인 폐교 — 실내 교전',
+  build: buildSchoolMap,
+  flattens: SCHOOL_FLATTENS,
+  lootSpots: [
+    [-18, -3], [-9, -3], [0, -3], [9, -3], [18, -3],   // 교실 5칸
+    [-18, 3], [0, 3.5], [18, 3],                        // 복도
+    [0, 12], [-14, 22], [16, 24], [0, 36],              // 운동장/현관앞
+    [0, 40], [-70, -42], [70, -42], [60, 62], [-60, 62],
+  ],
+  extract: [
+    { name: '정문 (남)', pos: new THREE.Vector3(0, 0, 82) },
+    { name: '북동 임도', pos: new THREE.Vector3(78, 0, -78) },
+    { name: '북서 임도', pos: new THREE.Vector3(-78, 0, -78) },
+    { name: '남동 숲길', pos: new THREE.Vector3(78, 0, 78) },
+  ],
+  spawns: [
+    new THREE.Vector3(0, 0, 80), new THREE.Vector3(74, 0, -44),
+    new THREE.Vector3(-74, 0, -44), new THREE.Vector3(64, 0, 64), new THREE.Vector3(-64, 0, 64),
+  ],
+  barrels: [
+    [-18, -4, true], [18, -4, false], [0, 14, true], [-40, 40, false],
+    [40, -40, true], [-50, -30, false], [50, 50, false], [8, 38, true],
+  ],
+};
+
+// ── 맵 레지스트리 (#165) ──────────────────────────────────
+// 산업지대 데이터 스냅샷 (지금 FLATTENS/LOOT_SPOTS 등은 산업지대 값 — applyMap 이 active 를 교체)
+const MAP_INDUSTRIAL = {
+  key: 'industrial', name: '산업지대', desc: '컨테이너 야적장·창고·주택 단지',
+  build: buildIndustrialMap,
+  flattens: FLATTENS, lootSpots: LOOT_SPOTS, extract: EXTRACT_CANDIDATES,
+  spawns: SPAWN_POINTS, barrels: PHYS_BARRELS,
+};
+const MAPS = { industrial: MAP_INDUSTRIAL, school: MAP_SCHOOL };
+let currentMapKey = 'industrial';
+let builtMapKey = null;
+let staticObjects = []; // 현재 정적 맵이 scene 에 추가한 최상위 오브젝트 (맵 전환 시 제거)
+
+function tearDownStatic() {
+  for (const o of staticObjects) { scene.remove(o); o.traverse && o.traverse((c) => c.geometry && c.geometry.dispose && c.geometry.dispose()); }
+  staticObjects = [];
+  colliders = [];
+  obstacleMeshes = [];
+  losMeshes = [];
+  if (physWorld) { physWorld.free && physWorld.free(); physWorld = null; }
+}
+
+// 선택된 맵의 정적 지오메트리·물리를 구성 (필요 시 이전 맵 teardown)
+function applyMap(key) {
+  if (builtMapKey === key) return;
+  const m = MAPS[key] || MAP_INDUSTRIAL;
+  if (builtMapKey) tearDownStatic();
+  FLATTENS = m.flattens; LOOT_SPOTS = m.lootSpots; EXTRACT_CANDIDATES = m.extract;
+  SPAWN_POINTS = m.spawns; PHYS_BARRELS = m.barrels;
+  const before = new Set(scene.children);
+  m.build();
+  for (const c of scene.children) if (!before.has(c)) staticObjects.push(c);
+  buildPhysicsStatics();
+  builtMapKey = key;
+  currentMapKey = key;
+}
 
 function clearRaidObjects() {
   for (const e of enemies) scene.remove(e.group);
@@ -3554,10 +3822,10 @@ function clearRaidObjects() {
   clearPhysics(); // 물리 소품/래그돌 정리 (#119)
 }
 
-function startRaid() {
+function startRaid(mapKey) {
   if (!assetsReady) return;
-  if (!staticBuilt) { buildStaticMap(); buildPhysicsStatics(); staticBuilt = true; }
   clearRaidObjects();
+  applyMap(mapKey || currentMapKey); // 선택 맵 구성 (전환 시 이전 맵 teardown)
 
   const spawn = SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)];
   player.pos.copy(spawn);
@@ -3864,9 +4132,41 @@ dom.btnStart.addEventListener('click', () => {
     lockPointer();
   } else {
     dom.btnStart.textContent = '레이드 시작';
-    startRaid();
+    showMapSelect();
   }
 });
+
+// 맵 선택 오버레이 (#165) — 레이드 시작 시 맵 고르기
+let mapSelectEl = null;
+function showMapSelect() {
+  if (!mapSelectEl) {
+    mapSelectEl = document.createElement('div');
+    mapSelectEl.id = 'mapselect';
+    mapSelectEl.style.cssText = 'position:fixed;inset:0;z-index:60;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;background:rgba(8,12,10,.82);backdrop-filter:blur(3px)';
+    const title = document.createElement('div');
+    title.textContent = '레이드 지역 선택';
+    title.style.cssText = 'color:#dfe8df;font-size:26px;letter-spacing:3px;font-weight:700';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:20px;flex-wrap:wrap;justify-content:center';
+    for (const key of ['industrial', 'school']) {
+      const m = MAPS[key];
+      const card = document.createElement('button');
+      card.style.cssText = 'width:300px;padding:22px 20px;border-radius:10px;cursor:pointer;text-align:left;color:#e6eede;background:rgba(24,32,24,.85);border:1px solid rgba(255,255,255,.16);transition:all .12s';
+      card.onmouseenter = () => { card.style.borderColor = '#8fb06a'; card.style.background = 'rgba(60,80,50,.7)'; };
+      card.onmouseleave = () => { card.style.borderColor = 'rgba(255,255,255,.16)'; card.style.background = 'rgba(24,32,24,.85)'; };
+      card.innerHTML = `<div style="font-size:20px;font-weight:700;margin-bottom:8px">${m.name}</div><div style="font-size:13px;color:#a8b6a0;line-height:1.5">${m.desc}</div>`;
+      card.onclick = () => { mapSelectEl.style.display = 'none'; startRaid(key); };
+      row.appendChild(card);
+    }
+    const cancel = document.createElement('button');
+    cancel.textContent = '취소';
+    cancel.style.cssText = 'margin-top:6px;padding:8px 22px;border-radius:6px;cursor:pointer;color:#cfd8cf;background:rgba(20,28,20,.8);border:1px solid rgba(255,255,255,.18)';
+    cancel.onclick = () => { mapSelectEl.style.display = 'none'; };
+    mapSelectEl.append(title, row, cancel);
+    document.body.appendChild(mapSelectEl);
+  }
+  mapSelectEl.style.display = 'flex';
+}
 
 for (const btn of document.querySelectorAll('.btn-menu')) {
   btn.addEventListener('click', () => {
@@ -4062,6 +4362,14 @@ window.__ex = {
   _dbgFire() {
     const m = pcMuzzle();
     return { muzzle: m.toArray().map((v) => +v.toFixed(2)), gunPivot: pc ? pc.gunPivot.position.toArray().map((v) => +v.toFixed(2)) : null, gunLen: pc && pc.gunLen, handR: !!(pc && pc.handR), handL: !!(pc && pc.handL), curGun: !!(pc && pc.curGun) };
+  },
+  _startRaid(k) { startRaid(k); },
+  get _map() { return { current: currentMapKey, built: builtMapKey, maps: Object.keys(MAPS) }; },
+  _dbgAim() {
+    if (!pc) return null;
+    const cam = new THREE.Vector3(); camera.getWorldDirection(cam);
+    const bar = new THREE.Vector3(0, 0, 1).applyQuaternion(pc.gunPivot.getWorldQuaternion(new THREE.Quaternion()));
+    return { camDir: cam.toArray().map((v) => +v.toFixed(3)), barrel: bar.toArray().map((v) => +v.toFixed(3)), dot: +cam.dot(bar).toFixed(3), aimBlend: +(pc.aimBlend || 0).toFixed(2), aiming: player.aiming };
   },
 };
 

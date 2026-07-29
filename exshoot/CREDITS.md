@@ -10,6 +10,7 @@
 - City Kit: Industrial — Kenney — https://kenney.nl/assets/city-kit-industrial (CC0)
 - Survival Kit — Kenney — https://kenney.nl/assets/survival-kit (CC0)
 - Nature Kit — Kenney — https://kenney.nl/assets/nature-kit (CC0)
+- Ultimate Stylized Nature Pack — Quaternius — https://quaternius.com/packs/ultimatestylizednature.html (CC0) — 숲속 고등학교 맵의 나무(소나무·단풍·자작·일반·고사목)·바위
 - Blaster Kit — Kenney — https://kenney.nl/assets/blaster-kit (CC0)
 - 50 Lowpoly Guns — Quaternius — https://quaternius.itch.io/50-lowpoly-guns (CC0)
 - Car Kit — Kenney — https://kenney.nl/assets/car-kit (CC0)
