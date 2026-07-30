@@ -222,6 +222,15 @@
   .screen button:disabled { opacity: 0.55; cursor: default; }
   .screen button:disabled:hover { background: rgba(90, 120, 80, 0.25); }
 
+  /* ---------- 라이선스 · 크레딧 ---------- */
+  #license-body { max-width: 800px; max-height: 62vh; overflow-y: auto; text-align: left;
+    font-size: 13px; line-height: 1.7; color: #c7d2c2; padding: 4px 20px; margin-bottom: 22px; }
+  #license-body h3 { color: #9fb59f; font-size: 15px; letter-spacing: 1px; margin: 20px 0 8px; }
+  #license-body a { color: #8fb0d0; text-decoration: none; }
+  #license-body a:hover { text-decoration: underline; }
+  #license-body .li { margin: 5px 0; padding-left: 14px; text-indent: -14px; }
+  #license-body .note { color: #8f9d8c; margin: 4px 0; }
+
   /* ---------- 장비 상점 ---------- */
   #shop {
     width: 380px; margin-bottom: 22px; text-align: left;
@@ -449,6 +458,10 @@
         <button id="btn-shop">보급소</button>
         <div class="mdesc">무기 · 방어구 구매</div>
       </div>
+      <div class="mcard">
+        <button id="btn-license">라이선스</button>
+        <div class="mdesc">에셋 출처 · 라이선스 표기</div>
+      </div>
     </div>
     <div id="res-row">해상도
       <button data-res="high">높음</button><button data-res="medium">중간</button><button data-res="low">낮음</button>
@@ -469,6 +482,12 @@
     <div class="stash" id="shop-stash"></div>
     <div id="shop"></div>
     <button id="shop-close">닫기</button>
+  </div>
+
+  <div class="screen" id="license-screen">
+    <h2 style="color:#9fb59f; font-size:20px;">라이선스 · 크레딧</h2>
+    <div id="license-body">불러오는 중...</div>
+    <button id="license-close">닫기</button>
   </div>
 
   <div class="screen" id="equip-screen">
@@ -507,6 +526,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=adef1ff"></script>
+  <script type="module" src="./src/main.js?v=62ed7b0"></script>
 </body>
 </html>

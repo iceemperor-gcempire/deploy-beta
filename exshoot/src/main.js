@@ -4124,6 +4124,38 @@ document.getElementById('equip-close').addEventListener('click', () => {
   updateMenuStash();
 });
 
+// 라이선스·크레딧 화면 — CREDITS.md 를 런타임에 불러와 렌더 (단일 소스) (#175)
+function renderCreditsMd(md) {
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const fmt = (s) => esc(s)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/(^|[\s(])(https?:\/\/[^\s)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  const out = [];
+  for (const line of md.split('\n')) {
+    if (/^#\s/.test(line)) continue;                       // 최상단 제목 생략(화면 h2 로 대체)
+    else if (/^#{2,3}\s/.test(line)) out.push('<h3>' + esc(line.replace(/^#{2,3}\s/, '')) + '</h3>');
+    else if (/^-\s/.test(line)) out.push('<div class="li">• ' + fmt(line.replace(/^-\s/, '')) + '</div>');
+    else if (line.trim()) out.push('<div class="note">' + fmt(line) + '</div>');
+  }
+  return out.join('');
+}
+document.getElementById('btn-license').addEventListener('click', async () => {
+  audio();
+  const body = document.getElementById('license-body');
+  document.getElementById('license-screen').style.display = 'flex';
+  if (!body.dataset.loaded) {
+    try {
+      const md = await fetch('./CREDITS.md' + ASSET_VER).then((r) => r.text());
+      body.innerHTML = renderCreditsMd(md);
+    } catch (e) { body.textContent = 'CREDITS 를 불러오지 못했습니다.'; }
+    body.dataset.loaded = '1';
+  }
+});
+document.getElementById('license-close').addEventListener('click', () => {
+  document.getElementById('license-screen').style.display = 'none';
+});
+
 dom.btnStart.addEventListener('click', () => {
   audio();
   if (state.paused && state.phase === 'raid') {
