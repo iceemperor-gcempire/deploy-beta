@@ -869,8 +869,16 @@ const keys = {};
 
 // ---------- 스태시 (영구 저장) ----------
 function loadStash() {
-  try { return JSON.parse(localStorage.getItem('exshoot_stash')) || {}; }
+  let s;
+  try { s = JSON.parse(localStorage.getItem('exshoot_stash')) || {}; }
   catch { return {}; }
+  // 마이그레이션 (#193): loadoutC 배열(구, 종류 전량) → 개수맵 {name:count}
+  if (Array.isArray(s.loadoutC)) {
+    const m = {};
+    for (const c of (s.consumables || [])) if (s.loadoutC.includes(c.name)) m[c.name] = (m[c.name] || 0) + 1;
+    s.loadoutC = m;
+  }
+  return s;
 }
 function saveStash(s) { localStorage.setItem('exshoot_stash', JSON.stringify(s)); }
 function updateMenuStash() {
@@ -908,49 +916,87 @@ function toggleLoadout(listKey, id) {
   sfx.reload2();
   renderInventoryScreen();
 }
-// 스태시 ↔ 반입 인벤토리 2패널 (#192): 총·소모품은 두 패널 간 이동, 부품·악세서리·귀중품은 스태시 전용.
+// 소모품 개수 단위 이동 (#193): loadoutC[name] += delta (0..보유수)
+function moveCons(name, delta) {
+  const st = loadStash();
+  const owned = (st.consumables || []).filter((c) => c.name === name).length;
+  const lc = st.loadoutC || {};
+  const next = Math.max(0, Math.min(owned, (lc[name] || 0) + delta));
+  if (next <= 0) delete lc[name]; else lc[name] = next;
+  st.loadoutC = lc;
+  saveStash(st);
+  sfx.reload2();
+  renderInventoryScreen();
+}
+// 방어구/헬멧 반입 토글 (#193)
+function toggleLoadoutFlag(key) {
+  const st = loadStash();
+  st[key] = st[key] === false ? true : false;
+  saveStash(st);
+  sfx.reload2();
+  renderInventoryScreen();
+}
+// 스태시 ↔ 반입 인벤토리 2패널 (#192/#193): 총·방어구는 통째 이동, 소모품은 개수 단위, 부품·악세서리·귀중품은 스태시 전용.
 function renderInventoryScreen() {
   const st = loadStash();
   // 로드아웃 미설정 시 기본값(소지 전량 반입)으로 실체화 → 이후 명시적 이동
   let dirty = false;
   if (st.loadoutW === undefined) { st.loadoutW = (st.weapons || ['rifle']).filter((k) => WEAPONS[k]); dirty = true; }
-  if (st.loadoutC === undefined) { st.loadoutC = [...new Set((st.consumables || []).map((c) => c.name))]; dirty = true; }
+  if (st.loadoutC === undefined || Array.isArray(st.loadoutC)) {
+    const m = {}; for (const c of (st.consumables || [])) m[c.name] = (m[c.name] || 0) + 1; st.loadoutC = m; dirty = true; // 개수맵(전량)
+  }
   if (dirty) saveStash(st);
   document.getElementById('inv-screen-stash').textContent = `스태시 ₽ ${(st.roubles || 0).toLocaleString('ko-KR')}`;
 
   const equipped = st.equipped || 'rifle';
-  const lw = st.loadoutW || [], lc = st.loadoutC || [];
+  const lw = st.loadoutW || [], lc = st.loadoutC || {};
   const guns = (st.weapons || ['rifle']).filter((k) => WEAPONS[k]);
   const cg = {}; for (const c of (st.consumables || [])) { cg[c.name] = cg[c.name] || { n: 0, heal: c.heal }; cg[c.name].n++; }
-  const consEntries = Object.entries(cg);
   const parts = st.parts || []; const pg = {}; for (const p of parts) { pg[p.name] = pg[p.name] || { n: 0, slot: p.slot }; pg[p.name].n++; }
   const accs = (st.attOwned || []).filter((k) => ATTACHMENTS[k]);
   const vals = st.valuables || []; const vgz = groupValuables(vals);
   const gunTag = (k) => k === equipped ? '장착 중' : '';
   const moveBtn = (label, attr) => `<button class="ld-btn" ${attr}>${label}</button>`;
+  const healTag = (h) => h ? `+${h} HP` : '';
+  // 방어구/헬멧 보유·반입 여부
+  const hasArmor = (st.armorDur || 0) > 0, hasHelmet = !!st.helmet;
+  const brArmor = st.loadoutArmor !== false, brHelmet = st.loadoutHelmet !== false;
 
-  // 스태시 패널(좌): 미반입 총·소모품 + 부품·악세서리·귀중품(전용)
+  // 스태시 패널(좌)
   const sGuns = guns.filter((k) => !lw.includes(k));
-  const sCons = consEntries.filter(([n]) => !lc.includes(n));
+  const sConsRows = [];
+  for (const [n, x] of Object.entries(cg)) { const rem = x.n - (lc[n] || 0); if (rem > 0) sConsRows.push(invRowHTML(`${n} ×${rem}`, healTag(x.heal), '', moveBtn('반입 →', `data-consp="${encodeURIComponent(n)}"`))); }
+  const sArmorRows = [];
+  if (hasArmor && !brArmor) sArmorRows.push(invRowHTML(`방탄복 (내구도 ${Math.round(st.armorDur)}/${ARMOR_MAX})`, '', '', moveBtn('반입 →', 'data-armld="1"')));
+  if (hasHelmet && !brHelmet) sArmorRows.push(invRowHTML('헬멧', '', '', moveBtn('반입 →', 'data-helld="1"')));
   document.getElementById('inv-stash').innerHTML = [
     invCatHTML('총', sGuns.length, sGuns.map((k) => invRowHTML(WEAPONS[k].name, gunTag(k), '', moveBtn('반입 →', `data-bringw="${k}"`))), '모두 반입됨'),
-    invCatHTML('소모품', sCons.reduce((s, [, x]) => s + x.n, 0), sCons.map(([n, x]) => invRowHTML(`${n}${x.n > 1 ? ` ×${x.n}` : ''}`, x.heal ? `+${x.heal} HP` : '', '', moveBtn('반입 →', `data-bringc="${encodeURIComponent(n)}"`))), '모두 반입됨'),
+    invCatHTML('방어구', (hasArmor && !brArmor ? 1 : 0) + (hasHelmet && !brHelmet ? 1 : 0), sArmorRows, '모두 반입됨'),
+    invCatHTML('소모품', sConsRows.length, sConsRows, '모두 반입됨'),
     invCatHTML('총기 부품', parts.length, Object.entries(pg).map(([n, x]) => invRowHTML(`${n}${x.n > 1 ? ` ×${x.n}` : ''}`, SLOT_LABEL[x.slot] || '부품', '')), '보유 부품 없음'),
     invCatHTML('총기 악세서리', accs.length, accs.map((k) => invRowHTML(ATTACHMENTS[k].name, '', '')), '보유 악세서리 없음'),
     invCatHTML('귀중품', vals.length, Object.entries(vgz).map(([n, x]) => invRowHTML(`${n}${x.n > 1 ? ` ×${x.n}` : ''}`, '', x.v.toLocaleString('ko-KR'), `<button data-sell="${encodeURIComponent(n)}">매각</button>`)), '귀중품 없음'),
   ].join('');
 
-  // 반입 패널(우): 반입 총·소모품
+  // 반입 패널(우)
   const lGuns = guns.filter((k) => lw.includes(k));
-  const lCons = consEntries.filter(([n]) => lc.includes(n));
+  const lConsRows = [];
+  for (const [n, x] of Object.entries(cg)) { const p = Math.min(lc[n] || 0, x.n); if (p > 0) lConsRows.push(invRowHTML(`${n} ×${p}`, healTag(x.heal), '', moveBtn('← 보관', `data-conss="${encodeURIComponent(n)}"`))); }
+  const lArmorRows = [];
+  if (hasArmor && brArmor) lArmorRows.push(invRowHTML(`방탄복 (내구도 ${Math.round(st.armorDur)}/${ARMOR_MAX})`, '', '', moveBtn('← 보관', 'data-armld="0"')));
+  if (hasHelmet && brHelmet) lArmorRows.push(invRowHTML('헬멧', '', '', moveBtn('← 보관', 'data-helld="0"')));
   document.getElementById('inv-load').innerHTML = [
     invCatHTML('총', lGuns.length, lGuns.map((k) => invRowHTML(WEAPONS[k].name, gunTag(k), '', moveBtn('← 보관', `data-bringw="${k}"`))), '반입할 총을 스태시에서 →'),
-    invCatHTML('소모품', lCons.reduce((s, [, x]) => s + x.n, 0), lCons.map(([n, x]) => invRowHTML(`${n}${x.n > 1 ? ` ×${x.n}` : ''}`, x.heal ? `+${x.heal} HP` : '', '', moveBtn('← 보관', `data-bringc="${encodeURIComponent(n)}"`))), '반입할 소모품을 스태시에서 →'),
+    invCatHTML('방어구', lArmorRows.length, lArmorRows, ''),
+    invCatHTML('소모품', lConsRows.length, lConsRows, '반입할 소모품을 스태시에서 →'),
   ].join('');
 
   const body = document.getElementById('inv-body');
   body.querySelectorAll('[data-bringw]').forEach((b) => b.addEventListener('click', () => toggleLoadout('loadoutW', b.dataset.bringw)));
-  body.querySelectorAll('[data-bringc]').forEach((b) => b.addEventListener('click', () => toggleLoadout('loadoutC', decodeURIComponent(b.dataset.bringc))));
+  body.querySelectorAll('[data-consp]').forEach((b) => b.addEventListener('click', () => moveCons(decodeURIComponent(b.dataset.consp), +1)));
+  body.querySelectorAll('[data-conss]').forEach((b) => b.addEventListener('click', () => moveCons(decodeURIComponent(b.dataset.conss), -1)));
+  body.querySelectorAll('[data-armld]').forEach((b) => b.addEventListener('click', () => toggleLoadoutFlag('loadoutArmor')));
+  body.querySelectorAll('[data-helld]').forEach((b) => b.addEventListener('click', () => toggleLoadoutFlag('loadoutHelmet')));
   body.querySelectorAll('[data-sell]').forEach((b) => b.addEventListener('click', () => sellValuable(decodeURIComponent(b.dataset.sell))));
   document.getElementById('inv-sell-all').disabled = vals.length === 0;
 }
@@ -4229,18 +4275,25 @@ function startRaid(mapKey) {
   gun.triggerDown = false;
   gun.semiLatch = false;
   gun.foundWeapons = [];
-  player.armorDur = Math.min(ARMOR_MAX, stash0.armorDur || 0);
-  player.helmet = !!stash0.helmet;
+  // 방어구/헬멧 반입 (#193): 로드아웃 표시된 것만 착용(미설정 시 반입). 미반입은 스태시 안전.
+  player.armorDur = (stash0.loadoutArmor !== false) ? Math.min(ARMOR_MAX, stash0.armorDur || 0) : 0;
+  player.helmet = (stash0.loadoutHelmet !== false) && !!stash0.helmet;
   player.aiming = false;
   if (IS_MOBILE) $('tb-ads').classList.remove('active');
 
   inventory = [];
-  // 소모품 반입 (#187/#189): 로드아웃에 표시된 종류만 반입(미설정 시 전량). 스태시에서 빠짐 →
+  // 소모품 반입 (#187/#189/#193): 로드아웃 개수만큼 반입(미설정 시 전량). 스태시에서 빠짐 →
   // 생존 시 잔량 반환, 사망 시 손실.
   const cons = stash0.consumables || [];
-  const lc = stash0.loadoutC; // 반입할 소모품 이름 배열(undefined = 전량)
+  const lc = stash0.loadoutC; // {name:count} (undefined = 전량)
   const remainCons = [], broughtCons = [];
-  for (const c of cons) ((lc === undefined || lc.includes(c.name)) ? broughtCons : remainCons).push(c);
+  if (lc === undefined) { broughtCons.push(...cons); }
+  else {
+    const need = { ...lc };
+    for (const c of cons) {
+      if ((need[c.name] || 0) > 0) { broughtCons.push(c); need[c.name]--; } else remainCons.push(c);
+    }
+  }
   if (broughtCons.length) {
     for (const c of broughtCons) inventory.push({ name: c.name, value: c.value, heal: c.heal, type: 'consumable' });
     stash0.consumables = remainCons;
@@ -4311,8 +4364,9 @@ function endRaid(result, cause) {
     for (const k of (gun.foundWeapons || [])) owned.add(k);
     stash.weapons = [...owned];
     stash.equipped = GUN.key;
-    stash.armorDur = player.armorDur;
-    stash.helmet = player.helmet;
+    // 방어구/헬멧: 반입한 경우만 내구도·상태 갱신(미반입은 스태시 안전분 유지) (#193)
+    if (stash.loadoutArmor !== false) stash.armorDur = player.armorDur;
+    if (stash.loadoutHelmet !== false) stash.helmet = player.helmet;
     saveStash(stash);
     const used = RAID_SECONDS - state.raidTime;
     dom.extractStats.innerHTML =
@@ -4329,9 +4383,9 @@ function endRaid(result, cause) {
     stash.attachments = stash.attachments || {};
     for (const k of brought) { delete stash.weaponParts[k]; delete stash.attachments[k]; } // 잃은 무기의 부품·부착 제거
     stash.loadoutW = (stash.loadoutW || []).filter((k) => stash.weapons.includes(k));
-    stash.armorDur = 0;   // 착용 방어구는 반입품 → 손실
-    stash.helmet = false;
-    // attOwned(악세서리 소유)·parts·consumables(미반입분)·valuables 는 스태시 안전 → 유지
+    if (stash.loadoutArmor !== false) stash.armorDur = 0;   // 반입한 방어구만 손실 (#193)
+    if (stash.loadoutHelmet !== false) stash.helmet = false;
+    // attOwned·parts·consumables(미반입분)·valuables·미반입 방어구는 스태시 안전 → 유지
     saveStash(stash);
     sfx.death();
     dom.deathCause.textContent = cause || '사망했습니다.';
