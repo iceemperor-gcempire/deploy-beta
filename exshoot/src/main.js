@@ -155,16 +155,45 @@ const ITEM_TABLE = [
 
 // 총기 부품 (#186) — 지금은 루팅·구매로 획득해 인벤토리에 쌓이는 아이템. 슬롯 장착(커스텀)은 차후.
 // type:'part' 로 태깅해 탈출 시 stash.parts 로 분류 반입(귀중품과 구분).
-const SLOT_LABEL = { barrel: '총열', handguard: '핸드가드', stock: '개머리판', trigger: '방아쇠', magazine: '탄창', bolt: '노리쇠', muzzle: '총구' };
+const SLOT_LABEL = { barrel: '총열', muzzle: '총구', handguard: '핸드가드', stock: '개머리판', magazine: '탄창', trigger: '방아쇠', bolt: '노리쇠' };
+const SLOT_ORDER = ['barrel', 'muzzle', 'handguard', 'stock', 'magazine', 'trigger', 'bolt'];
+// mods: 무기 스탯에 곱(mul)·합(add) 적용. desc 는 UI 표기.
 const PART_TABLE = [
-  { name: '강선 총열',     value: 12000, w: 5, type: 'part', slot: 'barrel' },
-  { name: '경량 핸드가드', value: 8000,  w: 6, type: 'part', slot: 'handguard' },
-  { name: '전술 개머리판', value: 9000,  w: 6, type: 'part', slot: 'stock' },
-  { name: '경기용 방아쇠', value: 15000, w: 3, type: 'part', slot: 'trigger' },
-  { name: '확장 탄창',     value: 6000,  w: 7, type: 'part', slot: 'magazine' },
-  { name: '강화 노리쇠',   value: 11000, w: 4, type: 'part', slot: 'bolt' },
-  { name: '소염기',        value: 7000,  w: 6, type: 'part', slot: 'muzzle' },
+  { name: '강선 총열',     value: 12000, w: 5, type: 'part', slot: 'barrel',    desc: '명중률·사거리 향상', mods: { spreadHip: { mul: 0.85 }, spreadAds: { mul: 0.8 }, range: { mul: 1.12 } } },
+  { name: '소염기',        value: 7000,  w: 6, type: 'part', slot: 'muzzle',    desc: '반동 감소',          mods: { recoil: { mul: 0.82 } } },
+  { name: '경량 핸드가드', value: 8000,  w: 6, type: 'part', slot: 'handguard', desc: '이동 중 탄퍼짐 감소', mods: { spreadMove: { mul: 0.75 } } },
+  { name: '전술 개머리판', value: 9000,  w: 6, type: 'part', slot: 'stock',     desc: '반동·총열 튐 감소',  mods: { recoil: { mul: 0.85 }, kick: { mul: 0.85 } } },
+  { name: '확장 탄창',     value: 6000,  w: 7, type: 'part', slot: 'magazine',  desc: '탄창 +10',           mods: { magSize: { add: 10 } } },
+  { name: '경기용 방아쇠', value: 15000, w: 3, type: 'part', slot: 'trigger',   desc: '연사 속도 향상',     mods: { fireInterval: { mul: 0.9 } } },
+  { name: '강화 노리쇠',   value: 11000, w: 4, type: 'part', slot: 'bolt',      desc: '재장전 속도 향상',   mods: { reloadTime: { mul: 0.85 } } },
 ];
+const PART_BY_NAME = Object.fromEntries(PART_TABLE.map((p) => [p.name, p]));
+// 무기별 지원 슬롯 (부품 slot 이 여기 포함되면 장착 가능)
+const WEAPON_SLOTS = {
+  rifle:    ['barrel', 'muzzle', 'handguard', 'stock', 'magazine', 'trigger', 'bolt'],
+  bullpup:  ['barrel', 'muzzle', 'handguard', 'magazine', 'trigger', 'bolt'],
+  smg2:     ['barrel', 'muzzle', 'handguard', 'stock', 'magazine', 'trigger'],
+  sniper:   ['barrel', 'muzzle', 'stock', 'magazine', 'trigger', 'bolt'],
+  shotgun:  ['barrel', 'muzzle', 'stock', 'trigger'],
+  revolver: ['barrel', 'muzzle', 'trigger'],
+};
+function weaponSlots(key) { return WEAPON_SLOTS[key] || ['barrel', 'muzzle', 'magazine', 'trigger']; }
+function installedParts(key) { return (loadStash().weaponParts || {})[key] || {}; } // {slot: partName}
+// 부품 장착이 반영된 유효 무기 스탯(복사본) — GUN 은 이 값을 씀(원본 WEAPONS 오염 방지)
+function effectiveWeapon(key) {
+  const w = { ...WEAPONS[key] };
+  const inst = installedParts(key);
+  for (const slot of Object.keys(inst)) {
+    const p = PART_BY_NAME[inst[slot]];
+    if (!p || !p.mods) continue;
+    for (const [stat, m] of Object.entries(p.mods)) {
+      if (m.mul != null) w[stat] = (w[stat] || 0) * m.mul;
+      if (m.add != null) w[stat] = (w[stat] || 0) + m.add;
+    }
+  }
+  if (w.magSize) w.magSize = Math.round(w.magSize);
+  return w;
+}
 const LOOT_POOL = [...ITEM_TABLE, ...PART_TABLE]; // 루팅 롤 대상(일반 아이템 + 부품)
 const CONSUMABLE_SHOP = ITEM_TABLE.filter((i) => i.type === 'consumable'); // 소모품 상점 목록(붕대·구급킷)
 
@@ -1056,6 +1085,30 @@ function equipRender() {
   equipRAF = requestAnimationFrame(equipRender);
 }
 
+// 슬롯에 부품 장착/교체/해제 — 인벤토리(stash.parts) ↔ 무기 슬롯(stash.weaponParts) 간 이동 (#188)
+function setWeaponPart(weaponKey, slot, partName) {
+  const st = loadStash();
+  st.weaponParts = st.weaponParts || {};
+  st.weaponParts[weaponKey] = st.weaponParts[weaponKey] || {};
+  const inst = st.weaponParts[weaponKey];
+  const cur = inst[slot];
+  if (cur === partName) return;
+  if (cur) { // 기존 부품 → 인벤토리 반환
+    const cp = PART_BY_NAME[cur];
+    if (cp) st.parts = [...(st.parts || []), { name: cp.name, value: cp.value, slot: cp.slot }];
+    delete inst[slot];
+  }
+  if (partName) { // 새 부품 → 인벤토리에서 1개 차감 후 장착
+    const idx = (st.parts || []).findIndex((p) => p.name === partName);
+    if (idx === -1) { saveStash(st); renderEquipUI(); return; }
+    st.parts.splice(idx, 1);
+    inst[slot] = partName;
+  }
+  saveStash(st);
+  sfx.reload2();
+  updateMenuStash();
+  renderEquipUI();
+}
 function renderEquipUI() {
   const st = loadStash();
   const owned = st.weapons || ['rifle'];
@@ -1071,7 +1124,7 @@ function renderEquipUI() {
     wl.appendChild(b);
   }
   const atts = attLoadout(equipSel);
-  $('equip-stats').innerHTML = equipStatText(WEAPONS[equipSel], atts);
+  $('equip-stats').innerHTML = equipStatText(effectiveWeapon(equipSel), atts);
   const ar = $('equip-atts');
   ar.innerHTML = '';
   const ownedAtt = st.attOwned || [];
@@ -1090,6 +1143,33 @@ function renderEquipUI() {
     row.innerHTML = `<div class="a-name">${att.name}</div><div class="a-desc">${att.desc}</div>${right}`;
     ar.appendChild(row);
   }
+  // ── 부품 슬롯 (#188): 인벤토리 부품을 슬롯에 장착/해제 (장착 시 인벤토리에서 슬롯으로 이동) ──
+  const inst = installedParts(equipSel);
+  const looseBySlot = {};
+  for (const p of (st.parts || [])) { (looseBySlot[p.slot] = looseBySlot[p.slot] || {}); looseBySlot[p.slot][p.name] = (looseBySlot[p.slot][p.name] || 0) + 1; }
+  const shead = document.createElement('div');
+  shead.className = 'slot-head';
+  shead.textContent = '부품 슬롯';
+  ar.appendChild(shead);
+  for (const slot of weaponSlots(equipSel)) {
+    const cur = inst[slot];
+    const avail = looseBySlot[slot] || {};
+    const names = new Set([...(cur ? [cur] : []), ...Object.keys(avail)]);
+    let opts = '<option value="">— 비어 있음 —</option>';
+    for (const name of names) {
+      const label = name === cur ? `${name} (장착됨)` : `${name} (보유 ${avail[name] || 0})`;
+      opts += `<option value="${encodeURIComponent(name)}"${name === cur ? ' selected' : ''}>${label}</option>`;
+    }
+    const p = cur && PART_BY_NAME[cur];
+    const row = document.createElement('div');
+    row.className = 'slot-row';
+    row.innerHTML = `<div class="slot-info"><span class="slot-label">${SLOT_LABEL[slot]}</span>`
+      + `${p ? `<span class="slot-desc">${p.desc}</span>` : ''}</div>`
+      + `<select class="slot-sel" data-slot="${slot}">${opts}</select>`;
+    ar.appendChild(row);
+  }
+  ar.querySelectorAll('.slot-sel').forEach((sel) => sel.addEventListener('change', () =>
+    setWeaponPart(equipSel, sel.dataset.slot, sel.value ? decodeURIComponent(sel.value) : '')));
   ar.querySelectorAll('[data-buyatt]').forEach((b) => b.addEventListener('click', () => {
     const st2 = loadStash();
     const att = ATTACHMENTS[b.dataset.buyatt];
@@ -3209,11 +3289,11 @@ function equipWeapon(key, announce = true) {
   if (GUN && GUN.key !== key && weaponAmmo[GUN.key]) {
     weaponAmmo[GUN.key] = { mag: gun.mag, reserve: gun.reserve };
   }
-  GUN = w;
+  GUN = effectiveWeapon(key); // 부품 장착 반영 스탯 (#188)
   setPlayerGun(key); // 3인칭 손 무기 반영 (#116)
   const ammo = weaponAmmo[key];
-  gun.mag = ammo ? ammo.mag : w.magSize;
-  gun.reserve = ammo ? ammo.reserve : w.reserveMax;
+  gun.mag = ammo ? ammo.mag : GUN.magSize;
+  gun.reserve = ammo ? ammo.reserve : GUN.reserveMax;
   gun.reloading = 0;
   gun.cooldown = 0;
   if (announce) { addFeed(`${w.name} 장착`); sfx.reload2(); }
@@ -4209,6 +4289,8 @@ function endRaid(result, cause) {
     stash.helmet = false;
     stash.attOwned = [];
     stash.attachments = {};
+    // 잃은 무기에 장착돼 있던 부품도 함께 손실 — 기본 소총 슬롯만 유지 (#188)
+    stash.weaponParts = { rifle: (stash.weaponParts || {}).rifle || {} };
     saveStash(stash);
     sfx.death();
     dom.deathCause.textContent = cause || '사망했습니다.';
