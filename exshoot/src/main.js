@@ -212,7 +212,13 @@ function effectiveWeapon(key) {
   if (w.magSize) w.magSize = Math.round(w.magSize);
   return w;
 }
-const LOOT_POOL = [...ITEM_TABLE, ...PART_TABLE]; // 루팅 롤 대상(일반 아이템 + 부품)
+// 열쇠 (#195) — 잠긴 금고를 여는 아이템. 반입해야 해당 금고 개방. 루팅(희귀)·상점 획득.
+const KEY_TABLE = [
+  { name: '창고 열쇠',     keyId: 'warehouse', value: 25000, w: 1.2, price: 40000, type: 'key' },
+  { name: '사무실 금고 키', keyId: 'office',    value: 35000, w: 0.8, price: 55000, type: 'key' },
+];
+const KEY_BY_ID = Object.fromEntries(KEY_TABLE.map((k) => [k.keyId, k]));
+const LOOT_POOL = [...ITEM_TABLE, ...PART_TABLE, ...KEY_TABLE]; // 루팅 롤 대상(일반+부품+열쇠)
 const CONSUMABLE_SHOP = ITEM_TABLE.filter((i) => i.type === 'consumable'); // 소모품 상점 목록(붕대·구급킷)
 
 // ---------- DOM ----------
@@ -848,6 +854,7 @@ const gun = {
 
 let inventory = [];       // {name, value, heal?}
 let carry = [];           // 이번 레이드 휴대 무기 키 목록 (1/2/3 키 순)
+let broughtKeys = new Set(); // 이번 레이드에 반입한 열쇠 keyId (#195)
 const weaponAmmo = {};    // 무기별 탄약 상태 { key: { mag, reserve } }
 let colliders = [];       // yaw 정렬 OBB { cx, cz, c, s, hx, hz, minY, maxY }
 let obstacleMeshes = [];  // LOS/총알 차단용
@@ -946,6 +953,7 @@ function renderInventoryScreen() {
   if (st.loadoutC === undefined || Array.isArray(st.loadoutC)) {
     const m = {}; for (const c of (st.consumables || [])) m[c.name] = (m[c.name] || 0) + 1; st.loadoutC = m; dirty = true; // 개수맵(전량)
   }
+  if (st.loadoutKeys === undefined) { st.loadoutKeys = [...new Set((st.keys || []).map((k) => k.keyId))]; dirty = true; }
   if (dirty) saveStash(st);
   document.getElementById('inv-screen-stash').textContent = `스태시 ₽ ${(st.roubles || 0).toLocaleString('ko-KR')}`;
 
@@ -955,6 +963,7 @@ function renderInventoryScreen() {
   const cg = {}; for (const c of (st.consumables || [])) { cg[c.name] = cg[c.name] || { n: 0, heal: c.heal }; cg[c.name].n++; }
   const parts = st.parts || []; const pg = {}; for (const p of parts) { pg[p.name] = pg[p.name] || { n: 0, slot: p.slot }; pg[p.name].n++; }
   const accs = (st.attOwned || []).filter((k) => ATTACHMENTS[k]);
+  const keys = st.keys || []; const lk = st.loadoutKeys || [];
   const vals = st.valuables || []; const vgz = groupValuables(vals);
   const gunTag = (k) => k === equipped ? '장착 중' : '';
   const moveBtn = (label, attr) => `<button class="ld-btn" ${attr}>${label}</button>`;
@@ -970,9 +979,11 @@ function renderInventoryScreen() {
   const sArmorRows = [];
   if (hasArmor && !brArmor) sArmorRows.push(invRowHTML(`방탄복 (내구도 ${Math.round(st.armorDur)}/${ARMOR_MAX})`, '', '', moveBtn('반입 →', 'data-armld="1"')));
   if (hasHelmet && !brHelmet) sArmorRows.push(invRowHTML('헬멧', '', '', moveBtn('반입 →', 'data-helld="1"')));
+  const sKeys = keys.filter((k) => !lk.includes(k.keyId));
   document.getElementById('inv-stash').innerHTML = [
     invCatHTML('총', sGuns.length, sGuns.map((k) => invRowHTML(WEAPONS[k].name, gunTag(k), '', moveBtn('반입 →', `data-bringw="${k}"`))), '모두 반입됨'),
     invCatHTML('방어구', (hasArmor && !brArmor ? 1 : 0) + (hasHelmet && !brHelmet ? 1 : 0), sArmorRows, '모두 반입됨'),
+    invCatHTML('열쇠', sKeys.length, sKeys.map((k) => invRowHTML(k.name, '', '', moveBtn('반입 →', `data-bringkey="${k.keyId}"`))), keys.length ? '모두 반입됨' : '보유 열쇠 없음'),
     invCatHTML('소모품', sConsRows.length, sConsRows, '모두 반입됨'),
     invCatHTML('총기 부품', parts.length, Object.entries(pg).map(([n, x]) => invRowHTML(`${n}${x.n > 1 ? ` ×${x.n}` : ''}`, SLOT_LABEL[x.slot] || '부품', '')), '보유 부품 없음'),
     invCatHTML('총기 악세서리', accs.length, accs.map((k) => invRowHTML(ATTACHMENTS[k].name, '', '')), '보유 악세서리 없음'),
@@ -986,9 +997,11 @@ function renderInventoryScreen() {
   const lArmorRows = [];
   if (hasArmor && brArmor) lArmorRows.push(invRowHTML(`방탄복 (내구도 ${Math.round(st.armorDur)}/${ARMOR_MAX})`, '', '', moveBtn('← 보관', 'data-armld="0"')));
   if (hasHelmet && brHelmet) lArmorRows.push(invRowHTML('헬멧', '', '', moveBtn('← 보관', 'data-helld="0"')));
+  const lKeys = keys.filter((k) => lk.includes(k.keyId));
   document.getElementById('inv-load').innerHTML = [
     invCatHTML('총', lGuns.length, lGuns.map((k) => invRowHTML(WEAPONS[k].name, gunTag(k), '', moveBtn('← 보관', `data-bringw="${k}"`))), '반입할 총을 스태시에서 →'),
     invCatHTML('방어구', lArmorRows.length, lArmorRows, ''),
+    invCatHTML('열쇠', lKeys.length, lKeys.map((k) => invRowHTML(k.name, '', '', moveBtn('← 보관', `data-bringkey="${k.keyId}"`))), ''),
     invCatHTML('소모품', lConsRows.length, lConsRows, '반입할 소모품을 스태시에서 →'),
   ].join('');
 
@@ -998,6 +1011,7 @@ function renderInventoryScreen() {
   body.querySelectorAll('[data-conss]').forEach((b) => b.addEventListener('click', () => moveCons(decodeURIComponent(b.dataset.conss), -1)));
   body.querySelectorAll('[data-armld]').forEach((b) => b.addEventListener('click', () => toggleLoadoutFlag('loadoutArmor')));
   body.querySelectorAll('[data-helld]').forEach((b) => b.addEventListener('click', () => toggleLoadoutFlag('loadoutHelmet')));
+  body.querySelectorAll('[data-bringkey]').forEach((b) => b.addEventListener('click', () => toggleLoadout('loadoutKeys', b.dataset.bringkey)));
   body.querySelectorAll('[data-sell]').forEach((b) => b.addEventListener('click', () => sellValuable(decodeURIComponent(b.dataset.sell))));
   document.getElementById('inv-sell-all').disabled = vals.length === 0;
 }
@@ -1061,7 +1075,26 @@ function renderShop() {
     html += `<div class="shop-row"><div><div class="w-name">${p.name}</div><div class="w-desc">${SLOT_LABEL[p.slot] || '부품'} 부품</div></div>`
       + `<button data-buypart="${encodeURIComponent(p.name)}" ${roubles < p.value ? 'disabled' : ''}>구매 ₽${p.value.toLocaleString('ko-KR')}</button></div>`;
   }
+  // 열쇠 (#195) — 잠긴 금고 개방용. 이미 보유 시 비활성.
+  const ownedKeyIds = new Set((s.keys || []).map((k) => k.keyId));
+  html += '<h3 style="margin-top:14px">열쇠</h3>';
+  for (const k of KEY_TABLE) {
+    const owned = ownedKeyIds.has(k.keyId);
+    html += `<div class="shop-row"><div><div class="w-name">${k.name}</div><div class="w-desc">잠긴 금고 개방 · 반입 필요</div></div>`
+      + (owned ? '<span class="equipped">보유 중</span>' : `<button data-buykey="${k.keyId}" ${roubles < k.price ? 'disabled' : ''}>구매 ₽${k.price.toLocaleString('ko-KR')}</button>`) + '</div>';
+  }
   el.innerHTML = html;
+  el.querySelectorAll('[data-buykey]').forEach((b) => b.addEventListener('click', () => {
+    const st = loadStash();
+    const k = KEY_BY_ID[b.dataset.buykey];
+    if (!k || (st.roubles || 0) < k.price || (st.keys || []).some((x) => x.keyId === k.keyId)) return;
+    st.roubles -= k.price;
+    st.keys = [...(st.keys || []), { name: k.name, keyId: k.keyId, value: k.value }];
+    saveStash(st);
+    sfx.pickup();
+    renderShop();
+    updateMenuStash();
+  }));
   el.querySelectorAll('[data-buypart]').forEach((b) => b.addEventListener('click', () => {
     const st = loadStash();
     const p = PART_TABLE.find((x) => x.name === decodeURIComponent(b.dataset.buypart));
@@ -2140,6 +2173,23 @@ function spawnLoot() {
       pos: new THREE.Vector3(x, gy + 0.5, z), mesh, lamp,
       items: rollItemsTier(tier), opened: false, label: '보급 상자',
       raidObject: true,
+    });
+    mesh.userData.raidObject = true;
+  }
+  // 잠긴 금고 (#195): 핫존 근처에 배치, 대응 열쇠 반입해야 개방 — 고가치 루팅.
+  const richTier = { key: 'high', min: 5, max: 7, bias: 3.2, skip: 0, color: 0xff8a4a };
+  for (const L of [{ dx: -9, dz: -5, keyId: 'warehouse' }, { dx: 11, dz: 6, keyId: 'office' }]) {
+    const x = THREE.MathUtils.clamp(HOT_CENTER.x + L.dx, -WORLD_HALF + 4, WORLD_HALF - 4);
+    const z = THREE.MathUtils.clamp(HOT_CENTER.y + L.dz, -WORLD_HALF + 4, WORLD_HALF - 4);
+    const gy = terrainH(x, z);
+    const mesh = placeModel('crate', x, z, { height: 0.9, rotY: Math.random() * Math.PI, collide: false, block: false });
+    mesh.traverse((o) => { if (o.isMesh) { o.material = o.material.clone(); o.material.color.setHex(0x5a4030); o.material.emissive && o.material.emissive.setHex(0x2a1808); } });
+    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff5a4a }));
+    lamp.position.set(x, gy + 0.9, z); scene.add(lamp);
+    interactables.push({
+      pos: new THREE.Vector3(x, gy + 0.5, z), mesh, lamp,
+      items: rollItemsTier(richTier), opened: false, label: '잠긴 금고',
+      locked: true, lockKey: L.keyId, raidObject: true,
     });
     mesh.userData.raidObject = true;
   }
@@ -3863,7 +3913,15 @@ function nearestInteractable() {
 }
 
 function lootInteractable(it) {
+  // 잠긴 금고: 반입한 열쇠가 있어야 개방 (#195)
+  if (it.locked && !broughtKeys.has(it.lockKey)) {
+    const kn = KEY_BY_ID[it.lockKey] ? KEY_BY_ID[it.lockKey].name : '열쇠';
+    addFeed(`잠김 — ${kn} 필요`);
+    sfx.dryFire();
+    return;
+  }
   it.opened = true;
+  if (it.locked) addFeed('금고 개방!');
   if (it.mesh) it.mesh.traverse((o) => { if (o.isMesh) o.material = MAT.lootOpened; });
   if (it.lamp) it.lamp.visible = false;
   sfx.pickup();
@@ -3885,9 +3943,9 @@ function lootInteractable(it) {
       gun.reserve += item.ammo;
       addFeed(`+${item.ammo} 탄약`);
     } else {
-      inventory.push({ name: item.name, value: item.value, heal: item.heal, type: item.type, slot: item.slot });
-      addFeed(item.type === 'part'
-        ? `${item.name} 획득 (총기 부품)`
+      inventory.push({ name: item.name, value: item.value, heal: item.heal, type: item.type, slot: item.slot, keyId: item.keyId });
+      addFeed(item.type === 'part' ? `${item.name} 획득 (총기 부품)`
+        : item.type === 'key' ? `${item.name} 획득 (열쇠)`
         : `${item.name} 획득 (₽${item.value.toLocaleString('ko-KR')})`);
     }
   }
@@ -4341,6 +4399,11 @@ function startRaid(mapKey) {
     saveStash(stash0);
     addFeed(`소모품 ${broughtCons.length}개 반입`);
   }
+  // 열쇠 반입 (#195): 로드아웃 표시된 열쇠만(미설정 시 전량). 사망 시 손실.
+  broughtKeys = new Set();
+  const ownedKeys = stash0.keys || [];
+  const lk = stash0.loadoutKeys; // keyId 배열(undefined = 전량)
+  for (const key of ownedKeys) if (lk === undefined || lk.includes(key.keyId)) broughtKeys.add(key.keyId);
   state.kills = 0;
   state.raidTime = RAID_SECONDS;
   state.phase = 'raid';
@@ -4397,10 +4460,14 @@ function endRaid(result, cause) {
     // 반입 분류 (#185/#186/#187): 부품 → stash.parts, 소모품 → stash.consumables, 그 외 가치품 → stash.valuables
     const bankedParts = inventory.filter((i) => i.type === 'part').map((i) => ({ name: i.name, value: i.value, slot: i.slot }));
     const bankedCons = inventory.filter((i) => i.type === 'consumable').map((i) => ({ name: i.name, value: i.value, heal: i.heal }));
-    const banked = inventory.filter((i) => i.type !== 'part' && i.type !== 'consumable' && (i.value || 0) > 0).map((i) => ({ name: i.name, value: i.value }));
+    const banked = inventory.filter((i) => i.type !== 'part' && i.type !== 'consumable' && i.type !== 'key' && (i.value || 0) > 0).map((i) => ({ name: i.name, value: i.value }));
     stash.parts = [...(stash.parts || []), ...bankedParts];
     stash.consumables = [...(stash.consumables || []), ...bankedCons];
     stash.valuables = [...(stash.valuables || []), ...banked];
+    // 습득 열쇠 반입 (중복 소유는 무시) (#195)
+    stash.keys = stash.keys || [];
+    const ownedIds = new Set(stash.keys.map((k) => k.keyId));
+    for (const i of inventory) if (i.type === 'key' && !ownedIds.has(i.keyId)) { stash.keys.push({ name: i.name, keyId: i.keyId, value: i.value }); ownedIds.add(i.keyId); }
     // 레이드 중 습득한 무기 소유 확정 + 장착 유지
     const owned = new Set(stash.weapons || ['rifle']);
     for (const k of (gun.foundWeapons || [])) owned.add(k);
@@ -4430,7 +4497,8 @@ function endRaid(result, cause) {
     stash.loadoutW = (stash.loadoutW || []).filter((k) => stash.weapons.includes(k));
     if (stash.loadoutArmor !== false) stash.armorDur = 0;   // 반입한 방어구만 손실 (#193)
     if (stash.loadoutHelmet !== false) stash.helmet = false;
-    // attOwned·parts·consumables(미반입분)·valuables·미반입 방어구는 스태시 안전 → 유지
+    if (broughtKeys.size) stash.keys = (stash.keys || []).filter((k) => !broughtKeys.has(k.keyId)); // 반입한 열쇠 손실 (#195)
+    // attOwned·parts·consumables(미반입분)·valuables·미반입 방어구/열쇠는 스태시 안전 → 유지
     saveStash(stash);
     sfx.death();
     dom.deathCause.textContent = cause || '사망했습니다.';
@@ -4820,11 +4888,15 @@ function updateHUD() {
   const it = nearestInteractable();
   if (it && state.phase === 'raid') {
     dom.prompt.style.display = 'block';
-    dom.prompt.innerHTML = `<b>[E]</b> ${it.label} 열기`;
+    // 잠긴 금고: 열쇠 반입 여부 표시 (#195)
+    const locked = it.locked && !broughtKeys.has(it.lockKey);
+    const kn = locked && KEY_BY_ID[it.lockKey] ? KEY_BY_ID[it.lockKey].name : '';
+    const label = locked ? `${it.label} 🔒 (${kn} 필요)` : `${it.label} 열기`;
+    dom.prompt.innerHTML = `<b>[E]</b> ${label}`;
     if (IS_MOBILE) {
       const b = $('tb-interact');
       b.style.display = 'flex';
-      b.textContent = `${it.label} 열기`;
+      b.textContent = label;
     }
   } else {
     dom.prompt.style.display = 'none';
