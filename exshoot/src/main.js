@@ -4334,11 +4334,31 @@ const MAP_SCHOOL = {
 };
 
 // ── 도심 맵 (#198) ────────────────────────────────────────
-function urbanBlockSolid(cx, cz, w, d, floors, mat) {
-  const FH = 3.3, h = floors * FH;
-  addBox(cx, h / 2, cz, w, h, d, mat);                        // 본체(솔리드 — 엄폐·시야 차단)
-  addBox(cx, h + 0.25, cz, w + 0.6, 0.5, d + 0.6, 'concrete'); // 옥상 파라펫
-  addBox(cx, 0.7, cz, w + 0.3, 1.4, d + 0.3, 'schoolBase');    // 1층 base 밴드
+// 창문 + 1층 진입 실내 (#199). 1층=창문 셸(정면 문)+바닥/천장, 상층=솔리드+창 facade.
+function urbanWins(len) {
+  const sp = 3.2, n = Math.max(1, Math.floor((len - 2.6) / sp)), span = n * sp, o = [];
+  for (let i = 0; i <= n; i++) o.push({ at: -span / 2 + i * sp, w: 1.4 });
+  return o;
+}
+function urbanBuilding(cx, cz, w, d, floors, mat) {
+  const FH = 3.3;
+  // 1층: 진입 셸 — 정면(+Z) 문, 나머지 3면 창문 벽
+  addWallWithDoor(cx, cz + d / 2, w, FH, 'x', mat, 0, 2.8);
+  addWindowWall(cx, cz - d / 2, w, FH, 'x', mat, urbanWins(w), 0);
+  addWindowWall(cx - w / 2, cz, d, FH, 'z', mat, urbanWins(d), 0);
+  addWindowWall(cx + w / 2, cz, d, FH, 'z', mat, urbanWins(d), 0);
+  addBox(cx, 0.05, cz, w, 0.1, d, 'concrete', { block: false }); // 실내 바닥
+  addBox(cx, FH, cz, w, 0.3, d, 'concrete');                      // 천장(=상층 바닥)
+  // 상층: 솔리드 매스 + 각 층 창 facade(어두운 창)
+  if (floors > 1) {
+    const uh = (floors - 1) * FH;
+    addBox(cx, FH + uh / 2, cz, w, uh, d, mat);
+    for (let f = 1; f < floors; f++) {
+      addWindowWall(cx, cz + d / 2 + 0.05, w, FH, 'x', mat, urbanWins(w), f * FH);
+      addWindowWall(cx, cz - d / 2 - 0.05, w, FH, 'x', mat, urbanWins(w), f * FH);
+    }
+  }
+  addBox(cx, floors * FH + 0.25, cz, w + 0.5, 0.5, d + 0.5, 'concrete'); // 옥상 파라펫
 }
 function buildRoom(cx, cz, w, d, mat) {                        // 진입 가능한 작은 상가(문 1개)
   const h = 3;
@@ -4362,7 +4382,7 @@ function buildUrbanMap() {
     [-36, -36, 20, 16, 5, 'brick'], [36, -34, 18, 20, 6, 'concrete'], [-38, 38, 22, 18, 4, 'plaster'],
     [40, 36, 16, 16, 7, 'brick'], [-60, 2, 14, 28, 5, 'concrete'], [60, 6, 16, 22, 6, 'plaster'],
     [0, -58, 30, 14, 4, 'brick'], [4, 60, 26, 14, 5, 'concrete'], [-62, -60, 18, 16, 5, 'plaster'], [62, -62, 16, 18, 6, 'brick'],
-  ]) urbanBlockSolid(x, z, w, d, f, m);
+  ]) urbanBuilding(x, z, w, d, f, m);
   // 중앙 광장: 진입 가능한 상가 2채 + 엄폐
   buildRoom(-13, -7, 9, 8, 'plaster'); buildRoom(13, 9, 9, 8, 'brick');
   for (const [x, z, rot] of [[-16, 18, 0], [18, -16, 1], [0, 27, 0], [-27, -13, 1], [25, 21, 0], [-4, -22, 1]]) addBox(x, 1.3, z, rot ? 2.4 : 5, 2.6, rot ? 5 : 2.4, 'metal'); // 컨테이너 엄폐
@@ -4380,8 +4400,9 @@ const MAP_URBAN = {
   flattens: URBAN_FLATTENS,
   lootSpots: [
     [-13, -7], [13, 9], [0, 0], [-16, 18], [18, -16], [-27, -13], [25, 21], // 광장·상가·엄폐
+    [-36, -36], [36, -34], [-38, 38], [40, 36], [0, -58], [4, 60],           // 건물 1층 실내
     [-36, -24], [36, -22], [-38, 26], [40, 24], [0, -46], [4, 48],           // 블록 주변 거리
-    [-60, -12], [60, -8], [-62, -48], [62, -50], [-46, 46], [46, 48],        // 외곽 거리
+    [-60, 2], [60, 6], [-62, -60], [62, -62], [-46, 46], [46, 48],           // 외곽 거리·건물
   ],
   extract: [
     { name: '북 대로', pos: new THREE.Vector3(0, 0, -80) },
