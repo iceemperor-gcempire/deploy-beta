@@ -862,6 +862,7 @@ let enemies = [];
 let interactables = [];   // {pos, mesh, items, opened, label}
 let extractions = [];     // {pos, mesh, ring}
 let pendingExtractFee = 0; // 유료 탈출 시 차감할 ₽ (#194)
+let airdropBeacon = null;  // 에어드랍 비컨 (#197)
 let tracers = [];         // {line, life}
 // 물리 (Rapier) — #119 Phase 2
 let RAPIER = null, physWorld = null, physReady = false;
@@ -2330,54 +2331,40 @@ function isPointOpen(x, z, r) {
   return true;
 }
 
+function spawnEnemyAt(p, waypoint) {
+  const m = makeEnemyMesh();
+  m.group.position.copy(p);
+  scene.add(m.group);
+  const e = {
+    ...m, pos: m.group.position, hp: ENEMY.hp, state: 'patrol',
+    waypoint: waypoint || randomOpenPoint(),
+    idleTimer: 0, detectTimer: Math.random() * 0.15, lastKnown: new THREE.Vector3(),
+    lostTimer: 0, fireTimer: 1 + Math.random(), burstLeft: 0, mag: ENEMY.magSize,
+    reloadT: 0, stance: 'stand', rollT: 0, rollDir: null, stuckTimer: 0, lastPos: p.clone(), dead: false,
+  };
+  m.body.userData = { enemy: e, part: 'body' };
+  m.head.userData = { enemy: e, part: 'head' };
+  // 원샷 종료 훅 — spread 복사 후의 최종 enemy 객체(e)에 바인딩 (makeEnemyMesh 내부에서 하면 유실)
+  m.mixer.addEventListener('finished', (ev) => {
+    if (ev.action === e.actDeath) { e.deathDone = true; return; }
+    if (ev.action === e.oneShot) {
+      e.oneShot = null;
+      if (e.dead) return;
+      const base = e.baseAct || (e.running ? e.actRun : e.actIdle);
+      ev.action.fadeOut(0.12);
+      if (base) base.reset().fadeIn(0.12).play();
+    }
+  });
+  enemies.push(e);
+  return e;
+}
 function spawnEnemies(avoidPos) {
   for (let i = 0; i < ENEMY.count; i++) {
     let p;
     do { p = randomOpenPoint(); } while (p.distanceTo(avoidPos) < 42); // 스폰 안전 반경 (#110)
-    const m = makeEnemyMesh();
-    m.group.position.copy(p);
-    scene.add(m.group);
-    const e = {
-      ...m,
-      pos: m.group.position,
-      hp: ENEMY.hp,
-      state: 'patrol',
-      waypoint: (() => { // 첫 웨이포인트도 플레이어 스폰 근처 금지 — 스폰 직후 조우 완화 (#110)
-        let wp;
-        do { wp = randomOpenPoint(); } while (wp.distanceTo(avoidPos) < 35);
-        return wp;
-      })(),
-      idleTimer: 0,
-      detectTimer: Math.random() * 0.15,
-      lastKnown: new THREE.Vector3(),
-      lostTimer: 0,
-      fireTimer: 1 + Math.random(),
-      burstLeft: 0,
-      mag: ENEMY.magSize,
-      reloadT: 0,
-      stance: 'stand',
-      rollT: 0,
-      rollDir: null,
-      stuckTimer: 0,
-      lastPos: p.clone(),
-      dead: false,
-    };
-    m.body.userData = { enemy: e, part: 'body' };
-    m.head.userData = { enemy: e, part: 'head' };
-    // 원샷 종료 훅 — spread 복사 후의 최종 enemy 객체(e)에 바인딩해야 함
-    // (makeEnemyMesh 안에서 붙이면 복사 전 객체에 플래그를 써서 유실됨)
-    m.mixer.addEventListener('finished', (ev) => {
-      if (ev.action === e.actDeath) { e.deathDone = true; return; }
-      if (ev.action === e.oneShot) {
-        e.oneShot = null;
-        if (e.dead) return;
-        // 원샷(피격/사격/재장전/구르기) 종료 → 기본 모션 복귀
-        const base = e.baseAct || (e.running ? e.actRun : e.actIdle);
-        ev.action.fadeOut(0.12);
-        if (base) base.reset().fadeIn(0.12).play();
-      }
-    });
-    enemies.push(e);
+    let wp;
+    do { wp = randomOpenPoint(); } while (wp.distanceTo(avoidPos) < 35); // 첫 웨이포인트도 스폰 근처 금지 (#110)
+    spawnEnemyAt(p, wp);
   }
   spawnBoss(avoidPos);
 }
@@ -2865,6 +2852,39 @@ function setupExtractions(spawnPos) {
     THREE.MathUtils.clamp(HOT_CENTER.y + Math.sin(ang) * 42, -WORLD_HALF + 6, WORLD_HALF - 6));
   fp.y = terrainH(fp.x, fp.z);
   extractions.push({ name: '유료 탈출', pos: fp, ...makeExtractBeacon(fp, 0xffcf5a), progress: 0, hold: EXTRACT_HOLD * 0.55, fee: 15000 });
+}
+
+// 동적 이벤트 — 에어드랍(보급 투하) (#197)
+function triggerAirdrop() {
+  state.airdropDone = true;
+  let p; do { p = randomOpenPoint(); } while (Math.max(Math.abs(p.x), Math.abs(p.z)) > WORLD_HALF - 20);
+  const gy = terrainH(p.x, p.z);
+  const mesh = placeModel('crate', p.x, p.z, { height: 1.0, rotY: Math.random() * Math.PI, collide: false, block: false });
+  mesh.position.y += 34; // 상공에서 낙하 시작
+  mesh.traverse((o) => { if (o.isMesh) { o.material = o.material.clone(); if (o.material.emissive) o.material.emissive.setHex(0x0a2635); } });
+  const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 8), new THREE.MeshBasicMaterial({ color: 0x5ac8ff }));
+  lamp.position.set(p.x, gy + 0.9, p.z); scene.add(lamp);
+  interactables.push({
+    pos: new THREE.Vector3(p.x, gy + 0.5, p.z), mesh, lamp,
+    items: rollItemsTier({ key: 'high', min: 6, max: 8, bias: 3.4 }), opened: false, label: '보급 투하',
+    airdrop: true, landing: true, groundY: gy, raidObject: true,
+  });
+  mesh.userData.raidObject = true;
+  airdropBeacon = makeExtractBeacon(p, 0x5ac8ff); // 파란 비컨(먼 거리에서도 보임)
+  for (let i = 0; i < 2; i++) { // 경비 스캐브
+    const gp = new THREE.Vector3(p.x + (Math.random() * 2 - 1) * 8, 0, p.z + (Math.random() * 2 - 1) * 8);
+    gp.y = terrainH(gp.x, gp.z); spawnEnemyAt(gp, p.clone());
+  }
+  addFeed('📦 보급 투하 — 지도(파란 점) 확인!');
+  if (sfx.extractDone) sfx.extractDone();
+}
+function updateEvents(dt) {
+  if (!state.airdropDone && state.raidTime <= (state.airdropAt || 0)) triggerAirdrop();
+  for (const it of interactables) { // 낙하 애니메이션
+    if (!it.landing) continue;
+    it.mesh.position.y -= 22 * dt;
+    if (it.mesh.position.y <= it.groundY + 0.4) { it.mesh.position.y = it.groundY + 0.4; it.landing = false; if (sfx.pickup) sfx.pickup(); }
+  }
 }
 
 let extractTickAcc = 0;
@@ -3902,7 +3922,7 @@ function nearestInteractable() {
   camera.getWorldDirection(fwd);
   let best = null, bestD = 2.9;
   for (const it of interactables) {
-    if (it.opened) continue;
+    if (it.opened || it.landing) continue; // 낙하 중인 보급은 착지 후 개봉 가능 (#197)
     const d = it.pos.distanceTo(player.pos);
     if (d > bestD) continue;
     const dir = it.pos.clone().sub(playerEyePos()).normalize();
@@ -4052,7 +4072,8 @@ function updateMinimap() {
   // 미개봉 보급 상자(연한 점) + 잠긴 금고(붉은) + 탈출구
   for (const it of interactables) {
     if (it.opened) continue;
-    if (it.locked) { ctx.fillStyle = '#ff5a4a'; ctx.beginPath(); ctx.arc(cx(it.pos.x), cy(it.pos.z), 3, 0, 7); ctx.fill(); }
+    if (it.airdrop) { ctx.fillStyle = '#5ac8ff'; ctx.beginPath(); ctx.arc(cx(it.pos.x), cy(it.pos.z), 4, 0, 7); ctx.fill(); } // 에어드랍 (#197)
+    else if (it.locked) { ctx.fillStyle = '#ff5a4a'; ctx.beginPath(); ctx.arc(cx(it.pos.x), cy(it.pos.z), 3, 0, 7); ctx.fill(); }
     else { ctx.fillStyle = 'rgba(150,200,120,0.55)'; ctx.fillRect(cx(it.pos.x) - 1, cy(it.pos.z) - 1, 2, 2); }
   }
   for (const ex of extractions) {
@@ -4359,6 +4380,7 @@ function clearRaidObjects() {
   interactables = [];
   for (const ex of extractions) { scene.remove(ex.beam); scene.remove(ex.ring); scene.remove(ex.light); }
   extractions = [];
+  if (airdropBeacon) { scene.remove(airdropBeacon.beam); scene.remove(airdropBeacon.ring); scene.remove(airdropBeacon.light); airdropBeacon = null; } // (#197)
   for (const t of tracers) scene.remove(t.line);
   tracers = [];
   for (const c of corpses) scene.remove(c);
@@ -4440,6 +4462,8 @@ function startRaid(mapKey) {
   state.phase = 'raid';
   state.paused = false;
   pendingExtractFee = 0;
+  state.airdropDone = false;
+  state.airdropAt = RAID_SECONDS - (90 + Math.random() * 150); // 1.5~4분 경과 시 보급 투하 (#197)
 
   spawnLoot();
   spawnPhysProps(); // 동적 물리 배럴/폭발통 (#119)
@@ -4958,6 +4982,7 @@ function loop() {
     for (const e of enemies) updateEnemy(e, dt);
     updatePhysics(dt); // Rapier 스텝 + 소품/래그돌 동기화 (#119)
     updateExtraction(dt);
+    updateEvents(dt);
     updateAcoustics(dt);
     updateHUD();
   }
