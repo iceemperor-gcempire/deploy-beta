@@ -153,6 +153,20 @@ const ITEM_TABLE = [
   { name: '5.56 탄약 30발',  value: 0,     w: 14, ammo: 30 },
 ];
 
+// 총기 부품 (#186) — 지금은 루팅·구매로 획득해 인벤토리에 쌓이는 아이템. 슬롯 장착(커스텀)은 차후.
+// type:'part' 로 태깅해 탈출 시 stash.parts 로 분류 반입(귀중품과 구분).
+const SLOT_LABEL = { barrel: '총열', handguard: '핸드가드', stock: '개머리판', trigger: '방아쇠', magazine: '탄창', bolt: '노리쇠', muzzle: '총구' };
+const PART_TABLE = [
+  { name: '강선 총열',     value: 12000, w: 5, type: 'part', slot: 'barrel' },
+  { name: '경량 핸드가드', value: 8000,  w: 6, type: 'part', slot: 'handguard' },
+  { name: '전술 개머리판', value: 9000,  w: 6, type: 'part', slot: 'stock' },
+  { name: '경기용 방아쇠', value: 15000, w: 3, type: 'part', slot: 'trigger' },
+  { name: '확장 탄창',     value: 6000,  w: 7, type: 'part', slot: 'magazine' },
+  { name: '강화 노리쇠',   value: 11000, w: 4, type: 'part', slot: 'bolt' },
+  { name: '소염기',        value: 7000,  w: 6, type: 'part', slot: 'muzzle' },
+];
+const LOOT_POOL = [...ITEM_TABLE, ...PART_TABLE]; // 루팅 롤 대상(일반 아이템 + 부품)
+
 // ---------- DOM ----------
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -850,8 +864,13 @@ function renderInventoryScreen() {
   const accs = (st.attOwned || []).filter((k) => ATTACHMENTS[k]);
   cats.push(invCatHTML('총기 악세서리', accs.length,
     accs.map((k) => invRowHTML(ATTACHMENTS[k].name, '', '')), '보유한 악세서리가 없습니다.'));
-  // 3. 총기 부품 (미구현 — 분류만)
-  cats.push(invCatHTML('총기 부품', 0, [], '아직 구현되지 않은 분류입니다.'));
+  // 3. 총기 부품 — 루팅·구매로 획득해 쌓임(슬롯 장착 커스텀은 차후) (#186)
+  const parts = st.parts || [];
+  const pg = {};
+  for (const p of parts) { pg[p.name] = pg[p.name] || { n: 0, slot: p.slot }; pg[p.name].n++; }
+  const partRows = Object.entries(pg).map(([name, x]) =>
+    invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, SLOT_LABEL[x.slot] || '부품', ''));
+  cats.push(invCatHTML('총기 부품', parts.length, partRows, '보유한 부품이 없습니다.'));
   // 4. 귀중품 (매각용)
   const vals = st.valuables || [];
   const g = groupValuables(vals);
@@ -914,7 +933,23 @@ function renderShop() {
   const meds = s.medkits || 0;
   html += `<div class="shop-row"><div><div class="w-name">구급킷 지참 (${meds}/2)</div><div class="w-desc">+60 HP · 다음 레이드 반입, 사망 시 손실</div></div>` +
     `<button data-med="1" ${roubles < 14000 || meds >= 2 ? 'disabled' : ''}>구매 ₽14,000</button></div>`;
+  // 총기 부품 (#186) — 구매 시 인벤토리(총기 부품)에 쌓임. 차후 총기 커스텀에 사용.
+  html += '<h3 style="margin-top:14px">총기 부품</h3>';
+  for (const p of PART_TABLE) {
+    html += `<div class="shop-row"><div><div class="w-name">${p.name}</div><div class="w-desc">${SLOT_LABEL[p.slot] || '부품'} 부품</div></div>`
+      + `<button data-buypart="${encodeURIComponent(p.name)}" ${roubles < p.value ? 'disabled' : ''}>구매 ₽${p.value.toLocaleString('ko-KR')}</button></div>`;
+  }
   el.innerHTML = html;
+  el.querySelectorAll('[data-buypart]').forEach((b) => b.addEventListener('click', () => {
+    const st = loadStash();
+    const p = PART_TABLE.find((x) => x.name === decodeURIComponent(b.dataset.buypart));
+    if (!p || (st.roubles || 0) < p.value) return;
+    st.roubles -= p.value;
+    st.parts = [...(st.parts || []), { name: p.name, value: p.value, slot: p.slot }];
+    saveStash(st);
+    sfx.pickup();
+    updateMenuStash();
+  }));
   el.querySelectorAll('[data-buy]').forEach((b) => b.addEventListener('click', () => {
     const st = loadStash();
     const w = WEAPONS[b.dataset.buy];
@@ -1869,10 +1904,10 @@ function buildIndustrialMap() {
 // 루팅
 // ============================================================
 function rollItem() {
-  const total = ITEM_TABLE.reduce((s, i) => s + i.w, 0);
+  const total = LOOT_POOL.reduce((s, i) => s + i.w, 0);
   let r = Math.random() * total;
-  for (const it of ITEM_TABLE) { r -= it.w; if (r <= 0) return it; }
-  return ITEM_TABLE[0];
+  for (const it of LOOT_POOL) { r -= it.w; if (r <= 0) return it; }
+  return LOOT_POOL[0];
 }
 function rollItems(min, max) {
   const n = min + Math.floor(Math.random() * (max - min + 1));
@@ -3630,8 +3665,10 @@ function lootInteractable(it) {
       gun.reserve += item.ammo;
       addFeed(`+${item.ammo} 탄약`);
     } else {
-      inventory.push({ name: item.name, value: item.value, heal: item.heal });
-      addFeed(`${item.name} 획득 (₽${item.value.toLocaleString('ko-KR')})`);
+      inventory.push({ name: item.name, value: item.value, heal: item.heal, type: item.type, slot: item.slot });
+      addFeed(item.type === 'part'
+        ? `${item.name} 획득 (총기 부품)`
+        : `${item.name} 획득 (₽${item.value.toLocaleString('ko-KR')})`);
     }
   }
   refreshInventoryUI();
@@ -4122,8 +4159,10 @@ function endRaid(result, cause) {
   if (result === 'extract') {
     const value = inventoryValue();
     stash.extracts = (stash.extracts || 0) + 1;
-    // 귀중품은 자동 매각 대신 스태시 인벤토리에 아이템으로 보관 → 메뉴 인벤토리에서 수동 매각 (#185)
-    const banked = inventory.filter((i) => (i.value || 0) > 0).map((i) => ({ name: i.name, value: i.value }));
+    // 반입 분류 (#185/#186): 총기 부품 → stash.parts, 그 외 가치 아이템 → stash.valuables(수동 매각)
+    const bankedParts = inventory.filter((i) => i.type === 'part').map((i) => ({ name: i.name, value: i.value, slot: i.slot }));
+    const banked = inventory.filter((i) => i.type !== 'part' && (i.value || 0) > 0).map((i) => ({ name: i.name, value: i.value }));
+    stash.parts = [...(stash.parts || []), ...bankedParts];
     stash.valuables = [...(stash.valuables || []), ...banked];
     // 레이드 중 습득한 무기 소유 확정 + 장착 유지
     const owned = new Set(stash.weapons || ['rifle']);
