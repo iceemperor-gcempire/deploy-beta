@@ -854,6 +854,7 @@ let obstacleMeshes = [];  // LOS/총알 차단용
 let enemies = [];
 let interactables = [];   // {pos, mesh, items, opened, label}
 let extractions = [];     // {pos, mesh, ring}
+let pendingExtractFee = 0; // 유료 탈출 시 차감할 ₽ (#194)
 let tracers = [];         // {line, life}
 // 물리 (Rapier) — #119 Phase 2
 let RAPIER = null, physWorld = null, physReady = false;
@@ -2088,6 +2089,25 @@ function rollItems(min, max) {
   const n = min + Math.floor(Math.random() * (max - min + 1));
   return Array.from({ length: n }, rollItem);
 }
+// 리스크/보상 구배 (#194): 핫존(맵 중심 근처)일수록 루팅 밀도·가치↑, 가장자리는 희박·저가치.
+let HOT_CENTER = new THREE.Vector2(0, 0); // 고가치 핫존 중심(맵별 갱신)
+function lootTier(x, z) {
+  const d = Math.hypot(x - HOT_CENTER.x, z - HOT_CENTER.y);
+  if (d < 32) return { key: 'high', min: 3, max: 5, bias: 2.4, skip: 0.06, color: 0xffcf5a }; // 핫존 — 금빛 램프
+  if (d < 62) return { key: 'mid',  min: 2, max: 4, bias: 0.9, skip: 0.18, color: 0x9fdc6a };
+  return { key: 'low', min: 1, max: 3, bias: 0.0, skip: 0.32, color: 0x8fb0b8 };            // 가장자리
+}
+function rollItemBiased(bias) {
+  const wt = (it) => it.w * (1 + bias * Math.min(1, (it.value || 0) / 40000)); // 고가치일수록 가중↑
+  const total = LOOT_POOL.reduce((s, it) => s + wt(it), 0);
+  let r = Math.random() * total;
+  for (const it of LOOT_POOL) { r -= wt(it); if (r <= 0) return it; }
+  return LOOT_POOL[0];
+}
+function rollItemsTier(tier) {
+  const n = tier.min + Math.floor(Math.random() * (tier.max - tier.min + 1));
+  return Array.from({ length: n }, () => rollItemBiased(tier.bias));
+}
 
 let LOOT_SPOTS = [
   [-28, -18], [-34, -14], [-22, -21],       // 창고 내부
@@ -2102,7 +2122,8 @@ let LOOT_SPOTS = [
 
 function spawnLoot() {
   for (const [x, z, yAbs] of LOOT_SPOTS) {
-    if (Math.random() < 0.2) continue; // 매 레이드 배치가 조금씩 다름
+    const tier = lootTier(x, z);                 // 핫존 구배 (#194)
+    if (Math.random() < tier.skip) continue;     // 매 레이드 배치가 조금씩 다름
     // 보급 상자 모델 (통과 가능 — 루팅 동선 방해 방지)
     const mesh = placeModel('crate', x, z, {
       height: 0.8, rotY: Math.random() * Math.PI, collide: false, block: false,
@@ -2111,13 +2132,13 @@ function spawnLoot() {
     const gy = yAbs !== undefined ? yAbs : terrainH(x, z);
     if (yAbs !== undefined) mesh.position.y += yAbs - terrainH(x, z);
     const lamp = new THREE.Mesh(
-      new THREE.SphereGeometry(0.06, 8, 8),
-      new THREE.MeshBasicMaterial({ color: 0x9fdc6a }));
+      new THREE.SphereGeometry(tier.key === 'high' ? 0.08 : 0.06, 8, 8),
+      new THREE.MeshBasicMaterial({ color: tier.color }));   // 램프 색으로 등급 표시
     lamp.position.set(x, gy + 0.78, z);
     scene.add(lamp);
     interactables.push({
       pos: new THREE.Vector3(x, gy + 0.5, z), mesh, lamp,
-      items: rollItems(2, 4), opened: false, label: '보급 상자',
+      items: rollItemsTier(tier), opened: false, label: '보급 상자',
       raidObject: true,
     });
     mesh.userData.raidObject = true;
@@ -2767,27 +2788,33 @@ let EXTRACT_CANDIDATES = [
   { name: '북서 수풀', pos: new THREE.Vector3(-76, 0, -76) },
 ];
 
+function makeExtractBeacon(pos, color) {
+  const beam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.4, 0.4, 40, 12, 1, true),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false }));
+  beam.position.set(pos.x, 20, pos.z); scene.add(beam);
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(EXTRACT_RADIUS - 0.4, EXTRACT_RADIUS, 40),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5, side: THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI / 2; ring.position.set(pos.x, 0.05, pos.z); scene.add(ring);
+  const light = new THREE.PointLight(color, 30, 18, 2);
+  light.position.set(pos.x, 3, pos.z); scene.add(light);
+  return { beam, ring, light };
+}
 function setupExtractions(spawnPos) {
-  // 스폰에서 먼 순서로 2곳 활성화
+  // 무료 탈출: 스폰에서 먼 가장자리 2곳 (안전하지만 멀다)
   const sorted = [...EXTRACT_CANDIDATES].sort(
     (a, b) => b.pos.distanceTo(spawnPos) - a.pos.distanceTo(spawnPos));
   for (const cand of sorted.slice(0, 2)) {
-    const beam = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.4, 0.4, 40, 12, 1, true),
-      new THREE.MeshBasicMaterial({ color: 0x51ff7a, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false }));
-    beam.position.set(cand.pos.x, 20, cand.pos.z);
-    scene.add(beam);
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(EXTRACT_RADIUS - 0.4, EXTRACT_RADIUS, 40),
-      new THREE.MeshBasicMaterial({ color: 0x51ff7a, transparent: true, opacity: 0.5, side: THREE.DoubleSide }));
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.set(cand.pos.x, 0.05, cand.pos.z);
-    scene.add(ring);
-    const light = new THREE.PointLight(0x51ff7a, 30, 18, 2);
-    light.position.set(cand.pos.x, 3, cand.pos.z);
-    scene.add(light);
-    extractions.push({ name: cand.name, pos: cand.pos.clone(), beam, ring, light, progress: 0 });
+    extractions.push({ name: cand.name, pos: cand.pos.clone(), ...makeExtractBeacon(cand.pos, 0x51ff7a), progress: 0, hold: EXTRACT_HOLD });
   }
+  // 유료 빠른 탈출 (#194): 핫존 근처 — 고위험 위치지만 유지시간 짧음. ₽ 지불 필요.
+  const ang = Math.random() * Math.PI * 2;
+  const fp = new THREE.Vector3(
+    THREE.MathUtils.clamp(HOT_CENTER.x + Math.cos(ang) * 42, -WORLD_HALF + 6, WORLD_HALF - 6), 0,
+    THREE.MathUtils.clamp(HOT_CENTER.y + Math.sin(ang) * 42, -WORLD_HALF + 6, WORLD_HALF - 6));
+  fp.y = terrainH(fp.x, fp.z);
+  extractions.push({ name: '유료 탈출', pos: fp, ...makeExtractBeacon(fp, 0xffcf5a), progress: 0, hold: EXTRACT_HOLD * 0.55, fee: 15000 });
 }
 
 let extractTickAcc = 0;
@@ -2798,13 +2825,27 @@ function updateExtraction(dt) {
     if (d < EXTRACT_RADIUS) { inZone = ex; break; }
   }
   if (inZone) {
+    dom.extractProgress.style.display = 'block';
+    // 유료 탈출: 보유 ₽ 부족하면 진행 불가 (#194)
+    if (inZone.fee) {
+      const money = loadStash().roubles || 0;
+      if (money < inZone.fee) {
+        inZone.progress = 0;
+        dom.extractLabel.textContent = `${inZone.name} — ₽${inZone.fee.toLocaleString('ko-KR')} 필요 (보유 ₽${money.toLocaleString('ko-KR')})`;
+        dom.extractFill.style.width = '0%';
+        return;
+      }
+    }
+    const hold = inZone.hold || EXTRACT_HOLD;
     inZone.progress += dt;
     extractTickAcc += dt;
     if (extractTickAcc > 1) { extractTickAcc = 0; sfx.extractTick(); }
-    dom.extractProgress.style.display = 'block';
-    dom.extractLabel.textContent = `${inZone.name} — 탈출 진행 중`;
-    dom.extractFill.style.width = `${Math.min(100, inZone.progress / EXTRACT_HOLD * 100)}%`;
-    if (inZone.progress >= EXTRACT_HOLD) {
+    dom.extractLabel.textContent = inZone.fee
+      ? `${inZone.name} (₽${inZone.fee.toLocaleString('ko-KR')}) — 탈출 진행 중`
+      : `${inZone.name} — 탈출 진행 중`;
+    dom.extractFill.style.width = `${Math.min(100, inZone.progress / hold * 100)}%`;
+    if (inZone.progress >= hold) {
+      pendingExtractFee = inZone.fee || 0;
       sfx.extractDone();
       endRaid('extract');
       return;
@@ -4304,6 +4345,7 @@ function startRaid(mapKey) {
   state.raidTime = RAID_SECONDS;
   state.phase = 'raid';
   state.paused = false;
+  pendingExtractFee = 0;
 
   spawnLoot();
   spawnPhysProps(); // 동적 물리 배럴/폭발통 (#119)
@@ -4367,10 +4409,13 @@ function endRaid(result, cause) {
     // 방어구/헬멧: 반입한 경우만 내구도·상태 갱신(미반입은 스태시 안전분 유지) (#193)
     if (stash.loadoutArmor !== false) stash.armorDur = player.armorDur;
     if (stash.loadoutHelmet !== false) stash.helmet = player.helmet;
+    if (pendingExtractFee) stash.roubles = Math.max(0, (stash.roubles || 0) - pendingExtractFee); // 유료 탈출 비용 (#194)
     saveStash(stash);
     const used = RAID_SECONDS - state.raidTime;
     dom.extractStats.innerHTML =
-      `레이드 시간 ${fmtTime(used)} · 사살 ${state.kills} · 인벤토리 반입 <b style="color:#d9c86a">₽ ${value.toLocaleString('ko-KR')}</b> <span style="color:#93a393">(귀중품은 인벤토리에서 매각)</span>`;
+      `레이드 시간 ${fmtTime(used)} · 사살 ${state.kills} · 인벤토리 반입 <b style="color:#d9c86a">₽ ${value.toLocaleString('ko-KR')}</b>`
+      + (pendingExtractFee ? ` · 탈출 비용 <b style="color:#d98f6a">-₽ ${pendingExtractFee.toLocaleString('ko-KR')}</b>` : '')
+      + ` <span style="color:#93a393">(귀중품은 인벤토리에서 매각)</span>`;
     dom.extractLoot.innerHTML = summaryHTML();
     dom.extract.style.display = 'flex';
   } else {
