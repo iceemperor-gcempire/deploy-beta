@@ -479,10 +479,17 @@ async function loadAssets() {
   const jobs = Object.entries(GLB_MANIFEST).map(async ([key, path]) => {
     const gltf = await loadGlb(path);
     const isGirl = GIRL_KEYS.includes(key);
+    const isNature = key.startsWith('q_'); // Quaternius 나무·수풀·바위
     gltf.scene.traverse((o) => {
       if (o.isMesh) {
         o.castShadow = true; o.receiveShadow = true;
         if (o.material && !isGirl) {
+          if (isNature) {
+            // 자연물은 무광 — 불필요한 플라스틱 광택·환경반사 제거 (#178)
+            o.material.roughness = 1.0;
+            o.material.metalness = 0.0;
+            if ('envMapIntensity' in o.material) o.material.envMapIntensity = 0.2;
+          }
           const mn = (o.material.name || '').toLowerCase();
           if (/leaf|leaves|foliage|bush|plant|grass|flower|petal/.test(mn)) {
             // 잎/수풀: 텍스처 알파로 잎 실루엣만 남기는 컷아웃 (BLEND 카드가 사각 종이로 보이는 문제) #165
@@ -1263,6 +1270,8 @@ const MAT = {
   wood: new THREE.MeshStandardMaterial({ color: 0x6e5a3e, roughness: 0.9 }),
   woodDark: new THREE.MeshStandardMaterial({ color: 0x4a3d2a, roughness: 0.9 }),
   roof: new THREE.MeshStandardMaterial({ color: 0x3d4147, roughness: 0.85 }),
+  glass: new THREE.MeshStandardMaterial({ color: 0x88aab4, roughness: 0.15, metalness: 0.1, transparent: true, opacity: 0.5, envMapIntensity: 1.2 }),
+  schoolBase: new THREE.MeshStandardMaterial({ color: 0x9a8f7a, roughness: 0.95 }), // 학교 1층 base 밴드(살짝 짙은 톤)
   sandbag: new THREE.MeshStandardMaterial({ color: 0x8a7f5f, roughness: 1.0 }),
   barrel: new THREE.MeshStandardMaterial({ color: 0x37505f, roughness: 0.55, metalness: 0.4 }),
   trunk: new THREE.MeshStandardMaterial({ color: 0x54422e, roughness: 1.0 }),
@@ -3602,63 +3611,95 @@ let SPAWN_POINTS = [
 // 오픈월드풍 나무 (Quaternius 개별 GLB) — 침엽(소나무)·활엽(단풍/일반/자작) 혼합 + 고사목 소량
 let FOREST_TREES = [...TREE_KEYS.pine, ...TREE_KEYS.pine, ...TREE_KEYS.maple, ...TREE_KEYS.maple, ...TREE_KEYS.normal, ...TREE_KEYS.birch, ...TREE_KEYS.dead];
 
-// 절차적 고등학교 건물 — 1층 진입 가능(중앙 현관+복도+교실), 2~3층 창 파사드 매스, 옥상 파라펫
+// 절차적 고등학교 건물(#178 대형화) — 1층 진입 가능(중앙 현관+복도+교실 7칸),
+// 2~4층 유리창 파사드 매스, 층 밴드·현관 캐노피·옥상 구조물로 "학교"다운 스케일.
 function buildSchoolBuilding(cx, cz) {
-  const L = 46, Dp = 12, FH = 3.4, t = 0.35;   // 길이(X)/깊이(Z)/층고
+  const L = 68, Dp = 15, FH = 3.6, t = 0.35, FLOORS = 4; // 길이(X)/깊이(Z)/층고/층수
   const halfL = L / 2, halfD = Dp / 2;
-  const wall = 'plaster';                       // 외벽: 도색 콘크리트
-  const zF = cz + halfD, zB = cz - halfD;       // 남(정면 +Z)/북(후면)
-  const entW = 4.2;                              // 중앙 현관 폭
+  const wall = 'plaster';                        // 외벽: 밝은 도색(크림)
+  const zF = cz + halfD, zB = cz - halfD;        // 남(정면 +Z)/북(후면)
+  const entW = 6.5;                              // 중앙 현관 폭
 
-  // 기초 슬래브 + 실내 바닥
-  addBox(cx, 0.15, cz, L + 1.0, 0.5, Dp + 1.0, 'concrete');
-  addBox(cx, 0.34, cz, L - 0.6, 0.05, Dp - 0.6, 'woodfloor', { collide: false, block: false, shadow: false });
+  // 창 개구부를 일정 간격(bay)으로 생성 — 세그먼트 길이/중심 기준
+  const evenWins = (len, spacing, w) => {
+    const n = Math.max(0, Math.floor((len - 2.5) / spacing));
+    const span = n * spacing, out = [];
+    for (let i = 0; i <= n; i++) out.push({ at: -span / 2 + i * spacing, w });
+    return out;
+  };
+  // 유리 + 세로 mullion 을 개구부에 채운다(창이 뚫린 구멍이 아니라 창처럼 보이게)
+  const glaze = (wx, wz, axis, openings, baseY) => {
+    const gy = baseY + 1.5, gh = 1.0; // addWindowWall 개구부(sill 1.0~lintel 2.0) 대응
+    for (const o of openings) {
+      if (axis === 'x') {
+        addBox(wx + o.at, gy, wz, o.w, gh, 0.06, MAT.glass, { collide: false, block: false, shadow: false });
+        addBox(wx + o.at, gy, wz, 0.07, gh, 0.13, MAT.woodDark, { collide: false, block: false, shadow: false });
+      } else {
+        addBox(wx, gy, wz + o.at, 0.06, gh, o.w, MAT.glass, { collide: false, block: false, shadow: false });
+      }
+    }
+  };
+  const bay = 4.4;
 
-  // ── 1층 ──
-  // 정면(남): 좌우 창문벽 + 중앙 현관 개구부(상인방만)
-  const sideLen = (L - entW) / 2;
-  const winsFrontL = [{ at: -sideLen / 2 - 1, w: 1.8 }, { at: 0, w: 1.8 }, { at: sideLen / 2 + 1, w: 1.8 }];
-  const winsFrontR = winsFrontL;
-  addWindowWall(cx - (entW / 2 + sideLen / 2), zF, sideLen, FH, 'x', wall, [{ at: 0, w: 1.8 }, { at: -sideLen / 2 + 1.4, w: 1.8 }]);
-  addWindowWall(cx + (entW / 2 + sideLen / 2), zF, sideLen, FH, 'x', wall, [{ at: 0, w: 1.8 }, { at: sideLen / 2 - 1.4, w: 1.8 }]);
-  addBox(cx, FH - 0.35, zF, entW + 0.4, 0.7, t, wall);        // 현관 상인방
-  addBox(cx, 0.1, zF + 0.9, entW + 1.2, 0.2, 1.8, 'concrete'); // 현관 계단/포치
-  // 후면(북): 교실 창문 밴드
-  const winsBack = [];
-  for (let i = -2; i <= 2; i++) winsBack.push({ at: i * 8.4, w: 2.6 });
-  addWindowWall(cx, zB, L, FH, 'x', wall, winsBack);
+  // 기초 플린스 + 실내 바닥
+  addBox(cx, 0.3, cz, L + 1.4, 0.8, Dp + 1.4, 'concrete');
+  addBox(cx, 0.62, cz, L - 0.4, 0.05, Dp - 0.4, 'woodfloor', { collide: false, block: false, shadow: false });
+  // 1층 base 밴드(살짝 짙은 톤 — 학교 특유의 하부 마감)
+  addBox(cx, 0.95, zF, L + 0.5, 1.3, 0.12, MAT.schoolBase, { collide: false, block: false });
+  addBox(cx, 0.95, zB, L + 0.5, 1.3, 0.12, MAT.schoolBase, { collide: false, block: false });
+
+  const winsSideL = evenWins(halfL - entW / 2, bay, 2.6);
+  const centerL = cx - (entW / 2 + (halfL - entW / 2) / 2);
+  const centerR = cx + (entW / 2 + (halfL - entW / 2) / 2);
+  const winsFull = evenWins(L, bay, 2.6);
+
+  // ── 1층 (진입 가능) ──
+  // 정면: 좌우 창벽 + 중앙 현관 개구부
+  addWindowWall(centerL, zF, halfL - entW / 2, FH, 'x', wall, winsSideL); glaze(centerL, zF, 'x', winsSideL, 0);
+  addWindowWall(centerR, zF, halfL - entW / 2, FH, 'x', wall, winsSideL); glaze(centerR, zF, 'x', winsSideL, 0);
+  addBox(cx, FH - 0.35, zF, entW + 0.6, 0.7, t, wall);   // 현관 상인방
+  // 현관 캐노피 + 기둥 + 계단
+  addBox(cx, FH + 0.05, zF + 1.6, entW + 2.4, 0.3, 3.4, 'concrete', { collide: false }); // 캐노피
+  for (const sx of [-1, 1]) addBox(cx + sx * (entW / 2 + 0.6), FH / 2, zF + 3.0, 0.4, FH, 0.4, 'concrete'); // 기둥
+  for (let s = 0; s < 3; s++) addBox(cx, 0.1 + s * 0.0, zF + 1.0 + s * 0.6, entW + 1.6 - s * 0.6, 0.2 + s * 0.2, 1.4 - s * 0.4, 'concrete', { block: false }); // 계단
+  // 후면: 창 밴드
+  addWindowWall(cx, zB, L, FH, 'x', wall, winsFull); glaze(cx, zB, 'x', winsFull, 0);
   // 양 끝벽(동/서): 비상문
   addWallWithDoor(cx - halfL, cz, Dp, FH, 'z', wall, halfD - 2.2, 1.4);
   addWallWithDoor(cx + halfL, cz, Dp, FH, 'z', wall, -(halfD - 2.2), 1.4);
 
-  // 내부: 복도벽(정면쪽 오프셋) + 교실 칸막이 + 교실문
-  const corrZ = cz + halfD - 3.0;      // 복도는 정면쪽 3m 폭
-  // 복도-교실 경계벽 (교실문 5개)
-  const roomCount = 5, roomW = L / roomCount;
+  // 내부: 복도(정면쪽 3.2m) + 교실 7칸 칸막이·교실문
+  const corrZ = cz + halfD - 3.2;
+  const roomCount = 7, roomW = L / roomCount;
   for (let r = 0; r < roomCount; r++) {
     const rx = cx - halfL + roomW * (r + 0.5);
-    addWallWithDoor(rx, corrZ, roomW, FH, 'x', wall, roomW * 0.28, 1.3); // 복도쪽 교실문
-    if (r > 0) addWall(cx - halfL + roomW * r, (cz - halfD + corrZ) / 2, corrZ - (cz - halfD), FH, 'z', wall); // 교실 칸막이
+    addWallWithDoor(rx, corrZ, roomW, FH, 'x', wall, roomW * 0.3, 1.3);
+    if (r > 0) addWall(cx - halfL + roomW * r, (cz - halfD + corrZ) / 2, corrZ - (cz - halfD), FH, 'z', wall);
   }
-  // 1층 천장 슬래브 (2층 바닥) — 실내 상부 폐쇄
-  addBox(cx, FH + 0.12, cz, L + 0.6, 0.24, Dp + 0.6, 'concrete', { collide: false });
+  addBox(cx, FH + 0.12, cz, L + 0.6, 0.24, Dp + 0.6, 'concrete', { collide: false }); // 1층 천장
 
-  // ── 2~3층: 창 밴드 파사드 (진입 불가 매스) ──
-  for (let f = 1; f <= 2; f++) {
+  // ── 2~4층: 유리창 파사드(진입 불가 매스) + 층 밴드 ──
+  for (let f = 1; f < FLOORS; f++) {
     const by = FH * f;
-    const winsRow = [];
-    for (let i = -2; i <= 2; i++) winsRow.push({ at: i * 8.4, w: 3.0 });
-    addWindowWall(cx, zF, L, FH, 'x', wall, winsRow, by);
-    addWindowWall(cx, zB, L, FH, 'x', wall, winsRow, by);
-    addBox(cx - halfL, by + FH / 2, cz, t, FH, Dp, wall, { collide: false }); // 끝벽(상층, baseY)
+    addWindowWall(cx, zF, L, FH, 'x', wall, winsFull, by); glaze(cx, zF, 'x', winsFull, by);
+    addWindowWall(cx, zB, L, FH, 'x', wall, winsFull, by); glaze(cx, zB, 'x', winsFull, by);
+    addBox(cx - halfL, by + FH / 2, cz, t, FH, Dp, wall, { collide: false });
     addBox(cx + halfL, by + FH / 2, cz, t, FH, Dp, wall, { collide: false });
-    addBox(cx, by + FH + 0.12, cz, L + 0.6, 0.24, Dp + 0.6, 'concrete', { collide: false }); // 층 슬래브
+    addBox(cx, by + FH + 0.12, cz, L + 0.6, 0.24, Dp + 0.6, 'concrete', { collide: false });
   }
-  // 옥상 파라펫
-  const roofY = FH * 3;
-  for (const [ox, oz, w, d] of [[0, halfD, L + 0.6, 0.3], [0, -halfD, L + 0.6, 0.3], [-halfL, 0, 0.3, Dp + 0.6], [halfL, 0, 0.3, Dp + 0.6]]) {
-    addBox(cx + ox, roofY + 0.5, cz + oz, w, 1.0, d, 'concrete', { collide: false });
+  // 층 구분 밴드(정면·후면 수평선 — 학교다운 수평 분절)
+  for (let f = 1; f < FLOORS; f++) {
+    addBox(cx, FH * f, zF, L + 0.4, 0.25, 0.18, MAT.schoolBase, { collide: false, block: false });
+    addBox(cx, FH * f, zB, L + 0.4, 0.25, 0.18, MAT.schoolBase, { collide: false, block: false });
   }
+
+  // ── 옥상: 파라펫 + 계단탑(penthouse) + 물탱크 ──
+  const roofY = FH * FLOORS;
+  for (const [ox, oz, w, d] of [[0, halfD, L + 0.6, 0.35], [0, -halfD, L + 0.6, 0.35], [-halfL, 0, 0.35, Dp + 0.6], [halfL, 0, 0.35, Dp + 0.6]]) {
+    addBox(cx + ox, roofY + 0.6, cz + oz, w, 1.2, d, 'concrete', { collide: false });
+  }
+  addBox(cx - halfL + 8, roofY + 1.7, cz, 6, 3.4, 6, wall, { collide: false });        // 계단탑
+  addBox(cx + halfL - 10, roofY + 2.3, cz - 1, 3.2, 4.6, 3.2, MAT.metalBlue, { collide: false }); // 물탱크(사각)
 }
 
 // 숲 배치: 격자+지터, 건물/운동장 플래튼·경계 회피.
@@ -3696,7 +3737,7 @@ function insideAnyFlatten(x, z) {
 // 건물 안만 비우고 운동장·숲·공터엔 잡초를 깔아 황량함을 줄인다.
 function scatterGroundClutter(cx0, cz0, cx1, cz1) {
   const grass = CLUTTER_KEYS.grass, bush = CLUTTER_KEYS.bush, flower = CLUTTER_KEYS.flower, rock = TREE_KEYS.rock;
-  const insideBuilding = (x, z) => Math.abs(x) < 24 && Math.abs(z) < 8;
+  const insideBuilding = (x, z) => Math.abs(x) < 35 && Math.abs(z) < 9;
   const step = 6;
   for (let x = cx0; x <= cx1; x += step) {
     for (let z = cz0; z <= cz1; z += step) {
@@ -3758,7 +3799,7 @@ function buildSchoolMap() {
   addBox(W, 2.5, 0, 1, 5, W * 2 + 2, 'concrete', { shadow: false });
 
   // 운동장 (흙바닥) + 학교 건물
-  const yard = new THREE.Mesh(new THREE.PlaneGeometry(56, 40),
+  const yard = new THREE.Mesh(new THREE.PlaneGeometry(74, 42),
     new THREE.MeshStandardMaterial({ map: GROUND_TEX.ground ? GROUND_TEX.ground.clone() : makeGroundTexture(), color: 0xbaa889, roughness: 1 }));
   yard.rotation.x = -Math.PI / 2; yard.position.set(0, 0.03, 30); yard.receiveShadow = true;
   scene.add(yard);
@@ -3773,8 +3814,8 @@ function buildSchoolMap() {
 
 // 학교 맵 데이터
 const SCHOOL_FLATTENS = [
-  { x: 0, z: 0, hw: 26, hd: 9 },     // 학교 건물 패드
-  { x: 0, z: 30, hw: 29, hd: 21 },   // 운동장
+  { x: 0, z: 0, hw: 36, hd: 9 },     // 학교 건물 패드(대형화 L68×Dp15)
+  { x: 0, z: 32, hw: 38, hd: 22 },   // 운동장
   ...[[0, 80, 8], [74, -46, 8], [-74, -46, 8], [64, 66, 8], [-64, 66, 8], [80, 80, 7], [-80, 80, 7], [80, -80, 7], [-80, -80, 7]].map(([x, z, r]) => ({ x, z, r })),
 ];
 const MAP_SCHOOL = {
@@ -3782,10 +3823,10 @@ const MAP_SCHOOL = {
   build: buildSchoolMap,
   flattens: SCHOOL_FLATTENS,
   lootSpots: [
-    [-18, -3], [-9, -3], [0, -3], [9, -3], [18, -3],   // 교실 5칸
-    [-18, 3], [0, 3.5], [18, 3],                        // 복도
-    [0, 12], [-14, 22], [16, 24], [0, 36],              // 운동장/현관앞
-    [0, 40], [-70, -42], [70, -42], [60, 62], [-60, 62],
+    [-28, -4], [-19, -4], [-9, -4], [0, -4], [9, -4], [19, -4], [28, -4], // 교실 7칸
+    [-24, 5], [-8, 5], [8, 5], [24, 5],                 // 복도
+    [0, 14], [-16, 26], [18, 26], [0, 40],              // 운동장/현관앞
+    [-70, -42], [70, -42], [60, 62], [-60, 62],         // 외곽 숲
   ],
   extract: [
     { name: '정문 (남)', pos: new THREE.Vector3(0, 0, 82) },
