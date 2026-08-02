@@ -194,7 +194,7 @@ applyRenderScale();
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.0;
+renderer.toneMappingExposure = 0.95;
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0xaeb6bd, 45, 210);
@@ -239,11 +239,11 @@ const skyMat = new THREE.ShaderMaterial({
       vec3 hor = vec3(0.84, 0.85, 0.83);
       vec3 col = mix(mid, top, smoothstep(0.08, 0.6, h));
       col = mix(hor, col, smoothstep(0.0, 0.12, h));
-      // 태양 디스크 + 웜톤 할로
+      // 태양 디스크 + 웜톤 할로 — 디스크는 또렷하게, 넓은 글로우는 억제해 과다 번짐 방지 (#179)
       float s = max(dot(d, uSunDir), 0.0);
-      col += vec3(1.0, 0.85, 0.60) * pow(s, 600.0) * 3.0;
-      col += vec3(1.0, 0.75, 0.45) * pow(s, 24.0) * 0.35;
-      col += vec3(0.90, 0.65, 0.40) * pow(s, 4.0) * 0.12;
+      col += vec3(1.0, 0.86, 0.62) * pow(s, 1400.0) * 2.4;
+      col += vec3(1.0, 0.78, 0.48) * pow(s, 90.0) * 0.28;
+      col += vec3(0.92, 0.70, 0.46) * pow(s, 12.0) * 0.06;
       // 구름: 방향을 평면 투영해 fbm, 수평선 근처 감쇠, 천천히 드리프트
       if (d.y > 0.02) {
         vec2 uv = d.xz / (d.y + 0.18) * 0.9 + vec2(uTime * 0.004, uTime * 0.0016);
@@ -273,7 +273,7 @@ scene.add(skyMesh);
 
 const hemi = new THREE.HemisphereLight(0xb8cbdc, 0x54483a, 0.55);
 scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xffdca6, 2.8);
+const sun = new THREE.DirectionalLight(0xffe0b0, 2.35);
 sun.position.set(-60, 55, -30);
 sun.castShadow = true;
 sun.shadow.mapSize.set(IS_MOBILE ? 2048 : 4096, IS_MOBILE ? 2048 : 4096);
@@ -2854,7 +2854,7 @@ function updateGunHold() {
   if (!pc || !pc.gunPivot || !pc.gunLocalQuat) return;
   pc.gunPivot.quaternion.copy(pc.gunLocalQuat); // 기본: mocap 손 방향 (캘리브레이션 로컬 회전)
   // 조준 중엔 배럴(+Z)을 카메라 전방으로 정렬 — 그립은 손에 유지, 사격방향과 시각 일치 (#150)
-  const ab = THREE.MathUtils.clamp(pc.aimBlend || 0, 0, 1);
+  const ab = THREE.MathUtils.clamp(Math.max(pc.aimBlend || 0, pc.fireHold || 0), 0, 1); // 조준 or 비조준사격 시 총열 정렬 (#179)
   if (ab > 0.01 && pc.handR) {
     camera.getWorldDirection(_ghCamDir);
     const bz = _ghCamDir.normalize();
@@ -2924,6 +2924,7 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
     let desired;
     if (player.aiming && pc.actAim) desired = pc.actAim;
     else if (moving) desired = jog && pc.actRun ? pc.actRun : (pc.actWalk || pc.actRun);
+    else if (pc.fireFaceT > 0 && pc.actAim) desired = pc.actAim; // 비조준 서서 사격 → 견착 자세 (#179)
     else desired = pc.activeT > 3.0 ? relaxed : ready; // 3초 정지 → 편한 자세
     if (desired && desired !== pc.baseAct) {
       pc.animSwitchT += dt;
@@ -2947,9 +2948,13 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   // 상체 additive 를 세게 주면 조준 포즈(AimV2)가 왜곡됨 → 0.35 로 억제 (#145)
   const wantAim = player.aiming ? 1 : 0;
   pc.aimBlend += (wantAim - pc.aimBlend) * Math.min(1, dt * 6);
+  // 비조준 사격 시에도 총열을 사격선(카메라 전방)으로 겨냥 — 사격 직후(fireFaceT) 빠르게 상승, 이후 완화 (#179)
+  const wantFire = pc.fireFaceT > 0 ? 1 : 0;
+  pc.fireHold = (pc.fireHold || 0) + (wantFire - (pc.fireHold || 0)) * Math.min(1, dt * (wantFire ? 14 : 6));
+  const gunAim = Math.max(pc.aimBlend, pc.fireHold);
   const aimPitch = THREE.MathUtils.clamp(player.pitch, -0.6, 0.6);
   if (pc.actAimUp && pc.actAimDown) {
-    const k = 0.35 * pc.aimBlend * (pc.oneShot && pc.oneShot !== pc.actShoot ? 0 : 1);
+    const k = 0.35 * gunAim * (pc.oneShot && pc.oneShot !== pc.actShoot ? 0 : 1);
     pc.actAimUp.setEffectiveWeight(Math.max(0, aimPitch / 0.6) * k);
     pc.actAimDown.setEffectiveWeight(Math.max(0, -aimPitch / 0.6) * k);
   }
