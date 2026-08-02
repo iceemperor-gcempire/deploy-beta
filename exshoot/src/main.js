@@ -413,6 +413,15 @@ const TREE_KEYS = { pine: [], maple: [], birch: [], normal: [], dead: [], rock: 
 for (const [t, file] of [['pine', 'pinetree'], ['maple', 'mapletree'], ['birch', 'birchtree'], ['normal', 'normaltree'], ['dead', 'deadtree'], ['rock', 'rock']]) {
   for (let i = 1; i <= 5; i++) { const k = `q_${t}${i}`; GLB_MANIFEST[k] = `${NATURE_SPLIT_DIR}${file}_${i}.glb`; TREE_KEYS[t].push(k); }
 }
+// 지면 클러터(수풀·풀·꽃) — 숲 디테일용 (#177). 비충돌 통과 오브젝트.
+const CLUTTER_KEYS = { bush: [], grass: [], flower: [] };
+for (const [cat, files] of Object.entries({
+  bush: ['bush', 'bush_flowers', 'plant_1'],
+  grass: ['grass_small', 'grass_large_extruded'],
+  flower: ['flower_1', 'flower_1_clump', 'flower_2', 'flower_2_clump', 'flower_3_clump', 'flower_4_clump', 'flower_5_clump'],
+})) {
+  for (const f of files) { const k = `q_${f}`; GLB_MANIFEST[k] = `${NATURE_SPLIT_DIR}${f}.glb`; CLUTTER_KEYS[cat].push(k); }
+}
 
 // ── 로딩 진행 바 ──
 // path → { loaded, total, done } (total 은 Content-Length 없으면 0)
@@ -475,7 +484,7 @@ async function loadAssets() {
         o.castShadow = true; o.receiveShadow = true;
         if (o.material && !isGirl) {
           const mn = (o.material.name || '').toLowerCase();
-          if (/leaf|leaves|foliage|bush|plant/.test(mn)) {
+          if (/leaf|leaves|foliage|bush|plant|grass|flower|petal/.test(mn)) {
             // 잎/수풀: 텍스처 알파로 잎 실루엣만 남기는 컷아웃 (BLEND 카드가 사각 종이로 보이는 문제) #165
             o.material.transparent = false;
             o.material.alphaTest = 0.4;
@@ -1478,6 +1487,7 @@ function addHouse(hx, hz, { wall = 'brick' } = {}) {
 
 function buildIndustrialMap() {
   buildTexMats(); // 건축 PBR 재질 (#107) — 텍스처 로드 후 1회
+  scene.fog = new THREE.Fog(0xaeb6bd, 45, 210); // 기본 안개 복원(맵 전환 시 숲 안개 잔존 방지)
   // 지면 (ambientCG Ground048 — 없으면 절차 생성)
   let groundMat;
   if (GROUND_TEX.ground) {
@@ -3682,6 +3692,29 @@ function insideAnyFlatten(x, z) {
   return false;
 }
 
+// 지면 클러터 산포(#177) — 수풀·풀·꽃·작은 바위. 비충돌·비차폐(통과 가능 장식)로 숲 바닥을 채운다.
+// 건물 안만 비우고 운동장·숲·공터엔 잡초를 깔아 황량함을 줄인다.
+function scatterGroundClutter(cx0, cz0, cx1, cz1) {
+  const grass = CLUTTER_KEYS.grass, bush = CLUTTER_KEYS.bush, flower = CLUTTER_KEYS.flower, rock = TREE_KEYS.rock;
+  const insideBuilding = (x, z) => Math.abs(x) < 24 && Math.abs(z) < 8;
+  const step = 6;
+  for (let x = cx0; x <= cx1; x += step) {
+    for (let z = cz0; z <= cz1; z += step) {
+      const jx = x + (Math.random() - 0.5) * step;
+      const jz = z + (Math.random() - 0.5) * step;
+      if (Math.abs(jx) > WORLD_HALF - 4 || Math.abs(jz) > WORLD_HALF - 4) continue;
+      if (insideBuilding(jx, jz)) continue;         // 교사 실내는 비움
+      if (Math.random() < 0.5) continue;            // 성김(성능)
+      const r = Math.random();
+      const opt = { collide: false, block: false, rotY: Math.random() * Math.PI * 2 };
+      if (r < 0.5) placeModel(grass[(Math.random() * grass.length) | 0], jx, jz, { ...opt, width: 0.8 + Math.random() * 1.0 });
+      else if (r < 0.72) placeModel(bush[(Math.random() * bush.length) | 0], jx, jz, { ...opt, height: 0.7 + Math.random() * 0.7 });
+      else if (r < 0.9) placeModel(flower[(Math.random() * flower.length) | 0], jx, jz, { ...opt, height: 0.3 + Math.random() * 0.35 });
+      else placeModel(rock[(Math.random() * rock.length) | 0], jx, jz, { ...opt, height: 0.35 + Math.random() * 0.6 });
+    }
+  }
+}
+
 // 하이트필드 변위 지면 타일 (산업/학교 공용) — tint 로 색조
 function buildGroundTiles(tint) {
   let groundMat;
@@ -3715,6 +3748,7 @@ function buildGroundTiles(tint) {
 
 function buildSchoolMap() {
   buildTexMats();
+  scene.fog = new THREE.Fog(0x9fb0a0, 40, 180); // 숲 안개 — 녹회색·조금 더 짙게(깊이감) #177
   buildGroundTiles(0xa9ac82);          // 숲 바닥 (올리브-탄, 붉은기 완화)
   // 외곽 경계벽 (나무로 가림)
   const W = WORLD_HALF;
@@ -3730,8 +3764,9 @@ function buildSchoolMap() {
   scene.add(yard);
   buildSchoolBuilding(0, 0);
 
-  // 숲: 맵 전역 산포
+  // 숲: 맵 전역 산포 + 지면 클러터(수풀·풀·꽃·바위)
   scatterForest(-W + 6, -W + 6, W - 6, W - 6);
+  scatterGroundClutter(-W + 6, -W + 6, W - 6, W - 6);
 
   losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile);
 }
