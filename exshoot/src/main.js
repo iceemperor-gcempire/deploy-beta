@@ -2762,34 +2762,33 @@ function buildPlayerChar() {
 
   const clips = CHAR_CLIPS[PC_KEY];
   const mixer = new THREE.AnimationMixer(model);
-  const actIdle = clips.idle ? mixer.clipAction(clips.idle) : null;
-  const actRun = clips.run ? mixer.clipAction(clips.run) : null;
-  const actWalk = clips.walk ? mixer.clipAction(clips.walk) : null;
   const mkOnce = (clip) => { if (!clip) return null; const a = mixer.clipAction(clip); a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; return a; };
-  const actShoot = mkOnce(clips.shoot);
-  // 재장전 상·하체 분리 (#180): 재장전 클립 자체가 다리를 스트라이드시켜(서 있는데 달리기처럼 보임),
-  // 재장전은 상체 트랙만 재생하고 다리는 서있는 idle(하체 트랙)로 별도 구동 → 트랙 겹침 없이 합성.
+  // 상·하체 2레이어 (#180): 애니메이션을 하체(로코모션)+상체(무기자세)로 분리 합성.
+  //  하체 = idle/walk/run, 상체 = 지향사격(aim)/재장전/질주팔/총내림. 트랙이 겹치지 않아 자연스럽게 결합.
+  //  → 이동 중에도 지향사격 자세 유지, 달리며 재장전 시 다리는 계속 달림, 정지 재장전 시 다리 안 흔들림.
   const isLowerBone = (b) => /Skirt/i.test(b) || /^(Hips|Left(UpLeg|Leg|Foot|Toes)|Right(UpLeg|Leg|Foot|Toes)|J_Sec_[LR]_(Upper|Lower)Leg|J_Bip_[LR]_ToeBase_end)/.test(b);
-  const splitClip = (clip, keepLower) => {
+  const splitAct = (clip, keepLower) => {
     if (!clip) return null;
     const tr = clip.tracks.filter((t) => isLowerBone(t.name.split('.')[0]) === keepLower);
-    return tr.length ? new THREE.AnimationClip(clip.name + (keepLower ? '_lo' : '_up'), clip.duration, tr) : null;
+    return tr.length ? mixer.clipAction(new THREE.AnimationClip(clip.name + (keepLower ? '_lo' : '_up'), clip.duration, tr)) : null;
   };
-  const actReload = mkOnce(splitClip(clips.reload, false)) || mkOnce(clips.reload); // 상체 전용(없으면 전체)
-  const idleLowerClip = splitClip(clips.idleGun || clips.idle, true);
-  const actIdleLower = idleLowerClip ? mixer.clipAction(idleLowerClip) : null; // 재장전 중 다리(서있음)
+  const idleSrc = clips.idleGun || clips.idle;
+  // 하체 레이어
+  const actIdleLower = splitAct(idleSrc, true);
+  const actWalkLower = splitAct(clips.walk, true) || splitAct(clips.run, true) || actIdleLower;
+  const actRunLower  = splitAct(clips.run, true) || actWalkLower;
+  // 상체 레이어
+  const actAimUpper  = splitAct(clips.readyGun, false) || splitAct(idleSrc, false) || splitAct(clips.aim, false); // 지향사격(팔=준비자세, 총열은 gunPivot 로 조준점 정렬)
+  const actIdleUpper = splitAct(idleSrc, false) || actAimUpper;   // 오래 정지 → 총 내린 편한 상체
+  const actRunUpper  = splitAct(clips.run, false) || actAimUpper; // 질주 팔
+  const actReload = (() => { const a = splitAct(clips.reload, false); if (a) { a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; } return a; })() || mkOnce(clips.reload);
+  const actAim = clips.aim ? mixer.clipAction(clips.aim) : null; // 캘리브레이션용 전체 견착 클립
   const actDeath = mkOnce(clips.death);
-  const actAim = clips.aim ? mixer.clipAction(clips.aim) : null; // 소총 견착 조준 base (#122)
-  const actIdleGun = clips.idleGun ? mixer.clipAction(clips.idleGun) : null; // 총 내린 편한 대기 (#128)
-  const actReadyGun = clips.readyGun ? mixer.clipAction(clips.readyGun) : null; // 총 든 준비 자세 (#131)
   const mkAim = (clip) => { if (!clip) return null; const a = mixer.clipAction(clip); a.play(); a.setEffectiveWeight(0); return a; };
   const actAimUp = mkAim(clips.aimUp);
   const actAimDown = mkAim(clips.aimDown);
-  const pcIdle = actIdleGun || actIdle; // 총 내린 대기 우선 (#128)
-  if (pcIdle) pcIdle.play();
 
   // 총을 양손(오른손=그립, 왼손=총열) 사이에 배치 — 매 프레임 두 손 위치로 정렬 (#131)
-  // (한 손 고정 방식은 포즈마다 총이 손과 따로 놀아서 폐기)
   const handR = model.getObjectByName('RightHand');
   const handL = model.getObjectByName('LeftHand');
   const gunPivot = new THREE.Group();
@@ -2799,32 +2798,34 @@ function buildPlayerChar() {
   const spine = model.getObjectByName('Spine') || null;
   pc = {
     group: g, model, mixer, handR, handL, gunPivot, spine, spinePose: null,
-    actIdle, actIdleGun, actReadyGun, actRun, actWalk, actShoot, actReload, actIdleLower, actDeath, actAim, actAimUp, actAimDown,
-    baseAct: pcIdle, aimBlend: 0, oneShot: null, faceYaw: 0, animSwitchT: 0, curGun: null,
+    actIdleLower, actWalkLower, actRunLower, actAimUpper, actIdleUpper, actRunUpper,
+    actReload, actAim, actDeath, actAimUp, actAimDown,
+    lowerAct: null, upperAct: null, upperShot: null, lowerSwT: 0, upperSwT: 0,
+    aimBlend: 0, fireHold: 0, gunAim: 0, aimWorld: null, faceYaw: 0, curGun: null,
     gunKick: 0, activeT: 99,
   };
   mixer.addEventListener('finished', (ev) => {
-    if (pc && ev.action === pc.oneShot) {
-      const back = pc.oneShot; pc.oneShot = null;
-      // 복귀 자세는 stale 값 복원 대신 안전한 기본(준비 자세)으로 두고 상태머신이 다음 프레임에
-      // 이동/정지에 맞게 재선정 → 재장전 후 서 있는데 달리기 모션이 튀는 문제 방지 (#180)
-      back.fadeOut(0.15);
-      if (pc.actIdleLower && pc.actIdleLower.isRunning()) pc.actIdleLower.fadeOut(0.2); // 재장전 하체 종료
-      const resume = pc.actReadyGun || pc.actIdleGun || pc.actIdle;
-      if (resume) { resume.reset().fadeIn(0.15).play(); pc.baseAct = resume; }
+    if (pc && ev.action === pc.upperShot) { // 재장전 종료 → 상체 레이어 재선정(하체는 그대로 유지)
+      pc.upperShot.fadeOut(0.18);
+      pc.upperShot = null; pc.upperAct = null;
     }
   });
   // 총 로컬 회전 캘리브레이션: Aim 포즈에서 (오른손→왼손)=총열축 기준 1회 산출 (#150)
-  pc.gunLocalQuat = calibrateGunLocal(model, mixer, actAim, handR, handL, pcIdle);
+  pc.gunLocalQuat = calibrateGunLocal(model, mixer, actAim, handR, handL);
+  // 초기 자세: 하체 idle + 상체 총내림 + additive 피치 준비(가중치 0)
+  if (pc.actIdleLower) { pc.actIdleLower.reset().play(); pc.lowerAct = pc.actIdleLower; }
+  if (pc.actAimUpper) { pc.actAimUpper.reset().play(); pc.upperAct = pc.actAimUpper; }
+  if (pc.actAimUp) { pc.actAimUp.reset().play(); pc.actAimUp.setEffectiveWeight(0); }
+  if (pc.actAimDown) { pc.actAimDown.reset().play(); pc.actAimDown.setEffectiveWeight(0); }
   setPlayerGun(GUN.key);
 }
 
 // Aim 포즈를 임시 100% 적용해 총(오른손 부착)의 손-로컬 회전을 결정적으로 산출 (#150)
-function calibrateGunLocal(model, mixer, actAim, handR, handL, pcIdle) {
+function calibrateGunLocal(model, mixer, actAim, handR, handL) {
   const q = new THREE.Quaternion();
   if (!actAim || !handR || !handL) return q;
+  mixer.stopAllAction();
   actAim.reset().play(); actAim.setEffectiveWeight(1); actAim.time = 0.6;
-  if (pcIdle) pcIdle.setEffectiveWeight(0);
   mixer.update(0);
   model.updateWorldMatrix(true, true);
   const rh = handR.getWorldPosition(new THREE.Vector3());
@@ -2835,9 +2836,7 @@ function calibrateGunLocal(model, mixer, actAim, handR, handL, pcIdle) {
   const qt = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(bx, by, bz));
   const qh = handR.getWorldQuaternion(new THREE.Quaternion());
   q.copy(qh.invert().multiply(qt)); // 손 로컬 프레임 기준 (총 배럴 = gunPivot +Z)
-  // 원상 복구: Aim 정지, 대기 자세 재개
-  actAim.stop();
-  if (pcIdle) { pcIdle.setEffectiveWeight(1); pcIdle.play(); }
+  actAim.stop(); mixer.stopAllAction(); // 원상 복구(초기 레이어는 호출부에서 시작)
   mixer.update(0);
   return q;
 }
@@ -2867,21 +2866,26 @@ function setPlayerGun(key) {
 const _ghCamDir = new THREE.Vector3(), _ghBx = new THREE.Vector3(), _ghBy = new THREE.Vector3(),
   _ghM4 = new THREE.Matrix4(), _ghQt = new THREE.Quaternion(), _ghQh = new THREE.Quaternion(), _ghAimLocal = new THREE.Quaternion(),
   _ghAimPt = new THREE.Vector3(), _ghPivot = new THREE.Vector3();
+// 총열 정렬용 조준 수렴점 타겟 (장애물+소품+적) — fireShot 과 동일 집합이라 탄=총열 수렴 일치
+function gunConvTargets() {
+  const t = [...obstacleMeshes, ...propMeshes];
+  for (const e of enemies) if (!e.dead) { if (e.body) t.push(e.body); if (e.head) t.push(e.head); }
+  return t;
+}
 function updateGunHold() {
   if (!pc || !pc.gunPivot || !pc.gunLocalQuat) return;
   pc.gunPivot.quaternion.copy(pc.gunLocalQuat); // 기본: mocap 손 방향 (캘리브레이션 로컬 회전)
-  // 조준·사격 중엔 배럴(+Z)을 "조준 수렴점"으로 정렬 — 카메라 평행이 아니라 실제 탄착점을 향하게 해
-  // 총열선과 트레이서(총구→탄착점)를 일치시킴 (#150/#180). 그립은 손에 유지.
-  const ab = THREE.MathUtils.clamp(Math.max(pc.aimBlend || 0, pc.fireHold || 0), 0, 1); // 조준 or 비조준사격 시 총열 정렬 (#179)
+  // 지향사격·조준·사격 중엔 배럴(+Z)을 "조준 수렴점"(실제 탄착점)으로 정렬 → 총열선과 트레이서 일치 (#150/#180)
+  const ab = THREE.MathUtils.clamp(Math.max(pc.gunAim || 0, pc.fireHold || 0, pc.aimBlend || 0), 0, 1);
   if (ab > 0.01 && pc.handR) {
     camera.getWorldDirection(_ghCamDir).normalize();
-    // 수렴 거리: 화면중앙 레이가 실제로 맞는 지점(장애물), 없으면 먼 거리 — fireShot 의 탄착과 근사
     _aimRay.set(camera.position, _ghCamDir); _aimRay.far = GUN.range;
-    const chits = _aimRay.intersectObjects(obstacleMeshes, false);
-    const cdist = chits.length ? chits[0].distance : 80;
+    const chits = _aimRay.intersectObjects(gunConvTargets(), false);
+    const cdist = chits.length ? Math.max(chits[0].distance, 2) : GUN.range;
     _ghAimPt.copy(camera.position).addScaledVector(_ghCamDir, cdist);
+    (pc.aimWorld || (pc.aimWorld = new THREE.Vector3())).copy(_ghAimPt); // fireShot 재사용 → 탄·총열 동일 수렴
     pc.gunPivot.getWorldPosition(_ghPivot);             // 그립(≈총 회전 피벗) 위치
-    const bz = _ghAimPt.sub(_ghPivot); if (bz.lengthSq() < 1e-6) bz.copy(_ghCamDir); bz.normalize(); // 그립→수렴점 = 총열축
+    const bz = _ghAimPt.clone().sub(_ghPivot); if (bz.lengthSq() < 1e-6) bz.copy(_ghCamDir); bz.normalize(); // 그립→수렴점 = 총열축
     _ghBx.crossVectors(WORLD_UP, bz); if (_ghBx.lengthSq() < 1e-5) _ghBx.set(1, 0, 0); _ghBx.normalize();
     _ghBy.crossVectors(bz, _ghBx).normalize();
     _ghM4.makeBasis(_ghBx, _ghBy, bz);
@@ -2889,26 +2893,16 @@ function updateGunHold() {
     pc.handR.getWorldQuaternion(_ghQh);
     _ghAimLocal.copy(_ghQh.invert().multiply(_ghQt));   // 손 로컬 프레임 기준
     pc.gunPivot.quaternion.slerp(_ghAimLocal, ab);      // mocap→조준 블렌드
-  }
+  } else { pc.aimWorld = null; }
   if (pc.gunKick > 0.001) pc.gunPivot.rotateX(-pc.gunKick); // 반동 젖힘
 }
 
-// 사격/재장전 원샷 모션
-function playPcOneShot(act, fade = 0.06) {
-  if (!pc || !act) return;
-  for (const a of [pc.actShoot, pc.actReload]) if (a && a !== act && a.isRunning()) a.fadeOut(fade);
-  if (pc.baseAct && !pc.oneShot) pc.baseAct.fadeOut(fade);
-  pc.oneShot = act;
-  act.reset().fadeIn(fade).play();
-}
-
-// 재장전: 상체=재장전 클립, 하체=서있는 idle → 다리에 달리기/걷기 모션이 섞이지 않음 (#180)
-function playPcReload(fade = 0.1) {
+// 재장전: 상체 레이어만 재장전 클립으로 교체 (하체는 현재 로코모션 유지) (#180)
+//  → 서서 재장전 = 다리 정지, 달리며 재장전 = 다리 계속 달림.
+function playPcReload(fade = 0.12) {
   if (!pc || !pc.actReload) return;
-  if (pc.baseAct) pc.baseAct.fadeOut(fade);                       // 전신 로코모션 정지(상·하체 모두)
-  for (const a of [pc.actRun, pc.actWalk]) if (a && a.isRunning()) a.fadeOut(fade);
-  if (pc.actIdleLower) pc.actIdleLower.reset().fadeIn(fade).play(); // 하체=서있음
-  pc.oneShot = pc.actReload;                                       // 상체=재장전(원샷, finished 로 복귀)
+  if (pc.upperAct) pc.upperAct.fadeOut(fade);
+  pc.upperShot = pc.actReload;
   pc.actReload.reset().fadeIn(fade).play();
 }
 
@@ -2933,12 +2927,19 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   if (pc.gunPivot) pc.gunPivot.visible = pc.group.visible;
   pc.group.position.set(player.pos.x, player.pos.y, player.pos.z);
 
-  // 향하는 방향: 조준/사격(직후) 중엔 카메라 정면, 그 외 이동 중엔 이동 방향
   pc.fireFaceT = Math.max(0, (pc.fireFaceT || 0) - dt);
   const camFace = Math.atan2(-Math.sin(player.yaw), -Math.cos(player.yaw));
   const moving = hSpeed > 0.6 && (moveDirX || moveDirZ);
+  const jog = hSpeed > 3.2;
+  pc.activeT += dt;
+  if (moving || player.aiming || pc.fireFaceT > 0) pc.activeT = 0;
+  const sprintingNow = player.sprinting && moving;
+  const upperAiming = !pc.upperShot && !sprintingNow;                        // 지향사격(기본)/조준/사격 — 무장 시 항상 총 든 지향 자세
+
+  // 향하는 방향: 지향사격/조준/사격 중엔 카메라 정면(스트레이프), 질주/이동은 이동 방향
   let targetFace;
-  if (player.aiming || pc.fireFaceT > 0) targetFace = camFace;
+  if (sprintingNow) targetFace = Math.atan2(moveDirX, moveDirZ);
+  else if (upperAiming) targetFace = camFace;
   else if (moving) targetFace = Math.atan2(moveDirX, moveDirZ);
   else targetFace = pc.faceYaw;
   let dy = targetFace - pc.faceYaw;
@@ -2947,49 +2948,37 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   pc.faceYaw += THREE.MathUtils.clamp(dy, -dt * 11, dt * 11);
   pc.group.rotation.y = pc.faceYaw;
 
-  // 상체 자세 상태머신 (#131): 조준=견착 / 이동=달리기·걷기 / 활동 직후=총 든 준비 / 3초 정지=총 내린 편한 자세
-  // activeT = 마지막 활동(이동·조준·사격) 이후 경과. 정지 후 3초 지나면 준비→편한 자세로 완화.
-  pc.activeT += dt;
-  if (moving || player.aiming || pc.fireFaceT > 0) pc.activeT = 0;
-  if (pc.actIdle && !pc.oneShot) {
-    const jog = hSpeed > 3.2;
-    const relaxed = pc.actIdleGun || pc.actIdle;       // 편한 대기 (총 내림)
-    const ready = pc.actReadyGun || relaxed;           // 준비 자세 (총 듦)
-    let desired;
-    if (player.aiming && pc.actAim) desired = pc.actAim;
-    else if (moving) desired = jog && pc.actRun ? pc.actRun : (pc.actWalk || pc.actRun);
-    else desired = pc.activeT > 3.0 ? relaxed : ready; // 3초 정지 → 편한 자세
-    // 비조준 사격은 견착 전환(느림) 대신 준비(지향사격) 자세 유지 + 총열만 즉시 정렬(fireHold) →
-    // 이동/정지 자세 그대로 즉시 사격, 모션 변화 최소 (#180)
-    if (desired && desired !== pc.baseAct) {
-      pc.animSwitchT += dt;
-      // 이동↔정지 는 빠르게(0.12s), 준비↔편함·조준해제 는 부드럽게(0.35s) 전환
-      const dwell = (desired === pc.actRun || desired === pc.actWalk || pc.baseAct === pc.actRun || pc.baseAct === pc.actWalk) ? 0.1 : 0.18;
-      const fade = (desired === pc.actAim || pc.baseAct === pc.actAim) ? 0.22 : 0.32;
-      if (pc.animSwitchT > dwell) {
-        pc.animSwitchT = 0;
-        pc.baseAct.fadeOut(fade);
-        desired.reset().fadeIn(fade).play();
-        pc.baseAct = desired;
-      }
-    } else pc.animSwitchT = 0;
-    if (moving && !player.aiming) {
-      if (pc.baseAct === pc.actWalk) pc.actWalk.timeScale = THREE.MathUtils.clamp(hSpeed / 1.0, 0.7, 1.7);
-      else if (pc.baseAct === pc.actRun) pc.actRun.timeScale = THREE.MathUtils.clamp(hSpeed / 3.4, 0.9, 2.1);
+  // ── 하체 레이어: 로코모션 (재장전 중에도 계속 구동) ──
+  const lowerDesired = !moving ? pc.actIdleLower : (jog ? pc.actRunLower : pc.actWalkLower);
+  pc.lowerSwT = (lowerDesired === pc.lowerAct) ? 0 : pc.lowerSwT + dt;
+  if (lowerDesired && lowerDesired !== pc.lowerAct && pc.lowerSwT > 0.1) {
+    pc.lowerSwT = 0; if (pc.lowerAct) pc.lowerAct.fadeOut(0.15);
+    lowerDesired.reset().fadeIn(0.15).play(); pc.lowerAct = lowerDesired;
+  }
+  if (moving && pc.lowerAct === pc.actWalkLower) pc.actWalkLower.timeScale = THREE.MathUtils.clamp(hSpeed / 1.0, 0.7, 1.7);
+  else if (moving && pc.lowerAct === pc.actRunLower) pc.actRunLower.timeScale = THREE.MathUtils.clamp(hSpeed / 3.4, 0.9, 2.1);
+
+  // ── 상체 레이어: 무기 자세 (재장전 원샷 중엔 상체 레이어 건너뜀 → 하체만 갱신) ──
+  if (!pc.upperShot) {
+    const upperDesired = sprintingNow ? pc.actRunUpper : pc.actAimUpper; // 질주=팔, 그 외=지향사격
+    pc.upperSwT = (upperDesired === pc.upperAct) ? 0 : pc.upperSwT + dt;
+    if (upperDesired && upperDesired !== pc.upperAct && pc.upperSwT > 0.12) {
+      pc.upperSwT = 0; if (pc.upperAct) pc.upperAct.fadeOut(0.2);
+      upperDesired.reset().fadeIn(0.2).play(); pc.upperAct = upperDesired;
     }
   }
 
-  // 조준 additive (상하 조준) — 약하게만. 가늠 총구는 updateGunHold 가 피치로 처리하므로
-  // 상체 additive 를 세게 주면 조준 포즈(AimV2)가 왜곡됨 → 0.35 로 억제 (#145)
+  // 총열 정렬용 블렌드: 지향사격/조준/사격 시 1, 질주·총내림·재장전 시 0
   const wantAim = player.aiming ? 1 : 0;
   pc.aimBlend += (wantAim - pc.aimBlend) * Math.min(1, dt * 6);
-  // 비조준 사격 시에도 총열을 사격선(카메라 전방)으로 겨냥 — 사격 직후(fireFaceT) 빠르게 상승, 이후 완화 (#179)
   const wantFire = pc.fireFaceT > 0 ? 1 : 0;
   pc.fireHold = (pc.fireHold || 0) + (wantFire - (pc.fireHold || 0)) * Math.min(1, dt * (wantFire ? 14 : 6));
-  const gunAim = Math.max(pc.aimBlend, pc.fireHold);
+  const wantGunAim = upperAiming ? 1 : 0;
+  pc.gunAim = (pc.gunAim || 0) + (wantGunAim - (pc.gunAim || 0)) * Math.min(1, dt * 10);
+  // 상하 조준 additive (약하게) — 지향사격/조준 시에만
   const aimPitch = THREE.MathUtils.clamp(player.pitch, -0.6, 0.6);
   if (pc.actAimUp && pc.actAimDown) {
-    const k = 0.35 * gunAim * (pc.oneShot && pc.oneShot !== pc.actShoot ? 0 : 1);
+    const k = 0.35 * pc.gunAim * (pc.upperShot ? 0 : 1);
     pc.actAimUp.setEffectiveWeight(Math.max(0, aimPitch / 0.6) * k);
     pc.actAimDown.setEffectiveWeight(Math.max(0, -aimPitch / 0.6) * k);
   }
@@ -3209,14 +3198,20 @@ function fireShot() {
   const targets = [...obstacleMeshes, ...propMeshes];
   for (const e of enemies) if (!e.dead) targets.push(e.body, e.head);
 
-  // 조준점: 화면중앙(카메라)에서 레이 → 수렴점 (오버숄더 시차 보정)
+  // 조준점: TPS 는 총열이 매 프레임 맞춰둔 수렴점(pc.aimWorld)을 그대로 사용 → 트레이서가 총열선과 일치 (#180).
+  // 그 외(FPS·초기 프레임)에는 화면중앙 레이로 수렴점 산출.
   const camDir = new THREE.Vector3();
   camera.getWorldDirection(camDir);
-  _aimRay.set(camera.position, camDir);
-  _aimRay.far = GUN.range;
-  const aimHits = _aimRay.intersectObjects(targets, false);
-  const aimPoint = aimHits.length ? aimHits[0].point.clone()
-    : camera.position.clone().addScaledVector(camDir, GUN.range);
+  let aimPoint;
+  if (viewMode === 'tps' && pc && pc.aimWorld) {
+    aimPoint = pc.aimWorld.clone();
+  } else {
+    _aimRay.set(camera.position, camDir);
+    _aimRay.far = GUN.range;
+    const aimHits = _aimRay.intersectObjects(targets, false);
+    aimPoint = aimHits.length ? aimHits[0].point.clone()
+      : camera.position.clone().addScaledVector(camDir, GUN.range);
+  }
 
   // 탄퍼짐
   const hSpeed = Math.hypot(player.vel.x, player.vel.z);
@@ -3955,9 +3950,13 @@ function startRaid(mapKey) {
     pc.faceYaw = Math.atan2(-Math.sin(player.yaw), -Math.cos(player.yaw));
     pc.group.rotation.y = pc.faceYaw;
     pc.group.visible = true;
-    if (pc.oneShot) { pc.oneShot.stop(); pc.oneShot = null; }
-    const idleBase = pc.actIdleGun || pc.actIdle;
-    if (pc.baseAct !== idleBase && idleBase) { pc.baseAct && pc.baseAct.stop(); pc.baseAct = idleBase; idleBase.reset().play(); }
+    // 레이드 시작 시 애니메이션 레이어 초기화 (하체 idle + 상체 총내림) (#180)
+    pc.upperShot = null; pc.gunAim = 0; pc.fireHold = 0; pc.aimBlend = 0; pc.aimWorld = null;
+    pc.mixer.stopAllAction();
+    if (pc.actIdleLower) { pc.actIdleLower.reset().play(); pc.lowerAct = pc.actIdleLower; }
+    if (pc.actAimUpper) { pc.actAimUpper.reset().play(); pc.upperAct = pc.actAimUpper; }
+    if (pc.actAimUp) { pc.actAimUp.reset().play(); pc.actAimUp.setEffectiveWeight(0); }
+    if (pc.actAimDown) { pc.actAimDown.reset().play(); pc.actAimDown.setEffectiveWeight(0); }
   }
   player.hp = PLAYER.maxHp;
   player.stamina = 100;
