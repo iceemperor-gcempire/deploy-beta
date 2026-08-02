@@ -3233,6 +3233,12 @@ function fireShot() {
       : camera.position.clone().addScaledVector(camDir, GUN.range);
   }
 
+  // 트레이서 시작점: 총구의 좌우(수평) 오프셋만 제거해 조준선 수직면에 투영 (#184).
+  // 총이 오른손(화면 중앙에서 벗어남)에 있어 탄이 옆(좌측)에서 날아오는 것처럼 보이던 문제 →
+  // 좌우만 조준선에 맞추고 상하(총구가 눈보다 낮음 = 아래서 위로 상승)는 유지(실총과 유사).
+  const _camRight = new THREE.Vector3().crossVectors(camDir, WORLD_UP).normalize();
+  const tracerStart = muzzle.clone().addScaledVector(_camRight, -muzzle.clone().sub(camera.position).dot(_camRight));
+
   // 탄퍼짐
   const hSpeed = Math.hypot(player.vel.x, player.vel.z);
   let spread = player.aiming ? GUN.spreadAds : GUN.spreadHip;
@@ -3277,7 +3283,7 @@ function fireShot() {
     }
     // 트레이서는 스코프 무기(스코프 부착·저격총)에서만 — 일반 사격은 총구 시작점이 반동·총열정렬로
     // 흔들려 궤적이 지저분해서 제외. 스코프는 정조준 상태라 안정적 (#183)
-    if (currentAtt.includes('scope') || GUN.key === 'sniper') spawnTracer(muzzle, endPoint, 0xffe0a0);
+    if (currentAtt.includes('scope') || GUN.key === 'sniper') spawnTracer(tracerStart, endPoint, 0xffe0a0);
   }
   if (anyHit) {
     showHitmarker();
