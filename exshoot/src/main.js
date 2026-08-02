@@ -899,39 +899,6 @@ function groupValuables(vals) {
   for (const v of vals) { g[v.name] = g[v.name] || { n: 0, v: 0 }; g[v.name].n++; g[v.name].v += (v.value || 0); }
   return g;
 }
-// 카테고리별 데이터(제목·개수·행) 구성 — 종류가 늘어도 탭으로 확장 (#187)
-function invCategories(st) {
-  const equipped = st.equipped || 'rifle';
-  const guns = (st.weapons || ['rifle']).filter((k) => WEAPONS[k]);
-  const accs = (st.attOwned || []).filter((k) => ATTACHMENTS[k]);
-  const parts = st.parts || [];
-  const cons = st.consumables || [];
-  const vals = st.valuables || [];
-  // 부품: 이름별 그룹(슬롯 유지)
-  const pg = {};
-  for (const p of parts) { pg[p.name] = pg[p.name] || { n: 0, slot: p.slot }; pg[p.name].n++; }
-  // 소모품: 이름별 그룹(heal 유지)
-  const cg = {};
-  for (const c of cons) { cg[c.name] = cg[c.name] || { n: 0, heal: c.heal }; cg[c.name].n++; }
-  const vgz = groupValuables(vals);
-  const lw = st.loadoutW || [];   // 반입 무기
-  const lc = st.loadoutC || [];   // 반입 소모품 종류
-  const ldBtn = (on, attr) => `<button class="ld-btn${on ? ' on' : ''}" ${attr}>${on ? '✓ 반입' : '반입'}</button>`;
-  return [
-    { key: 'gun', title: '총', count: guns.length, empty: '보유한 총이 없습니다.',
-      rows: guns.map((k) => invRowHTML(WEAPONS[k].name, k === equipped ? '장착 중' : '', '', ldBtn(lw.includes(k), `data-bringw="${k}"`))) },
-    { key: 'acc', title: '총기 악세서리', count: accs.length, empty: '보유한 악세서리가 없습니다.',
-      rows: accs.map((k) => invRowHTML(ATTACHMENTS[k].name, '', '')) },
-    { key: 'part', title: '총기 부품', count: parts.length, empty: '보유한 부품이 없습니다.',
-      rows: Object.entries(pg).map(([name, x]) => invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, SLOT_LABEL[x.slot] || '부품', '')) },
-    { key: 'cons', title: '소모품', count: cons.length, empty: '보유한 소모품이 없습니다. (보급소에서 구매)',
-      rows: Object.entries(cg).map(([name, x]) => invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, x.heal ? `+${x.heal} HP` : '', '',
-        ldBtn(lc.includes(name), `data-bringc="${encodeURIComponent(name)}"`))) },
-    { key: 'val', title: '귀중품', count: vals.length, empty: '귀중품이 없습니다.',
-      rows: Object.entries(vgz).map(([name, x]) => invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, '', x.v.toLocaleString('ko-KR'),
-        `<button data-sell="${encodeURIComponent(name)}">매각</button>`)) },
-  ];
-}
 function toggleLoadout(listKey, id) {
   const st = loadStash();
   const cur = new Set(st[listKey] || []);
@@ -941,28 +908,51 @@ function toggleLoadout(listKey, id) {
   sfx.reload2();
   renderInventoryScreen();
 }
-let invSel = 'gun';
+// 스태시 ↔ 반입 인벤토리 2패널 (#192): 총·소모품은 두 패널 간 이동, 부품·악세서리·귀중품은 스태시 전용.
 function renderInventoryScreen() {
   const st = loadStash();
-  // 로드아웃 미설정 시 기본값(소지 전량 반입)으로 실체화 → 이후 명시적 토글 (#189)
+  // 로드아웃 미설정 시 기본값(소지 전량 반입)으로 실체화 → 이후 명시적 이동
   let dirty = false;
   if (st.loadoutW === undefined) { st.loadoutW = (st.weapons || ['rifle']).filter((k) => WEAPONS[k]); dirty = true; }
   if (st.loadoutC === undefined) { st.loadoutC = [...new Set((st.consumables || []).map((c) => c.name))]; dirty = true; }
   if (dirty) saveStash(st);
   document.getElementById('inv-screen-stash').textContent = `스태시 ₽ ${(st.roubles || 0).toLocaleString('ko-KR')}`;
-  const cats = invCategories(st);
-  if (!cats.find((c) => c.key === invSel)) invSel = 'gun';
-  document.getElementById('inv-nav').innerHTML = cats.map((c) =>
-    `<button class="inv-tab ${c.key === invSel ? 'sel' : ''}" data-cat="${c.key}"><span>${c.title}</span><span class="tab-n">${c.count}</span></button>`).join('');
-  const sel = cats.find((c) => c.key === invSel);
-  document.getElementById('inv-items').innerHTML = invCatHTML(sel.title, sel.count, sel.rows, sel.empty);
-  document.getElementById('inv-nav').querySelectorAll('[data-cat]').forEach((b) =>
-    b.addEventListener('click', () => { invSel = b.dataset.cat; renderInventoryScreen(); }));
-  const items = document.getElementById('inv-items');
-  items.querySelectorAll('[data-sell]').forEach((b) => b.addEventListener('click', () => sellValuable(decodeURIComponent(b.dataset.sell))));
-  items.querySelectorAll('[data-bringw]').forEach((b) => b.addEventListener('click', () => toggleLoadout('loadoutW', b.dataset.bringw)));
-  items.querySelectorAll('[data-bringc]').forEach((b) => b.addEventListener('click', () => toggleLoadout('loadoutC', decodeURIComponent(b.dataset.bringc))));
-  document.getElementById('inv-sell-all').disabled = (st.valuables || []).length === 0;
+
+  const equipped = st.equipped || 'rifle';
+  const lw = st.loadoutW || [], lc = st.loadoutC || [];
+  const guns = (st.weapons || ['rifle']).filter((k) => WEAPONS[k]);
+  const cg = {}; for (const c of (st.consumables || [])) { cg[c.name] = cg[c.name] || { n: 0, heal: c.heal }; cg[c.name].n++; }
+  const consEntries = Object.entries(cg);
+  const parts = st.parts || []; const pg = {}; for (const p of parts) { pg[p.name] = pg[p.name] || { n: 0, slot: p.slot }; pg[p.name].n++; }
+  const accs = (st.attOwned || []).filter((k) => ATTACHMENTS[k]);
+  const vals = st.valuables || []; const vgz = groupValuables(vals);
+  const gunTag = (k) => k === equipped ? '장착 중' : '';
+  const moveBtn = (label, attr) => `<button class="ld-btn" ${attr}>${label}</button>`;
+
+  // 스태시 패널(좌): 미반입 총·소모품 + 부품·악세서리·귀중품(전용)
+  const sGuns = guns.filter((k) => !lw.includes(k));
+  const sCons = consEntries.filter(([n]) => !lc.includes(n));
+  document.getElementById('inv-stash').innerHTML = [
+    invCatHTML('총', sGuns.length, sGuns.map((k) => invRowHTML(WEAPONS[k].name, gunTag(k), '', moveBtn('반입 →', `data-bringw="${k}"`))), '모두 반입됨'),
+    invCatHTML('소모품', sCons.reduce((s, [, x]) => s + x.n, 0), sCons.map(([n, x]) => invRowHTML(`${n}${x.n > 1 ? ` ×${x.n}` : ''}`, x.heal ? `+${x.heal} HP` : '', '', moveBtn('반입 →', `data-bringc="${encodeURIComponent(n)}"`))), '모두 반입됨'),
+    invCatHTML('총기 부품', parts.length, Object.entries(pg).map(([n, x]) => invRowHTML(`${n}${x.n > 1 ? ` ×${x.n}` : ''}`, SLOT_LABEL[x.slot] || '부품', '')), '보유 부품 없음'),
+    invCatHTML('총기 악세서리', accs.length, accs.map((k) => invRowHTML(ATTACHMENTS[k].name, '', '')), '보유 악세서리 없음'),
+    invCatHTML('귀중품', vals.length, Object.entries(vgz).map(([n, x]) => invRowHTML(`${n}${x.n > 1 ? ` ×${x.n}` : ''}`, '', x.v.toLocaleString('ko-KR'), `<button data-sell="${encodeURIComponent(n)}">매각</button>`)), '귀중품 없음'),
+  ].join('');
+
+  // 반입 패널(우): 반입 총·소모품
+  const lGuns = guns.filter((k) => lw.includes(k));
+  const lCons = consEntries.filter(([n]) => lc.includes(n));
+  document.getElementById('inv-load').innerHTML = [
+    invCatHTML('총', lGuns.length, lGuns.map((k) => invRowHTML(WEAPONS[k].name, gunTag(k), '', moveBtn('← 보관', `data-bringw="${k}"`))), '반입할 총을 스태시에서 →'),
+    invCatHTML('소모품', lCons.reduce((s, [, x]) => s + x.n, 0), lCons.map(([n, x]) => invRowHTML(`${n}${x.n > 1 ? ` ×${x.n}` : ''}`, x.heal ? `+${x.heal} HP` : '', '', moveBtn('← 보관', `data-bringc="${encodeURIComponent(n)}"`))), '반입할 소모품을 스태시에서 →'),
+  ].join('');
+
+  const body = document.getElementById('inv-body');
+  body.querySelectorAll('[data-bringw]').forEach((b) => b.addEventListener('click', () => toggleLoadout('loadoutW', b.dataset.bringw)));
+  body.querySelectorAll('[data-bringc]').forEach((b) => b.addEventListener('click', () => toggleLoadout('loadoutC', decodeURIComponent(b.dataset.bringc))));
+  body.querySelectorAll('[data-sell]').forEach((b) => b.addEventListener('click', () => sellValuable(decodeURIComponent(b.dataset.sell))));
+  document.getElementById('inv-sell-all').disabled = vals.length === 0;
 }
 function sellValuable(name) {
   const st = loadStash();

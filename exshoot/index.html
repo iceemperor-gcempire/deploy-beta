@@ -255,17 +255,14 @@
 
   /* ---------- 인벤토리 화면 ---------- */
   #inventory-screen { background: #060906; z-index: 30; }
-  #inv-body { display: flex; gap: 14px; align-items: flex-start; text-align: left; margin-bottom: 14px; }
-  #inv-nav { width: 168px; display: flex; flex-direction: column; gap: 6px; }
-  #inv-nav .inv-tab {
-    display: flex; justify-content: space-between; align-items: center;
-    font-family: inherit; font-size: 13px; letter-spacing: 1px; padding: 9px 12px; cursor: pointer;
-    background: rgba(20,30,20,0.6); border: 1px solid rgba(255,255,255,0.16); border-radius: 4px; color: #cfd8cf;
-  }
-  #inv-nav .inv-tab.sel { border-color: #8fd98f; color: #dfe8df; background: rgba(90,130,80,0.3); }
-  #inv-nav .inv-tab .tab-n { color: #6f8f6f; font-size: 11px; }
-  #inv-nav .inv-tab.sel .tab-n { color: #9fd99f; }
-  #inv-items { width: 400px; max-height: 58vh; overflow-y: auto; }
+  #inv-body { display: flex; gap: 14px; align-items: flex-start; text-align: left; margin-bottom: 14px; justify-content: center; }
+  .inv-panel { width: 340px; display: flex; flex-direction: column; }
+  .panel-h { font-size: 13px; letter-spacing: 3px; color: #cfe0cf; padding: 8px 4px; display: flex; justify-content: space-between; align-items: baseline; }
+  .panel-h span { font-size: 10.5px; letter-spacing: 1px; color: #7f8f7f; }
+  .inv-panel:nth-child(2) .panel-h { color: #9fd99f; }
+  .panel-list { max-height: 56vh; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+    background: rgba(8,12,8,0.5); border: 1px solid rgba(255,255,255,0.1); border-radius: 5px; padding: 8px; }
+  .inv-panel:nth-child(2) .panel-list { border-color: rgba(120,180,110,0.28); }
   .inv-cat { background: rgba(10,16,10,0.55); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 10px 14px; }
   .inv-cat h3 { font-size: 12px; letter-spacing: 3px; color: #9fb59f; margin-bottom: 6px; display:flex; justify-content:space-between; }
   .inv-cat h3 .cat-n { color: #6f8f6f; letter-spacing: 1px; }
@@ -286,7 +283,7 @@
   .inv-hint { font-size: 11.5px; color: #7f8f7f; margin: -14px 0 20px; letter-spacing: 0.5px; }
   #inv-actions { display: flex; gap: 10px; }
   #inv-sell-all:disabled { opacity: 0.45; cursor: default; }
-  @media (max-width: 900px) { #inv-items { width: 240px; } #inv-nav { width: 132px; } }
+  @media (max-width: 900px) { #inv-body { flex-direction: column; align-items: center; } .inv-panel { width: 300px; } .panel-list { max-height: 34vh; } }
 
   /* ---------- 장비 커스텀 화면 ---------- */
   #equip-screen { z-index: 30; }
@@ -541,10 +538,16 @@
   <div class="screen" id="inventory-screen">
     <h2 style="color:#9fb59f; font-size:20px;">인벤토리</h2>
     <div class="stash" id="inv-screen-stash"></div>
-    <div class="inv-hint">✓ 반입 = 레이드에 가져감 · 사망 시 손실 · 스태시는 안전</div>
+    <div class="inv-hint">스태시는 안전 · 반입한 것만 레이드에 가져가며 사망 시 손실 · 아이템을 옮겨 편성하세요</div>
     <div id="inv-body">
-      <div id="inv-nav"></div>
-      <div id="inv-items"></div>
+      <div class="inv-panel">
+        <div class="panel-h">스태시 <span>안전 보관</span></div>
+        <div id="inv-stash" class="panel-list"></div>
+      </div>
+      <div class="inv-panel">
+        <div class="panel-h">반입 인벤토리 <span>레이드에 가져감</span></div>
+        <div id="inv-load" class="panel-list"></div>
+      </div>
     </div>
     <div id="inv-actions">
       <button id="inv-sell-all">귀중품 전체 매각</button>
@@ -594,6 +597,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=cbbcacb"></script>
+  <script type="module" src="./src/main.js?v=63e5021"></script>
 </body>
 </html>
