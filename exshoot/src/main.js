@@ -821,6 +821,62 @@ function updateMenuStash() {
   renderShop();
 }
 
+// ---------- 인벤토리 (메뉴, 영구 스태시 · 카테고리별 목록) (#185) ----------
+// 아이템 종류: 총 / 총기 악세서리 / 총기 부품(미구현·분류만) / 귀중품(수동 매각).
+// 차후 총기 부품 세분화 → 총기 커스텀의 기반이 될 목록.
+function invCatHTML(title, count, rows, emptyMsg) {
+  const body = rows.length ? rows.join('') : `<div class="cat-empty">${emptyMsg || '비어 있음'}</div>`;
+  return `<div class="inv-cat"><h3><span>${title}</span><span class="cat-n">${count}</span></h3>${body}</div>`;
+}
+function invRowHTML(name, tag, valText, btn) {
+  return `<div class="inv-row"><span class="i-name">${name}</span>${tag ? `<span class="i-tag">${tag}</span>` : ''}`
+    + `${valText ? `<span class="i-val">₽ ${valText}</span>` : '<span class="i-val"></span>'}${btn || ''}</div>`;
+}
+function groupValuables(vals) {
+  const g = {};
+  for (const v of vals) { g[v.name] = g[v.name] || { n: 0, v: 0 }; g[v.name].n++; g[v.name].v += (v.value || 0); }
+  return g;
+}
+function renderInventoryScreen() {
+  const st = loadStash();
+  const equipped = st.equipped || 'rifle';
+  document.getElementById('inv-screen-stash').textContent = `스태시 ₽ ${(st.roubles || 0).toLocaleString('ko-KR')}`;
+  const cats = [];
+  // 1. 총
+  const guns = (st.weapons || ['rifle']).filter((k) => WEAPONS[k]);
+  cats.push(invCatHTML('총', guns.length,
+    guns.map((k) => invRowHTML(WEAPONS[k].name, k === equipped ? '장착 중' : '', '')), '보유한 총이 없습니다.'));
+  // 2. 총기 악세서리
+  const accs = (st.attOwned || []).filter((k) => ATTACHMENTS[k]);
+  cats.push(invCatHTML('총기 악세서리', accs.length,
+    accs.map((k) => invRowHTML(ATTACHMENTS[k].name, '', '')), '보유한 악세서리가 없습니다.'));
+  // 3. 총기 부품 (미구현 — 분류만)
+  cats.push(invCatHTML('총기 부품', 0, [], '아직 구현되지 않은 분류입니다.'));
+  // 4. 귀중품 (매각용)
+  const vals = st.valuables || [];
+  const g = groupValuables(vals);
+  const valRows = Object.entries(g).map(([name, x]) =>
+    invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, '', x.v.toLocaleString('ko-KR'),
+      `<button data-sell="${encodeURIComponent(name)}">매각</button>`));
+  cats.push(invCatHTML('귀중품 (매각용)', vals.length, valRows, '귀중품이 없습니다.'));
+  document.getElementById('inv-cats').innerHTML = cats.join('');
+  document.getElementById('inv-cats').querySelectorAll('[data-sell]').forEach((b) =>
+    b.addEventListener('click', () => sellValuable(decodeURIComponent(b.dataset.sell))));
+  document.getElementById('inv-sell-all').disabled = vals.length === 0;
+}
+function sellValuable(name) {
+  const st = loadStash();
+  const keep = [], sold = [];
+  for (const v of (st.valuables || [])) (v.name === name ? sold : keep).push(v);
+  if (!sold.length) return;
+  st.valuables = keep;
+  st.roubles = (st.roubles || 0) + sold.reduce((s, v) => s + (v.value || 0), 0);
+  saveStash(st);
+  sfx.pickup();
+  renderInventoryScreen();
+  updateMenuStash();
+}
+
 // ---------- 장비 상점 (메뉴) ----------
 const WEAPON_DESC = {
   rifle: '자동 · 표준 탄퍼짐 · 기본 지급',
@@ -4066,7 +4122,9 @@ function endRaid(result, cause) {
   if (result === 'extract') {
     const value = inventoryValue();
     stash.extracts = (stash.extracts || 0) + 1;
-    stash.roubles = (stash.roubles || 0) + value;
+    // 귀중품은 자동 매각 대신 스태시 인벤토리에 아이템으로 보관 → 메뉴 인벤토리에서 수동 매각 (#185)
+    const banked = inventory.filter((i) => (i.value || 0) > 0).map((i) => ({ name: i.name, value: i.value }));
+    stash.valuables = [...(stash.valuables || []), ...banked];
     // 레이드 중 습득한 무기 소유 확정 + 장착 유지
     const owned = new Set(stash.weapons || ['rifle']);
     for (const k of (gun.foundWeapons || [])) owned.add(k);
@@ -4077,7 +4135,7 @@ function endRaid(result, cause) {
     saveStash(stash);
     const used = RAID_SECONDS - state.raidTime;
     dom.extractStats.innerHTML =
-      `레이드 시간 ${fmtTime(used)} · 사살 ${state.kills} · 획득 가치 <b style="color:#d9c86a">₽ ${value.toLocaleString('ko-KR')}</b>`;
+      `레이드 시간 ${fmtTime(used)} · 사살 ${state.kills} · 인벤토리 반입 <b style="color:#d9c86a">₽ ${value.toLocaleString('ko-KR')}</b> <span style="color:#93a393">(귀중품은 인벤토리에서 매각)</span>`;
     dom.extractLoot.innerHTML = summaryHTML();
     dom.extract.style.display = 'flex';
   } else {
@@ -4263,6 +4321,27 @@ document.getElementById('btn-shop').addEventListener('click', () => {
 });
 document.getElementById('shop-close').addEventListener('click', () => {
   $('shop-screen').style.display = 'none';
+  updateMenuStash();
+});
+// 인벤토리 (#185)
+document.getElementById('btn-inventory').addEventListener('click', () => {
+  audio();
+  renderInventoryScreen();
+  $('inventory-screen').style.display = 'flex';
+});
+document.getElementById('inv-close').addEventListener('click', () => {
+  $('inventory-screen').style.display = 'none';
+  updateMenuStash();
+});
+document.getElementById('inv-sell-all').addEventListener('click', () => {
+  const st = loadStash();
+  const vals = st.valuables || [];
+  if (!vals.length) return;
+  st.roubles = (st.roubles || 0) + vals.reduce((s, v) => s + (v.value || 0), 0);
+  st.valuables = [];
+  saveStash(st);
+  sfx.pickup();
+  renderInventoryScreen();
   updateMenuStash();
 });
 document.getElementById('equip-close').addEventListener('click', () => {

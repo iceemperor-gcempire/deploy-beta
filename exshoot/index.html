@@ -253,6 +253,27 @@
   .shop-row .equipped { color: #8fd98f; font-size: 12px; letter-spacing: 1px; padding: 4px 6px; }
   @media (max-width: 900px) { #shop { width: 300px; padding: 8px 10px; } }
 
+  /* ---------- 인벤토리 화면 ---------- */
+  #inventory-screen { background: #060906; z-index: 30; }
+  #inv-cats { width: 440px; max-height: 58vh; overflow-y: auto; text-align: left; margin-bottom: 14px; }
+  .inv-cat { background: rgba(10,16,10,0.55); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 10px 14px; margin-bottom: 12px; }
+  .inv-cat h3 { font-size: 12px; letter-spacing: 3px; color: #9fb59f; margin-bottom: 6px; display:flex; justify-content:space-between; }
+  .inv-cat h3 .cat-n { color: #6f8f6f; letter-spacing: 1px; }
+  .inv-cat .cat-empty { font-size: 12px; color: #6f7f6f; opacity: 0.7; padding: 3px 0; }
+  .inv-row { display: flex; align-items: center; padding: 5px 0; font-size: 13px; border-top: 1px solid rgba(255,255,255,0.06); }
+  .inv-row .i-name { color: #dfe8df; }
+  .inv-row .i-tag { color: #8fd98f; font-size: 11px; margin-left: 8px; }
+  .inv-row .i-val { color: #d9c86a; margin-left: auto; margin-right: 10px; }
+  .inv-row button {
+    font-family: inherit; font-size: 11px; letter-spacing: 1px; cursor: pointer;
+    padding: 3px 10px; color: #f0e6cf; background: rgba(120,100,55,0.3);
+    border: 1px solid #a08850; border-radius: 3px; white-space: nowrap;
+  }
+  .inv-row button:hover { background: rgba(150,125,65,0.45); }
+  #inv-actions { display: flex; gap: 10px; }
+  #inv-sell-all:disabled { opacity: 0.45; cursor: default; }
+  @media (max-width: 900px) { #inv-cats { width: 320px; } }
+
   /* ---------- 장비 커스텀 화면 ---------- */
   #equip-screen { z-index: 30; }
   #equip-body { display: flex; gap: 16px; align-items: stretch; text-align: left; }
@@ -455,6 +476,10 @@
         <div class="mdesc">총기 선택 · 부착물 장착</div>
       </div>
       <div class="mcard">
+        <button id="btn-inventory">인벤토리</button>
+        <div class="mdesc">보유 아이템 · 귀중품 매각</div>
+      </div>
+      <div class="mcard">
         <button id="btn-shop">보급소</button>
         <div class="mdesc">무기 · 방어구 구매</div>
       </div>
@@ -482,6 +507,16 @@
     <div class="stash" id="shop-stash"></div>
     <div id="shop"></div>
     <button id="shop-close">닫기</button>
+  </div>
+
+  <div class="screen" id="inventory-screen">
+    <h2 style="color:#9fb59f; font-size:20px;">인벤토리</h2>
+    <div class="stash" id="inv-screen-stash"></div>
+    <div id="inv-cats"></div>
+    <div id="inv-actions">
+      <button id="inv-sell-all">귀중품 전체 매각</button>
+      <button id="inv-close">닫기</button>
+    </div>
   </div>
 
   <div class="screen" id="license-screen">
@@ -526,6 +561,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=2e7079f"></script>
+  <script type="module" src="./src/main.js?v=db98d41"></script>
 </body>
 </html>
