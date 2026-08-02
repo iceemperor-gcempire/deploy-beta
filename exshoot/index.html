@@ -280,6 +280,10 @@
     border: 1px solid #a08850; border-radius: 3px; white-space: nowrap;
   }
   .inv-row button:hover { background: rgba(150,125,65,0.45); }
+  .inv-row .ld-btn { background: rgba(50,70,45,0.5); border-color: #5f7f4f; color: #cfe0cf; }
+  .inv-row .ld-btn.on { background: rgba(90,140,80,0.55); border-color: #8fd98f; color: #eafaea; }
+  .inv-row .ld-btn:hover { background: rgba(110,160,95,0.6); }
+  .inv-hint { font-size: 11.5px; color: #7f8f7f; margin: -14px 0 20px; letter-spacing: 0.5px; }
   #inv-actions { display: flex; gap: 10px; }
   #inv-sell-all:disabled { opacity: 0.45; cursor: default; }
   @media (max-width: 900px) { #inv-items { width: 240px; } #inv-nav { width: 132px; } }
@@ -537,6 +541,7 @@
   <div class="screen" id="inventory-screen">
     <h2 style="color:#9fb59f; font-size:20px;">인벤토리</h2>
     <div class="stash" id="inv-screen-stash"></div>
+    <div class="inv-hint">✓ 반입 = 레이드에 가져감 · 사망 시 손실 · 스태시는 안전</div>
     <div id="inv-body">
       <div id="inv-nav"></div>
       <div id="inv-items"></div>
@@ -589,6 +594,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=d7b8d4c"></script>
+  <script type="module" src="./src/main.js?v=68d96ac"></script>
 </body>
 </html>

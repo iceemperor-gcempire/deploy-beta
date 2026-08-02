@@ -896,36 +896,54 @@ function invCategories(st) {
   const cg = {};
   for (const c of cons) { cg[c.name] = cg[c.name] || { n: 0, heal: c.heal }; cg[c.name].n++; }
   const vgz = groupValuables(vals);
+  const lw = st.loadoutW || [];   // 반입 무기
+  const lc = st.loadoutC || [];   // 반입 소모품 종류
+  const ldBtn = (on, attr) => `<button class="ld-btn${on ? ' on' : ''}" ${attr}>${on ? '✓ 반입' : '반입'}</button>`;
   return [
     { key: 'gun', title: '총', count: guns.length, empty: '보유한 총이 없습니다.',
-      rows: guns.map((k) => invRowHTML(WEAPONS[k].name, k === equipped ? '장착 중' : '', '')) },
+      rows: guns.map((k) => invRowHTML(WEAPONS[k].name, k === equipped ? '장착 중' : '', '', ldBtn(lw.includes(k), `data-bringw="${k}"`))) },
     { key: 'acc', title: '총기 악세서리', count: accs.length, empty: '보유한 악세서리가 없습니다.',
       rows: accs.map((k) => invRowHTML(ATTACHMENTS[k].name, '', '')) },
     { key: 'part', title: '총기 부품', count: parts.length, empty: '보유한 부품이 없습니다.',
       rows: Object.entries(pg).map(([name, x]) => invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, SLOT_LABEL[x.slot] || '부품', '')) },
     { key: 'cons', title: '소모품', count: cons.length, empty: '보유한 소모품이 없습니다. (보급소에서 구매)',
-      rows: Object.entries(cg).map(([name, x]) => invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, x.heal ? `+${x.heal} HP` : '', '')) },
+      rows: Object.entries(cg).map(([name, x]) => invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, x.heal ? `+${x.heal} HP` : '', '',
+        ldBtn(lc.includes(name), `data-bringc="${encodeURIComponent(name)}"`))) },
     { key: 'val', title: '귀중품', count: vals.length, empty: '귀중품이 없습니다.',
       rows: Object.entries(vgz).map(([name, x]) => invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, '', x.v.toLocaleString('ko-KR'),
         `<button data-sell="${encodeURIComponent(name)}">매각</button>`)) },
   ];
 }
+function toggleLoadout(listKey, id) {
+  const st = loadStash();
+  const cur = new Set(st[listKey] || []);
+  cur.has(id) ? cur.delete(id) : cur.add(id);
+  st[listKey] = [...cur];
+  saveStash(st);
+  sfx.reload2();
+  renderInventoryScreen();
+}
 let invSel = 'gun';
 function renderInventoryScreen() {
   const st = loadStash();
+  // 로드아웃 미설정 시 기본값(소지 전량 반입)으로 실체화 → 이후 명시적 토글 (#189)
+  let dirty = false;
+  if (st.loadoutW === undefined) { st.loadoutW = (st.weapons || ['rifle']).filter((k) => WEAPONS[k]); dirty = true; }
+  if (st.loadoutC === undefined) { st.loadoutC = [...new Set((st.consumables || []).map((c) => c.name))]; dirty = true; }
+  if (dirty) saveStash(st);
   document.getElementById('inv-screen-stash').textContent = `스태시 ₽ ${(st.roubles || 0).toLocaleString('ko-KR')}`;
   const cats = invCategories(st);
   if (!cats.find((c) => c.key === invSel)) invSel = 'gun';
-  // 좌측 카테고리 탭
   document.getElementById('inv-nav').innerHTML = cats.map((c) =>
     `<button class="inv-tab ${c.key === invSel ? 'sel' : ''}" data-cat="${c.key}"><span>${c.title}</span><span class="tab-n">${c.count}</span></button>`).join('');
-  // 우측 선택 카테고리 아이템
   const sel = cats.find((c) => c.key === invSel);
   document.getElementById('inv-items').innerHTML = invCatHTML(sel.title, sel.count, sel.rows, sel.empty);
   document.getElementById('inv-nav').querySelectorAll('[data-cat]').forEach((b) =>
     b.addEventListener('click', () => { invSel = b.dataset.cat; renderInventoryScreen(); }));
-  document.getElementById('inv-items').querySelectorAll('[data-sell]').forEach((b) =>
-    b.addEventListener('click', () => sellValuable(decodeURIComponent(b.dataset.sell))));
+  const items = document.getElementById('inv-items');
+  items.querySelectorAll('[data-sell]').forEach((b) => b.addEventListener('click', () => sellValuable(decodeURIComponent(b.dataset.sell))));
+  items.querySelectorAll('[data-bringw]').forEach((b) => b.addEventListener('click', () => toggleLoadout('loadoutW', b.dataset.bringw)));
+  items.querySelectorAll('[data-bringc]').forEach((b) => b.addEventListener('click', () => toggleLoadout('loadoutC', decodeURIComponent(b.dataset.bringc))));
   document.getElementById('inv-sell-all').disabled = (st.valuables || []).length === 0;
 }
 function sellValuable(name) {
@@ -4187,10 +4205,13 @@ function startRaid(mapKey) {
 
   const stash0 = loadStash();
   const owned0 = (stash0.weapons || ['rifle']).filter((k) => WEAPONS[k]);
-  carry = ['rifle', ...owned0.filter((k) => k !== 'rifle')]; // 1번 슬롯은 항상 소총
+  // 로드아웃 반입 무기 (#189): 선택된 것만 반입(미설정 시 소지 전량), 최소 1정 보장
+  let lw = Array.isArray(stash0.loadoutW) ? stash0.loadoutW.filter((k) => owned0.includes(k)) : owned0.slice();
+  if (!lw.length) lw = [owned0.includes('rifle') ? 'rifle' : (owned0[0] || 'rifle')];
+  carry = lw;
   for (const k of Object.keys(weaponAmmo)) delete weaponAmmo[k];
-  for (const k of carry) weaponAmmo[k] = { mag: WEAPONS[k].magSize, reserve: WEAPONS[k].reserveMax };
-  const eq = stash0.equipped && carry.includes(stash0.equipped) ? stash0.equipped : 'rifle';
+  for (const k of carry) { const ew = effectiveWeapon(k); weaponAmmo[k] = { mag: ew.magSize, reserve: ew.reserveMax }; }
+  const eq = stash0.equipped && carry.includes(stash0.equipped) ? stash0.equipped : carry[0];
   equipWeapon(eq, false); // mag/reserve/reload 리셋 포함
   gun.triggerDown = false;
   gun.semiLatch = false;
@@ -4201,13 +4222,17 @@ function startRaid(mapKey) {
   if (IS_MOBILE) $('tb-ads').classList.remove('active');
 
   inventory = [];
-  // 소모품 반입 (#187): 스태시 소모품을 레이드로 가져감(스태시에서 빠짐 → 생존 시 잔량 반환, 사망 시 손실)
+  // 소모품 반입 (#187/#189): 로드아웃에 표시된 종류만 반입(미설정 시 전량). 스태시에서 빠짐 →
+  // 생존 시 잔량 반환, 사망 시 손실.
   const cons = stash0.consumables || [];
-  if (cons.length) {
-    for (const c of cons) inventory.push({ name: c.name, value: c.value, heal: c.heal, type: 'consumable' });
-    stash0.consumables = [];
+  const lc = stash0.loadoutC; // 반입할 소모품 이름 배열(undefined = 전량)
+  const remainCons = [], broughtCons = [];
+  for (const c of cons) ((lc === undefined || lc.includes(c.name)) ? broughtCons : remainCons).push(c);
+  if (broughtCons.length) {
+    for (const c of broughtCons) inventory.push({ name: c.name, value: c.value, heal: c.heal, type: 'consumable' });
+    stash0.consumables = remainCons;
     saveStash(stash0);
-    addFeed(`소모품 ${cons.length}개 반입`);
+    addFeed(`소모품 ${broughtCons.length}개 반입`);
   }
   state.kills = 0;
   state.raidTime = RAID_SECONDS;
@@ -4282,15 +4307,18 @@ function endRaid(result, cause) {
     dom.extractLoot.innerHTML = summaryHTML();
     dom.extract.style.display = 'flex';
   } else {
-    // 사망: 구매/습득 무기 전부 손실 — 기본 소총으로 복귀
-    stash.weapons = ['rifle'];
-    stash.equipped = 'rifle';
-    stash.armorDur = 0;
+    // 사망 (#189): 반입(로드아웃)한 무기·장착부품·방어구만 손실, 스태시 나머지는 안전.
+    const brought = carry.filter((k) => k !== 'rifle'); // 기본 소총은 항상 유지
+    stash.weapons = (stash.weapons || ['rifle']).filter((k) => k === 'rifle' || !brought.includes(k));
+    if (!stash.weapons.includes('rifle')) stash.weapons.unshift('rifle');
+    stash.equipped = stash.weapons.includes(stash.equipped) ? stash.equipped : 'rifle';
+    stash.weaponParts = stash.weaponParts || {};
+    stash.attachments = stash.attachments || {};
+    for (const k of brought) { delete stash.weaponParts[k]; delete stash.attachments[k]; } // 잃은 무기의 부품·부착 제거
+    stash.loadoutW = (stash.loadoutW || []).filter((k) => stash.weapons.includes(k));
+    stash.armorDur = 0;   // 착용 방어구는 반입품 → 손실
     stash.helmet = false;
-    stash.attOwned = [];
-    stash.attachments = {};
-    // 잃은 무기에 장착돼 있던 부품도 함께 손실 — 기본 소총 슬롯만 유지 (#188)
-    stash.weaponParts = { rifle: (stash.weaponParts || {}).rifle || {} };
+    // attOwned(악세서리 소유)·parts·consumables(미반입분)·valuables 는 스태시 안전 → 유지
     saveStash(stash);
     sfx.death();
     dom.deathCause.textContent = cause || '사망했습니다.';
