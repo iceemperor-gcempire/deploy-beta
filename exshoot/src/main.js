@@ -3275,7 +3275,9 @@ function fireShot() {
         }
       }
     }
-    spawnTracer(muzzle, endPoint, 0xffe0a0);
+    // 트레이서는 스코프 무기(스코프 부착·저격총)에서만 — 일반 사격은 총구 시작점이 반동·총열정렬로
+    // 흔들려 궤적이 지저분해서 제외. 스코프는 정조준 상태라 안정적 (#183)
+    if (currentAtt.includes('scope') || GUN.key === 'sniper') spawnTracer(muzzle, endPoint, 0xffe0a0);
   }
   if (anyHit) {
     showHitmarker();
