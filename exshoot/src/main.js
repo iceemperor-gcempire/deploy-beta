@@ -227,7 +227,7 @@ const dom = {
   hud: $('hud'), menu: $('menu-screen'), death: $('death-screen'), extract: $('extract-screen'),
   hpFill: $('hp-fill'), stamFill: $('stam-fill'),
   ammoMag: $('ammo-mag'), ammoReserve: $('ammo-reserve'), gunState: $('gun-state'),
-  raidTimer: $('raid-timer'), compass: $('compass'),
+  raidTimer: $('raid-timer'), compass: $('compass'), minimap: $('minimap'),
   lootValue: $('loot-value-num'), kills: $('kills'),
   prompt: $('prompt'), extractProgress: $('extract-progress'),
   extractFill: $('extract-fill'), extractLabel: $('extract-label'),
@@ -4036,6 +4036,37 @@ function updateCompass() {
   }
 }
 
+// 미니맵 (#196) — 북(-z) 위 기준 탑다운. 핫존·상자·잠긴금고·탈출구·플레이어 표시.
+const _mmFwd = new THREE.Vector3();
+function updateMinimap() {
+  const cv = dom.minimap; if (!cv) return;
+  const ctx = cv.getContext('2d');
+  const S = cv.width, R = WORLD_HALF;
+  const cx = (wx) => (wx / R * 0.5 + 0.5) * S;         // world x → canvas x
+  const cy = (wz) => (wz / R * 0.5 + 0.5) * S;         // world z → canvas y (+z 아래, -z=북 위)
+  ctx.clearRect(0, 0, S, S);
+  // 핫존
+  const hr = 32 / R * 0.5 * S;
+  ctx.fillStyle = 'rgba(255,180,60,0.13)';
+  ctx.beginPath(); ctx.arc(cx(HOT_CENTER.x), cy(HOT_CENTER.y), hr, 0, 7); ctx.fill();
+  // 미개봉 보급 상자(연한 점) + 잠긴 금고(붉은) + 탈출구
+  for (const it of interactables) {
+    if (it.opened) continue;
+    if (it.locked) { ctx.fillStyle = '#ff5a4a'; ctx.beginPath(); ctx.arc(cx(it.pos.x), cy(it.pos.z), 3, 0, 7); ctx.fill(); }
+    else { ctx.fillStyle = 'rgba(150,200,120,0.55)'; ctx.fillRect(cx(it.pos.x) - 1, cy(it.pos.z) - 1, 2, 2); }
+  }
+  for (const ex of extractions) {
+    ctx.fillStyle = ex.fee ? '#ffcf5a' : '#51ff7a';
+    ctx.beginPath(); ctx.arc(cx(ex.pos.x), cy(ex.pos.z), 3.4, 0, 7); ctx.fill();
+  }
+  // 플레이어(시선 방향 화살표)
+  camera.getWorldDirection(_mmFwd);
+  const px = cx(player.pos.x), py = cy(player.pos.z);
+  ctx.save(); ctx.translate(px, py); ctx.rotate(Math.atan2(_mmFwd.x, -_mmFwd.z));
+  ctx.fillStyle = '#eef2ea'; ctx.beginPath(); ctx.moveTo(0, -6); ctx.lineTo(4.5, 5); ctx.lineTo(-4.5, 5); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
 // ============================================================
 // 레이드 라이프사이클
 // ============================================================
@@ -4903,6 +4934,7 @@ function updateHUD() {
     if (IS_MOBILE) $('tb-interact').style.display = 'none';
   }
   updateCompass();
+  updateMinimap();
 }
 
 // ============================================================

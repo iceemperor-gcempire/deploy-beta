@@ -100,10 +100,16 @@
   .compass-mark { position: absolute; top: 4px; font-size: 12px; opacity: 0.85; transform: translateX(-50%); }
   .compass-extract { color: #5fd97a; font-weight: 700; font-size: 11px; top: 2px; text-align: center; line-height: 11px; }
 
+  #minimap {
+    position: absolute; top: 16px; right: 24px; width: 154px; height: 154px;
+    background: rgba(6,10,8,0.5); border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
+  }
   #loot-value {
-    position: absolute; top: 16px; right: 24px; text-align: right;
+    position: absolute; top: 182px; right: 24px; text-align: right;
     font-size: 15px; color: #d9c86a; text-shadow: 0 0 6px rgba(0,0,0,0.9);
   }
+  body.mobile #minimap { width: 108px; height: 108px; }
+  body.mobile #loot-value { top: 134px; }
   #kills { font-size: 12px; color: #b7c2b7; margin-top: 4px; }
 
   #prompt {
@@ -431,6 +437,8 @@
       <div id="compass"></div>
     </div>
 
+    <canvas id="minimap" width="154" height="154"></canvas>
+
     <div id="loot-value">
       <div>₽ <span id="loot-value-num">0</span></div>
       <div id="kills">사살 0</div>
@@ -597,6 +605,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=8b91afa"></script>
+  <script type="module" src="./src/main.js?v=e1fcbd7"></script>
 </body>
 </html>
