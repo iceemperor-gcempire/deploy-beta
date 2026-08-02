@@ -143,9 +143,9 @@ function attLoadout(weaponKey) {
 
 const ITEM_TABLE = [
   { name: '볼트',            value: 1500,  w: 18 },
-  { name: '붕대',            value: 3000,  w: 16, heal: 25 },
+  { name: '붕대',            value: 3000,  w: 16, heal: 25, type: 'consumable' },
   { name: '군용 MRE',        value: 8000,  w: 12 },
-  { name: '구급킷',          value: 14000, w: 7,  heal: 60 },
+  { name: '구급킷',          value: 14000, w: 7,  heal: 60, type: 'consumable' },
   { name: '손목시계',        value: 15000, w: 10 },
   { name: '위스키',          value: 22000, w: 8 },
   { name: '금목걸이',        value: 28000, w: 6 },
@@ -166,6 +166,7 @@ const PART_TABLE = [
   { name: '소염기',        value: 7000,  w: 6, type: 'part', slot: 'muzzle' },
 ];
 const LOOT_POOL = [...ITEM_TABLE, ...PART_TABLE]; // 루팅 롤 대상(일반 아이템 + 부품)
+const CONSUMABLE_SHOP = ITEM_TABLE.filter((i) => i.type === 'consumable'); // 소모품 상점 목록(붕대·구급킷)
 
 // ---------- DOM ----------
 const $ = (id) => document.getElementById(id);
@@ -851,37 +852,52 @@ function groupValuables(vals) {
   for (const v of vals) { g[v.name] = g[v.name] || { n: 0, v: 0 }; g[v.name].n++; g[v.name].v += (v.value || 0); }
   return g;
 }
-function renderInventoryScreen() {
-  const st = loadStash();
+// 카테고리별 데이터(제목·개수·행) 구성 — 종류가 늘어도 탭으로 확장 (#187)
+function invCategories(st) {
   const equipped = st.equipped || 'rifle';
-  document.getElementById('inv-screen-stash').textContent = `스태시 ₽ ${(st.roubles || 0).toLocaleString('ko-KR')}`;
-  const cats = [];
-  // 1. 총
   const guns = (st.weapons || ['rifle']).filter((k) => WEAPONS[k]);
-  cats.push(invCatHTML('총', guns.length,
-    guns.map((k) => invRowHTML(WEAPONS[k].name, k === equipped ? '장착 중' : '', '')), '보유한 총이 없습니다.'));
-  // 2. 총기 악세서리
   const accs = (st.attOwned || []).filter((k) => ATTACHMENTS[k]);
-  cats.push(invCatHTML('총기 악세서리', accs.length,
-    accs.map((k) => invRowHTML(ATTACHMENTS[k].name, '', '')), '보유한 악세서리가 없습니다.'));
-  // 3. 총기 부품 — 루팅·구매로 획득해 쌓임(슬롯 장착 커스텀은 차후) (#186)
   const parts = st.parts || [];
+  const cons = st.consumables || [];
+  const vals = st.valuables || [];
+  // 부품: 이름별 그룹(슬롯 유지)
   const pg = {};
   for (const p of parts) { pg[p.name] = pg[p.name] || { n: 0, slot: p.slot }; pg[p.name].n++; }
-  const partRows = Object.entries(pg).map(([name, x]) =>
-    invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, SLOT_LABEL[x.slot] || '부품', ''));
-  cats.push(invCatHTML('총기 부품', parts.length, partRows, '보유한 부품이 없습니다.'));
-  // 4. 귀중품 (매각용)
-  const vals = st.valuables || [];
-  const g = groupValuables(vals);
-  const valRows = Object.entries(g).map(([name, x]) =>
-    invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, '', x.v.toLocaleString('ko-KR'),
-      `<button data-sell="${encodeURIComponent(name)}">매각</button>`));
-  cats.push(invCatHTML('귀중품 (매각용)', vals.length, valRows, '귀중품이 없습니다.'));
-  document.getElementById('inv-cats').innerHTML = cats.join('');
-  document.getElementById('inv-cats').querySelectorAll('[data-sell]').forEach((b) =>
+  // 소모품: 이름별 그룹(heal 유지)
+  const cg = {};
+  for (const c of cons) { cg[c.name] = cg[c.name] || { n: 0, heal: c.heal }; cg[c.name].n++; }
+  const vgz = groupValuables(vals);
+  return [
+    { key: 'gun', title: '총', count: guns.length, empty: '보유한 총이 없습니다.',
+      rows: guns.map((k) => invRowHTML(WEAPONS[k].name, k === equipped ? '장착 중' : '', '')) },
+    { key: 'acc', title: '총기 악세서리', count: accs.length, empty: '보유한 악세서리가 없습니다.',
+      rows: accs.map((k) => invRowHTML(ATTACHMENTS[k].name, '', '')) },
+    { key: 'part', title: '총기 부품', count: parts.length, empty: '보유한 부품이 없습니다.',
+      rows: Object.entries(pg).map(([name, x]) => invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, SLOT_LABEL[x.slot] || '부품', '')) },
+    { key: 'cons', title: '소모품', count: cons.length, empty: '보유한 소모품이 없습니다. (보급소에서 구매)',
+      rows: Object.entries(cg).map(([name, x]) => invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, x.heal ? `+${x.heal} HP` : '', '')) },
+    { key: 'val', title: '귀중품', count: vals.length, empty: '귀중품이 없습니다.',
+      rows: Object.entries(vgz).map(([name, x]) => invRowHTML(`${name}${x.n > 1 ? ` ×${x.n}` : ''}`, '', x.v.toLocaleString('ko-KR'),
+        `<button data-sell="${encodeURIComponent(name)}">매각</button>`)) },
+  ];
+}
+let invSel = 'gun';
+function renderInventoryScreen() {
+  const st = loadStash();
+  document.getElementById('inv-screen-stash').textContent = `스태시 ₽ ${(st.roubles || 0).toLocaleString('ko-KR')}`;
+  const cats = invCategories(st);
+  if (!cats.find((c) => c.key === invSel)) invSel = 'gun';
+  // 좌측 카테고리 탭
+  document.getElementById('inv-nav').innerHTML = cats.map((c) =>
+    `<button class="inv-tab ${c.key === invSel ? 'sel' : ''}" data-cat="${c.key}"><span>${c.title}</span><span class="tab-n">${c.count}</span></button>`).join('');
+  // 우측 선택 카테고리 아이템
+  const sel = cats.find((c) => c.key === invSel);
+  document.getElementById('inv-items').innerHTML = invCatHTML(sel.title, sel.count, sel.rows, sel.empty);
+  document.getElementById('inv-nav').querySelectorAll('[data-cat]').forEach((b) =>
+    b.addEventListener('click', () => { invSel = b.dataset.cat; renderInventoryScreen(); }));
+  document.getElementById('inv-items').querySelectorAll('[data-sell]').forEach((b) =>
     b.addEventListener('click', () => sellValuable(decodeURIComponent(b.dataset.sell))));
-  document.getElementById('inv-sell-all').disabled = vals.length === 0;
+  document.getElementById('inv-sell-all').disabled = (st.valuables || []).length === 0;
 }
 function sellValuable(name) {
   const st = loadStash();
@@ -930,9 +946,13 @@ function renderShop() {
     ? '<span class="equipped">착용 중</span>'
     : `<button data-helmet="1" ${roubles < 28000 ? 'disabled' : ''}>구매 ₽28,000</button>`;
   html += `<div class="shop-row"><div><div class="w-name">헬멧</div><div class="w-desc">헤드샷 1회 완전 방어 후 파손</div></div>${helmetRight}</div>`;
-  const meds = s.medkits || 0;
-  html += `<div class="shop-row"><div><div class="w-name">구급킷 지참 (${meds}/2)</div><div class="w-desc">+60 HP · 다음 레이드 반입, 사망 시 손실</div></div>` +
-    `<button data-med="1" ${roubles < 14000 || meds >= 2 ? 'disabled' : ''}>구매 ₽14,000</button></div>`;
+  // 소모품 (#187) — 구매 시 인벤토리(소모품)에 쌓이고 다음 레이드에 반입. 사망 시 손실.
+  const consN = (s.consumables || []).length;
+  html += `<h3 style="margin-top:14px">소모품 <span style="color:#6f8f6f;font-weight:normal">(보유 ${consN})</span></h3>`;
+  for (const c of CONSUMABLE_SHOP) {
+    html += `<div class="shop-row"><div><div class="w-name">${c.name}</div><div class="w-desc">+${c.heal} HP · 레이드 반입</div></div>`
+      + `<button data-buycons="${encodeURIComponent(c.name)}" ${roubles < c.value ? 'disabled' : ''}>구매 ₽${c.value.toLocaleString('ko-KR')}</button></div>`;
+  }
   // 총기 부품 (#186) — 구매 시 인벤토리(총기 부품)에 쌓임. 차후 총기 커스텀에 사용.
   html += '<h3 style="margin-top:14px">총기 부품</h3>';
   for (const p of PART_TABLE) {
@@ -986,13 +1006,15 @@ function renderShop() {
     sfx.pickup();
     updateMenuStash();
   }));
-  el.querySelectorAll('[data-med]').forEach((b) => b.addEventListener('click', () => {
+  el.querySelectorAll('[data-buycons]').forEach((b) => b.addEventListener('click', () => {
     const st = loadStash();
-    if ((st.roubles || 0) < 14000 || (st.medkits || 0) >= 2) return;
-    st.roubles -= 14000;
-    st.medkits = (st.medkits || 0) + 1;
+    const c = CONSUMABLE_SHOP.find((x) => x.name === decodeURIComponent(b.dataset.buycons));
+    if (!c || (st.roubles || 0) < c.value) return;
+    st.roubles -= c.value;
+    st.consumables = [...(st.consumables || []), { name: c.name, value: c.value, heal: c.heal }];
     saveStash(st);
     sfx.pickup();
+    renderShop();       // 보유 수 갱신
     updateMenuStash();
   }));
 }
@@ -4099,13 +4121,13 @@ function startRaid(mapKey) {
   if (IS_MOBILE) $('tb-ads').classList.remove('active');
 
   inventory = [];
-  // 상점에서 지참 구매한 구급킷 반입 (소모)
-  const meds = stash0.medkits || 0;
-  if (meds > 0) {
-    for (let i = 0; i < meds; i++) inventory.push({ name: '구급킷', value: 14000, heal: 60 });
-    stash0.medkits = 0;
+  // 소모품 반입 (#187): 스태시 소모품을 레이드로 가져감(스태시에서 빠짐 → 생존 시 잔량 반환, 사망 시 손실)
+  const cons = stash0.consumables || [];
+  if (cons.length) {
+    for (const c of cons) inventory.push({ name: c.name, value: c.value, heal: c.heal, type: 'consumable' });
+    stash0.consumables = [];
     saveStash(stash0);
-    addFeed(`구급킷 ${meds}개 지참`);
+    addFeed(`소모품 ${cons.length}개 반입`);
   }
   state.kills = 0;
   state.raidTime = RAID_SECONDS;
@@ -4159,10 +4181,12 @@ function endRaid(result, cause) {
   if (result === 'extract') {
     const value = inventoryValue();
     stash.extracts = (stash.extracts || 0) + 1;
-    // 반입 분류 (#185/#186): 총기 부품 → stash.parts, 그 외 가치 아이템 → stash.valuables(수동 매각)
+    // 반입 분류 (#185/#186/#187): 부품 → stash.parts, 소모품 → stash.consumables, 그 외 가치품 → stash.valuables
     const bankedParts = inventory.filter((i) => i.type === 'part').map((i) => ({ name: i.name, value: i.value, slot: i.slot }));
-    const banked = inventory.filter((i) => i.type !== 'part' && (i.value || 0) > 0).map((i) => ({ name: i.name, value: i.value }));
+    const bankedCons = inventory.filter((i) => i.type === 'consumable').map((i) => ({ name: i.name, value: i.value, heal: i.heal }));
+    const banked = inventory.filter((i) => i.type !== 'part' && i.type !== 'consumable' && (i.value || 0) > 0).map((i) => ({ name: i.name, value: i.value }));
     stash.parts = [...(stash.parts || []), ...bankedParts];
+    stash.consumables = [...(stash.consumables || []), ...bankedCons];
     stash.valuables = [...(stash.valuables || []), ...banked];
     // 레이드 중 습득한 무기 소유 확정 + 장착 유지
     const owned = new Set(stash.weapons || ['rifle']);
