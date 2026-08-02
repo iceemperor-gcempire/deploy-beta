@@ -141,6 +141,24 @@ function attLoadout(weaponKey) {
   return ((st.attachments || {})[weaponKey] || []).filter((a) => ATTACHMENTS[a] && ATTACHMENTS[a].compat.includes(weaponKey));
 }
 
+// 총기 부품 외형 반영 (#190) — 기본 총 모델이 이미 총열·탄창·개머리판 등을 가지므로 교체형 부품은
+// 스탯 전용. 총구 장착물(소염기)만은 기본 총에 없는 add-on 이라 간이 메시로 표시.
+// 총 로컬 프레임: 총구 -Z, 위 +Y. size=정규화 치수. 총구 위치는 뷰모델 muzzle(= size.y*0.25, -size.z/2)과 일치.
+const PART_MAT = new THREE.MeshStandardMaterial({ color: 0x1f2124, roughness: 0.5, metalness: 0.6 });
+function muzzleDeviceMesh(size) {
+  const r = Math.min(size.x, size.y) * 0.42, len = Math.max(0.04, size.z * 0.09);
+  const grp = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 14), PART_MAT);
+  body.rotation.x = Math.PI / 2;
+  grp.add(body);
+  const ring = new THREE.Mesh(new THREE.CylinderGeometry(r * 1.18, r * 1.18, len * 0.24, 14), PART_MAT); // 앞쪽 브레이크 링
+  ring.rotation.x = Math.PI / 2; ring.position.z = -len * 0.42;
+  grp.add(ring);
+  grp.position.set(0, size.y * 0.25, -size.z / 2 - len / 2);
+  grp.traverse((o) => { o.frustumCulled = false; if (o.isMesh) o.castShadow = false; });
+  return grp;
+}
+
 const ITEM_TABLE = [
   { name: '볼트',            value: 1500,  w: 18 },
   { name: '붕대',            value: 3000,  w: 16, heal: 25, type: 'consumable' },
@@ -1091,6 +1109,7 @@ function equipBuildPreview() {
   const bb = new THREE.Box3().setFromObject(m);
   const atts = attLoadout(equipSel);
   for (const ak of atts) attachToGun(m, size, bb, ak);
+  if (installedParts(equipSel).muzzle) g.add(muzzleDeviceMesh(size)); // 총구 장착물 표시 (#190)
   g.add(m);
   equipModel = g;
   equipScene.add(g);
@@ -3259,7 +3278,8 @@ function updateTPSCamera(dt) {
 }
 
 // 뷰모델 (Quaternius 총기) — 무기별로 1회 구성, equipWeapon 으로 전환
-const VIEWMODELS = {}; // key → { model, muzzle, adsPos }
+const VIEWMODELS = {}; // key → { model, muzzle, adsPos, size }
+let fpsMuzzleDevice = null; // 장착된 총구 부품의 FPS 메시 (#190)
 function buildViewmodel() {
   for (const w of Object.values(WEAPONS)) {
     const m = instantiate(w.model);
@@ -3285,7 +3305,7 @@ function buildViewmodel() {
       model: m,
       muzzle: new THREE.Vector3(0, size.y * 0.25, -size.z / 2),
       adsPos: new THREE.Vector3(0, -bb.max.y, -0.66),
-      atts, scopeExtra,
+      atts, scopeExtra, size: size.clone(),
     };
   }
   equipWeapon(GUN.key, false);
@@ -3303,6 +3323,9 @@ function equipWeapon(key, announce = true) {
   currentAtt = attLoadout(key);
   for (const [ak, am] of Object.entries(vm.atts || {})) am.visible = currentAtt.includes(ak);
   if (currentAtt.includes('scope')) GUN_ADS.y -= vm.scopeExtra || 0;
+  // 총구 장착물(부품) FPS 반영 (#190) — 이전 것 제거 후 장착 시 재생성
+  if (fpsMuzzleDevice) { gunGroup.remove(fpsMuzzleDevice); fpsMuzzleDevice = null; }
+  if (installedParts(key).muzzle && vm.size) { fpsMuzzleDevice = muzzleDeviceMesh(vm.size); gunGroup.add(fpsMuzzleDevice); }
   // 무기별 탄약 상태 저장/복원 (레이드 중 교체 시 유지)
   if (GUN && GUN.key !== key && weaponAmmo[GUN.key]) {
     weaponAmmo[GUN.key] = { mag: gun.mag, reserve: gun.reserve };
