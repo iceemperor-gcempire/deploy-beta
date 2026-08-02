@@ -4333,6 +4333,72 @@ const MAP_SCHOOL = {
   ],
 };
 
+// ── 도심 맵 (#198) ────────────────────────────────────────
+function urbanBlockSolid(cx, cz, w, d, floors, mat) {
+  const FH = 3.3, h = floors * FH;
+  addBox(cx, h / 2, cz, w, h, d, mat);                        // 본체(솔리드 — 엄폐·시야 차단)
+  addBox(cx, h + 0.25, cz, w + 0.6, 0.5, d + 0.6, 'concrete'); // 옥상 파라펫
+  addBox(cx, 0.7, cz, w + 0.3, 1.4, d + 0.3, 'schoolBase');    // 1층 base 밴드
+}
+function buildRoom(cx, cz, w, d, mat) {                        // 진입 가능한 작은 상가(문 1개)
+  const h = 3;
+  addWallWithDoor(cx, cz + d / 2, w, h, 'x', mat, 0, 2.4);
+  addWall(cx, cz - d / 2, w, h, 'x', mat);
+  addWall(cx - w / 2, cz, d, h, 'z', mat);
+  addWall(cx + w / 2, cz, d, h, 'z', mat);
+  addBox(cx, h + 0.1, cz, w + 0.3, 0.2, d + 0.3, 'concrete');  // 지붕
+}
+function buildUrbanMap() {
+  buildTexMats();
+  scene.fog = new THREE.Fog(0x949aa2, 42, 190);               // 회색 스모그
+  buildGroundTiles(0x8f959c);                                 // 아스팔트 회색
+  const W = WORLD_HALF;
+  addBox(0, 3, -W, W * 2 + 2, 6, 1, 'concrete', { shadow: false });
+  addBox(0, 3, W, W * 2 + 2, 6, 1, 'concrete', { shadow: false });
+  addBox(-W, 3, 0, 1, 6, W * 2 + 2, 'concrete', { shadow: false });
+  addBox(W, 3, 0, 1, 6, W * 2 + 2, 'concrete', { shadow: false });
+  // 아파트/오피스 블록 (다양한 높이·재질) — 중앙 광장(±16) 개방, 거리 형성
+  for (const [x, z, w, d, f, m] of [
+    [-36, -36, 20, 16, 5, 'brick'], [36, -34, 18, 20, 6, 'concrete'], [-38, 38, 22, 18, 4, 'plaster'],
+    [40, 36, 16, 16, 7, 'brick'], [-60, 2, 14, 28, 5, 'concrete'], [60, 6, 16, 22, 6, 'plaster'],
+    [0, -58, 30, 14, 4, 'brick'], [4, 60, 26, 14, 5, 'concrete'], [-62, -60, 18, 16, 5, 'plaster'], [62, -62, 16, 18, 6, 'brick'],
+  ]) urbanBlockSolid(x, z, w, d, f, m);
+  // 중앙 광장: 진입 가능한 상가 2채 + 엄폐
+  buildRoom(-13, -7, 9, 8, 'plaster'); buildRoom(13, 9, 9, 8, 'brick');
+  for (const [x, z, rot] of [[-16, 18, 0], [18, -16, 1], [0, 27, 0], [-27, -13, 1], [25, 21, 0], [-4, -22, 1]]) addBox(x, 1.3, z, rot ? 2.4 : 5, 2.6, rot ? 5 : 2.4, 'metal'); // 컨테이너 엄폐
+  for (const [x, z, ax] of [[-6, 0, 'x'], [8, -4, 'z'], [-2, 11, 'x'], [10, 6, 'z']]) addWall(x, z, 6, 1.1, ax, 'concrete'); // 낮은 방벽
+  for (const [x, z] of [[-10, 4], [10, -8], [0, 16], [-20, 20], [22, -6]]) placeModel('barrel', x, z, { collide: true });
+  losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile);
+}
+const URBAN_FLATTENS = [
+  { x: 0, z: 0, hw: 74, hd: 74 },
+  ...[[82, 82, 7], [-82, 82, 7], [82, -82, 7], [-82, -82, 7]].map(([x, z, r]) => ({ x, z, r })),
+];
+const MAP_URBAN = {
+  key: 'urban', name: '도심 폐허', desc: '무너진 도심 — 아파트 블록·거리 시가전',
+  build: buildUrbanMap,
+  flattens: URBAN_FLATTENS,
+  lootSpots: [
+    [-13, -7], [13, 9], [0, 0], [-16, 18], [18, -16], [-27, -13], [25, 21], // 광장·상가·엄폐
+    [-36, -24], [36, -22], [-38, 26], [40, 24], [0, -46], [4, 48],           // 블록 주변 거리
+    [-60, -12], [60, -8], [-62, -48], [62, -50], [-46, 46], [46, 48],        // 외곽 거리
+  ],
+  extract: [
+    { name: '북 대로', pos: new THREE.Vector3(0, 0, -80) },
+    { name: '남 지하도', pos: new THREE.Vector3(0, 0, 80) },
+    { name: '동 고가', pos: new THREE.Vector3(80, 0, 0) },
+    { name: '서 철교', pos: new THREE.Vector3(-80, 0, 0) },
+  ],
+  spawns: [
+    new THREE.Vector3(0, 0, -78), new THREE.Vector3(0, 0, 78),
+    new THREE.Vector3(78, 0, 0), new THREE.Vector3(-78, 0, 0), new THREE.Vector3(70, 0, -70),
+  ],
+  barrels: [
+    [-16, -16, true], [16, 16, false], [0, 24, true], [-40, 0, false],
+    [40, 0, true], [-24, 24, false], [24, -24, false], [0, -30, true],
+  ],
+};
+
 // ── 맵 레지스트리 (#165) ──────────────────────────────────
 // 산업지대 데이터 스냅샷 (지금 FLATTENS/LOOT_SPOTS 등은 산업지대 값 — applyMap 이 active 를 교체)
 const MAP_INDUSTRIAL = {
@@ -4341,7 +4407,7 @@ const MAP_INDUSTRIAL = {
   flattens: FLATTENS, lootSpots: LOOT_SPOTS, extract: EXTRACT_CANDIDATES,
   spawns: SPAWN_POINTS, barrels: PHYS_BARRELS,
 };
-const MAPS = { industrial: MAP_INDUSTRIAL, school: MAP_SCHOOL };
+const MAPS = { industrial: MAP_INDUSTRIAL, school: MAP_SCHOOL, urban: MAP_URBAN };
 let currentMapKey = 'industrial';
 let builtMapKey = null;
 let staticObjects = []; // 현재 정적 맵이 scene 에 추가한 최상위 오브젝트 (맵 전환 시 제거)
@@ -4814,7 +4880,7 @@ function showMapSelect() {
     title.style.cssText = 'color:#dfe8df;font-size:26px;letter-spacing:3px;font-weight:700';
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;gap:20px;flex-wrap:wrap;justify-content:center';
-    for (const key of ['industrial', 'school']) {
+    for (const key of Object.keys(MAPS)) {
       const m = MAPS[key];
       const card = document.createElement('button');
       card.style.cssText = 'width:300px;padding:22px 20px;border-radius:10px;cursor:pointer;text-align:left;color:#e6eede;background:rgba(24,32,24,.85);border:1px solid rgba(255,255,255,.16);transition:all .12s';
