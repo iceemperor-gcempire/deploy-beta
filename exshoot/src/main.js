@@ -3140,21 +3140,21 @@ function buildPlayerChar() {
   const clips = CHAR_CLIPS[PC_KEY];
   const mixer = new THREE.AnimationMixer(model);
   const mkOnce = (clip) => { if (!clip) return null; const a = mixer.clipAction(clip); a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; return a; };
-  // 상·하체 2레이어 (#180/#200): 하체(다리 로코모션) + 상체(Hips+몸통+팔, 무기자세)로 분리 합성.
-  //  **Hips 는 상체가 소유** — 견착 클립의 비틀린 Hips 를 상체가 함께 가져와 팔이 안 틀어짐(splay 방지).
-  //  항상 2레이어(전신 견착 모드 없음) → 조준/사격 중 이동해도 다리는 로코모션, 전환 T자 깜박임 없음.
-  const isLowerBone = (b) => /Skirt/i.test(b) || /^(Left(UpLeg|Leg|Foot|Toes)|Right(UpLeg|Leg|Foot|Toes)|J_Sec_[LR]_(Upper|Lower)Leg|J_Bip_[LR]_ToeBase_end)/.test(b);
+  // 상·하체 2레이어 (#180/#201): 하체=로코모션(**Hips+다리**, 골반 움직임 포함 → 걷기 자연스러움),
+  //  상체=Spine 위(몸통+팔, 무기자세). 표준 TPS(UE Layered Blend Per Bone) 방식 — 스파인 기준 분리.
+  //  상체 포즈는 **정면 기준(readyGun)** 만 사용 → 비틀린 aim 클립을 절대 override 하면 팔이 틀어져서(splay) 안 씀.
+  //  항상 2레이어(전신 견착 모드 없음) → 조준/사격 중 이동해도 다리 로코모션, 전환 T자 깜박임 없음.
+  const isLowerBone = (b) => /Skirt/i.test(b) || /^(Hips|Left(UpLeg|Leg|Foot|Toes)|Right(UpLeg|Leg|Foot|Toes)|J_Sec_[LR]_(Upper|Lower)Leg|J_Bip_[LR]_ToeBase_end)/.test(b);
   const splitAct = (clip, keepLower) => {
     if (!clip) return null;
     const tr = clip.tracks.filter((t) => isLowerBone(t.name.split('.')[0]) === keepLower);
     return tr.length ? mixer.clipAction(new THREE.AnimationClip(clip.name + (keepLower ? '_lo' : '_up'), clip.duration, tr)) : null;
   };
   const idleSrc = clips.idleGun || clips.idle;
-  const actIdleLower = splitAct(idleSrc, true);   // 다리만 (Hips 제외)
+  const actIdleLower = splitAct(idleSrc, true);   // Hips+다리
   const actWalkLower = splitAct(clips.walk, true) || splitAct(clips.run, true) || actIdleLower;
   const actRunLower  = splitAct(clips.run, true) || actWalkLower;
-  const upperReady = splitAct(clips.readyGun, false) || splitAct(idleSrc, false);  // 지향 대기(Hips+몸통+팔)
-  const upperFire  = splitAct(clips.aim, false) || upperReady;                     // 견착/사격(Hips+몸통+팔) — 집중 자세
+  const upperReady = splitAct(clips.readyGun, false) || splitAct(idleSrc, false);  // 지향 대기(몸통+팔, 정면)
   const upperRun   = splitAct(clips.run, false) || upperReady;                     // 질주 팔
   const actReload = (() => { const a = splitAct(clips.reload, false); if (a) { a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; } return a; })() || mkOnce(clips.reload);
   const actAim = clips.aim ? mixer.clipAction(clips.aim) : null; // 캘리브레이션용 전체 견착 클립
@@ -3173,7 +3173,7 @@ function buildPlayerChar() {
   const spine = model.getObjectByName('Spine') || null;
   pc = {
     group: g, model, mixer, handR, handL, gunPivot, spine, spinePose: null,
-    actIdleLower, actWalkLower, actRunLower, upperReady, upperFire, upperRun,
+    actIdleLower, actWalkLower, actRunLower, upperReady, upperRun,
     actReload, actAim, actDeath, actAimUp, actAimDown,
     lowerAct: null, upperAct: null, upperShot: null, lowerSwT: 0, upperSwT: 0,
     aimBlend: 0, fireHold: 0, gunAim: 0, aimWorld: null, faceYaw: 0, curGun: null,
@@ -3334,13 +3334,12 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   if (moving && pc.lowerAct === pc.actWalkLower) pc.actWalkLower.timeScale = THREE.MathUtils.clamp(hSpeed / 1.0, 0.7, 1.7);
   else if (moving && pc.lowerAct === pc.actRunLower) pc.actRunLower.timeScale = THREE.MathUtils.clamp(hSpeed / 3.4, 0.9, 2.1);
 
-  // ── 상체 레이어: 질주=팔 / 조준·사격=견착(즉시) / 그 외=지향 대기. 재장전 원샷 중엔 건너뜀 ──
+  // ── 상체 레이어: 질주=팔 / 그 외=지향 대기(정면). 사격 구분은 몸 정렬+총열정렬+반동+피치로. 재장전 중엔 건너뜀 ──
   if (!pc.upperShot) {
-    const upperDesired = sprintingNow ? pc.upperRun : (combat ? pc.upperFire : pc.upperReady);
+    const upperDesired = sprintingNow ? pc.upperRun : pc.upperReady;
     if (upperDesired && upperDesired !== pc.upperAct) {
-      const fade = (upperDesired === pc.upperFire) ? 0.04 : 0.16; // 사격 자세 전환 즉시(#200)
-      if (pc.upperAct) pc.upperAct.fadeOut(fade);
-      upperDesired.reset().fadeIn(fade).play();
+      if (pc.upperAct) pc.upperAct.fadeOut(0.16);
+      upperDesired.reset().fadeIn(0.16).play();
       pc.upperAct = upperDesired;
     }
   }
