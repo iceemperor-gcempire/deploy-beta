@@ -653,7 +653,7 @@ async function loadAssets() {
       if (aimUpRaw) aimUp = THREE.AnimationUtils.makeClipAdditive(aimUpRaw.clone(), 0, aimNeutral);
       if (aimDownRaw) aimDown = THREE.AnimationUtils.makeClipAdditive(aimDownRaw.clone(), 0, aimNeutral);
     }
-    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown, walk: walkC, limp, alert, aim: aimPose, idleGun, readyGun };
+    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown, walk: walkC, limp, alert, aim: aimPose, aimNeutral, idleGun, readyGun };
   }
 
   buildViewmodel();
@@ -3145,17 +3145,30 @@ function buildPlayerChar() {
   //  상체 포즈는 **정면 기준(readyGun)** 만 사용 → 비틀린 aim 클립을 절대 override 하면 팔이 틀어져서(splay) 안 씀.
   //  항상 2레이어(전신 견착 모드 없음) → 조준/사격 중 이동해도 다리 로코모션, 전환 T자 깜박임 없음.
   const isLowerBone = (b) => /Skirt/i.test(b) || /^(Hips|Left(UpLeg|Leg|Foot|Toes)|Right(UpLeg|Leg|Foot|Toes)|J_Sec_[LR]_(Upper|Lower)Leg|J_Bip_[LR]_ToeBase_end)/.test(b);
-  const splitAct = (clip, keepLower) => {
+  const splitClip = (clip, keepLower) => {
     if (!clip) return null;
     const tr = clip.tracks.filter((t) => isLowerBone(t.name.split('.')[0]) === keepLower);
-    return tr.length ? mixer.clipAction(new THREE.AnimationClip(clip.name + (keepLower ? '_lo' : '_up'), clip.duration, tr)) : null;
+    return tr.length ? new THREE.AnimationClip(clip.name + (keepLower ? '_lo' : '_up'), clip.duration, tr) : null;
   };
+  const splitAct = (clip, keepLower) => { const c = splitClip(clip, keepLower); return c ? mixer.clipAction(c) : null; };
   const idleSrc = clips.idleGun || clips.idle;
   const actIdleLower = splitAct(idleSrc, true);   // Hips+다리
   const actWalkLower = splitAct(clips.walk, true) || splitAct(clips.run, true) || actIdleLower;
   const actRunLower  = splitAct(clips.run, true) || actWalkLower;
   const upperReady = splitAct(clips.readyGun, false) || splitAct(idleSrc, false);  // 지향 대기(몸통+팔, 정면)
   const upperRun   = splitAct(clips.run, false) || upperReady;                     // 질주 팔
+  // 어깨 견착 additive 상체 오프셋 (#202): 견착(aim) 상체를 aimNeutral 기준 델타로 만들어
+  // readyGun 위에 additive 로 얹음 — 비틀린 hips 베이스가 상쇄돼 splay 없이 견착 자세가 나옴.
+  let upperAimAdd = null;
+  {
+    const aimU = splitClip(clips.aim, false);
+    const ref = clips.aimNeutral || idleSrc;
+    if (aimU && ref) {
+      const add = THREE.AnimationUtils.makeClipAdditive(aimU.clone(), 0, ref);
+      upperAimAdd = mixer.clipAction(add);
+      upperAimAdd.play(); upperAimAdd.setEffectiveWeight(0);
+    }
+  }
   const actReload = (() => { const a = splitAct(clips.reload, false); if (a) { a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; } return a; })() || mkOnce(clips.reload);
   const actAim = clips.aim ? mixer.clipAction(clips.aim) : null; // 캘리브레이션용 전체 견착 클립
   const actDeath = mkOnce(clips.death);
@@ -3173,7 +3186,7 @@ function buildPlayerChar() {
   const spine = model.getObjectByName('Spine') || null;
   pc = {
     group: g, model, mixer, handR, handL, gunPivot, spine, spinePose: null,
-    actIdleLower, actWalkLower, actRunLower, upperReady, upperRun,
+    actIdleLower, actWalkLower, actRunLower, upperReady, upperRun, upperAimAdd,
     actReload, actAim, actDeath, actAimUp, actAimDown,
     lowerAct: null, upperAct: null, upperShot: null, lowerSwT: 0, upperSwT: 0,
     aimBlend: 0, fireHold: 0, gunAim: 0, aimWorld: null, faceYaw: 0, curGun: null,
@@ -3351,6 +3364,11 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   pc.fireHold = (pc.fireHold || 0) + (wantFire - (pc.fireHold || 0)) * Math.min(1, dt * (wantFire ? 14 : 6));
   const wantGunAim = combat ? 1 : 0;
   pc.gunAim = (pc.gunAim || 0) + (wantGunAim - (pc.gunAim || 0)) * Math.min(1, dt * 14);
+  // 어깨 견착 additive: 사격/조준(gunAim) 시 상체를 견착 자세로 (질주·재장전 제외) (#202)
+  if (pc.upperAimAdd) {
+    const shoulder = 0.85 * pc.gunAim * (pc.upperShot || sprintingNow ? 0 : 1);
+    pc.upperAimAdd.setEffectiveWeight(shoulder);
+  }
   // 상하 조준 additive (약하게) — 지향사격/조준 시에만
   const aimPitch = THREE.MathUtils.clamp(player.pitch, -0.6, 0.6);
   if (pc.actAimUp && pc.actAimDown) {
