@@ -3169,6 +3169,16 @@ function buildPlayerChar() {
       upperAimAdd.play(); upperAimAdd.setEffectiveWeight(0);
     }
   }
+  // 걷기 다리 additive (#205): 견착(전신 aim 클립) 위에 얹어 조준하며 걸어도 다리는 이동, 상체는 견착 유지
+  let lowerWalkAdd = null;
+  {
+    const walkLegs = splitClip(clips.walk, true) || splitClip(clips.run, true);
+    if (walkLegs) {
+      const add = THREE.AnimationUtils.makeClipAdditive(walkLegs.clone(), 0, walkLegs); // walk 사이클 − frame0 스탠스
+      lowerWalkAdd = mixer.clipAction(add);
+      lowerWalkAdd.play(); lowerWalkAdd.setEffectiveWeight(0);
+    }
+  }
   const actReload = (() => { const a = splitAct(clips.reload, false); if (a) { a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; } return a; })() || mkOnce(clips.reload);
   const actAim = clips.aim ? mixer.clipAction(clips.aim) : null; // 캘리브레이션용 전체 견착 클립
   const actDeath = mkOnce(clips.death);
@@ -3189,7 +3199,7 @@ function buildPlayerChar() {
   pc = {
     group: g, model, mixer, handR, handL, lArm, lFore, gunPivot, spine, spinePose: null,
     ikBlend: 0, leftGrip: new THREE.Vector3(),
-    actIdleLower, actWalkLower, actRunLower, upperReady, upperRun, upperAimAdd,
+    actIdleLower, actWalkLower, actRunLower, upperReady, upperRun, upperAimAdd, lowerWalkAdd,
     actReload, actAim, actDeath, actAimUp, actAimDown,
     lowerAct: null, upperAct: null, upperShot: null, lowerSwT: 0, upperSwT: 0,
     aimBlend: 0, fireHold: 0, gunAim: 0, aimWorld: null, faceYaw: 0, curGun: null,
@@ -3210,6 +3220,9 @@ function buildPlayerChar() {
   if (pc.upperReady) { pc.upperReady.reset().play(); pc.upperAct = pc.upperReady; }
   if (pc.actAimUp) { pc.actAimUp.reset().play(); pc.actAimUp.setEffectiveWeight(0); }
   if (pc.actAimDown) { pc.actAimDown.reset().play(); pc.actAimDown.setEffectiveWeight(0); }
+  // additive 액션들은 captureLeftGrip 의 stopAllAction 으로 멈췄으므로 재시작 (가중치 0) (#205)
+  if (pc.lowerWalkAdd) { pc.lowerWalkAdd.reset().play(); pc.lowerWalkAdd.setEffectiveWeight(0); }
+  if (pc.upperAimAdd) { pc.upperAimAdd.reset().play(); pc.upperAimAdd.setEffectiveWeight(0); }
   setPlayerGun(GUN.key);
 }
 
@@ -3311,6 +3324,11 @@ const _ikTgt = new THREE.Vector3(), _ikJp = new THREE.Vector3(), _ikEp = new THR
 const _ikToE = new THREE.Vector3(), _ikToT = new THREE.Vector3();
 const _ikBwq = new THREE.Quaternion(), _ikPwq = new THREE.Quaternion(), _ikDq = new THREE.Quaternion();
 const _ikU0 = new THREE.Quaternion(), _ikL0 = new THREE.Quaternion();
+const _ikGrip = new THREE.Vector3(), _ikBarrel = new THREE.Vector3(), _ikSh = new THREE.Vector3();
+const _ikD = new THREE.Vector3(), _ikA = new THREE.Vector3(), _ikB = new THREE.Vector3(), _ikC = new THREE.Vector3();
+// 왼손목을 총 기준으로 정렬(팔뚝 롤 상속 안 함) → 모든 자세에서 같은 그립. 정지 그립에서 실측 (#205)
+const GRIP_WRIST_OFFSET = new THREE.Quaternion(-0.8778, -0.15, 0.4536, -0.0348);
+const _gunWQ = new THREE.Quaternion(), _handWQ = new THREE.Quaternion(), _pwq2 = new THREE.Quaternion(), _handLQ = new THREE.Quaternion();
 function rotateBoneToward(bone, jointPos, target) {
   bone.getWorldPosition(_ikJp);
   pc.handL.getWorldPosition(_ikEp);
@@ -3329,8 +3347,23 @@ function updateLeftHandIK(dt) {
   pc.ikBlend = (pc.ikBlend || 0) + (wantIK - (pc.ikBlend || 0)) * Math.min(1, dt * 10);
   if (pc.ikBlend < 0.01) return;
   pc.gunPivot.updateWorldMatrix(true, false);
-  _ikTgt.copy(pc.leftGrip).applyMatrix4(pc.gunPivot.matrixWorld); // 총열덮개 월드 위치
   pc.lArm.updateWorldMatrix(true, true);               // 어깨~손 체인 월드 갱신
+  if (!pc.armReach) {                                   // 왼팔 리치 1회 캐시(본 길이 고정)
+    pc.lArm.getWorldPosition(_ikA); pc.lFore.getWorldPosition(_ikB); pc.handL.getWorldPosition(_ikC);
+    pc.armReach = _ikA.distanceTo(_ikB) + _ikB.distanceTo(_ikC);
+  }
+  // 총열 라인에서 왼팔이 닿는 가장 앞 지점으로 목표 클램프 — 리치 밖(팔 짧아 총 멀리)이면
+  // 그립쪽으로 당겨 손이 허공이 아니라 총에 닿게 (#204b). 견착(총 몸쪽)이면 총열덮개까지 닿음.
+  const M = pc.gunPivot.matrixWorld;
+  _ikGrip.set(0, pc.leftGrip.y, 0).applyMatrix4(M);    // 그립 지점(총열 라인 원점)
+  _ikBarrel.set(0, pc.leftGrip.y, 1).applyMatrix4(M).sub(_ikGrip).normalize(); // 총열 +Z 월드방향
+  pc.lArm.getWorldPosition(_ikSh);
+  _ikD.subVectors(_ikGrip, _ikSh);
+  const R = pc.armReach * 0.98;
+  const Bc = 2 * _ikD.dot(_ikBarrel), Cc = _ikD.lengthSq() - R * R, disc = Bc * Bc - 4 * Cc;
+  let t = pc.leftGrip.z;
+  if (disc >= 0) { const tr = (-Bc + Math.sqrt(disc)) / 2; if (tr < t) t = Math.max(0, tr); } else t = 0;
+  _ikTgt.copy(_ikGrip).addScaledVector(_ikBarrel, t); // 도달 가능한 총 위 지점
   _ikU0.copy(pc.lArm.quaternion); _ikL0.copy(pc.lFore.quaternion); // 애니 원본 (블렌드용)
   for (let i = 0; i < 3; i++) {                         // CCD: 팔뚝 → 어깨
     rotateBoneToward(pc.lFore, null, _ikTgt);
@@ -3343,9 +3376,13 @@ function updateLeftHandIK(dt) {
     pc.lFore.quaternion.copy(_ikL0).slerp(ikL, pc.ikBlend);
     pc.lArm.updateWorldMatrix(false, true);
   }
-  // 손목+손가락을 캡처한 그립 포즈로 (총 쥔 손 유지). ikBlend 로 블렌드(재장전 시 클립 복귀)
+  // 손목=총 기준 정렬(팔뚝 롤 무관 일관 그립) + 손가락=캡처 그립. ikBlend 로 블렌드(재장전 시 클립 복귀)
   if (pc.lGrip) {
-    pc.handL.quaternion.slerp(pc.lGrip.hand, pc.ikBlend);
+    pc.gunPivot.getWorldQuaternion(_gunWQ);
+    _handWQ.copy(_gunWQ).multiply(GRIP_WRIST_OFFSET);         // 목표 손목 월드회전
+    pc.handL.parent.getWorldQuaternion(_pwq2);
+    _handLQ.copy(_pwq2.invert().multiply(_handWQ));           // 로컬로 변환
+    pc.handL.quaternion.slerp(_handLQ, pc.ikBlend);
     for (const f of pc.lGrip.fingers) f.bone.quaternion.slerp(f.q, pc.ikBlend);
   }
 }
@@ -3402,9 +3439,9 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   pc.faceYaw += THREE.MathUtils.clamp(dy, -turn, turn);
   pc.group.rotation.y = pc.faceYaw;
 
-  // ── 견착 모드 (#203): 조준 + 정지 시 전신 aim 클립 = 제대로 된 견착 자세.
-  //    이동 중엔 레이어 방식(다리 이동 유지). additive 상체(#202)로는 총이 어깨로 안 올라와서 전환. ──
-  const wantFull = player.aiming && !moving && !pc.upperShot && !!pc.actAim;
+  // ── 견착 모드 (#203/#205): 조준 시 전신 aim 클립 = 제대로 된 견착. 걸으면 다리 additive 로 이동
+  //    (상체 견착 유지). 질주는 조준 중 불가(wantSprint 게이팅)라 조준하면 걷기까지만. ──
+  const wantFull = player.aiming && !sprintingNow && !pc.upperShot && !!pc.actAim;
   if (wantFull && !pc.aimFull) {
     pc.aimFull = true;
     for (const a of [pc.lowerAct, pc.upperAct, pc.upperAimAdd, pc.actAimUp, pc.actAimDown]) if (a) a.fadeOut(0.16);
@@ -3418,6 +3455,10 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
     if (pc.upperAimAdd) pc.upperAimAdd.setEffectiveWeight(0);
     if (pc.actAimUp) pc.actAimUp.setEffectiveWeight(0);
     if (pc.actAimDown) pc.actAimDown.setEffectiveWeight(0);
+    if (pc.lowerWalkAdd) { // 걸으면 다리 additive(견착 스탠스 위 걷기 스윙), 정지 시 0
+      pc.lowerWalkAdd.setEffectiveWeight(moving ? 1 : 0);
+      if (moving) pc.lowerWalkAdd.timeScale = THREE.MathUtils.clamp(hSpeed / 1.0, 0.7, 1.8);
+    }
     pc.actAim.setEffectiveWeight(1);
     pc.aimBlend += (1 - pc.aimBlend) * Math.min(1, dt * 6);
     pc.gunAim = (pc.gunAim || 0) + (1 - (pc.gunAim || 0)) * Math.min(1, dt * 14);
@@ -3432,6 +3473,7 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
     return;
   }
 
+  if (pc.lowerWalkAdd) pc.lowerWalkAdd.setEffectiveWeight(0); // 견착 모드 외엔 다리 additive 끔
   // ── 하체 레이어: 로코모션 (조준/사격/재장전 중에도 항상 다리 구동 → 조준 이동 시 다리 이동) ──
   const lowerDesired = !moving ? pc.actIdleLower : (jog ? pc.actRunLower : pc.actWalkLower);
   pc.lowerSwT = (lowerDesired === pc.lowerAct) ? 0 : pc.lowerSwT + dt;
