@@ -3179,13 +3179,16 @@ function buildPlayerChar() {
   // 총을 양손(오른손=그립, 왼손=총열) 사이에 배치 — 매 프레임 두 손 위치로 정렬 (#131)
   const handR = model.getObjectByName('RightHand');
   const handL = model.getObjectByName('LeftHand');
+  const lArm = model.getObjectByName('LeftArm');       // 왼팔 IK 체인 (#204)
+  const lFore = model.getObjectByName('LeftForeArm');
   const gunPivot = new THREE.Group();
   if (handR) { handR.add(gunPivot); gunPivot.scale.setScalar(1 / s); } // 오른손 본에 리지드 부착 (#150)
   else scene.add(gunPivot);
 
   const spine = model.getObjectByName('Spine') || null;
   pc = {
-    group: g, model, mixer, handR, handL, gunPivot, spine, spinePose: null,
+    group: g, model, mixer, handR, handL, lArm, lFore, gunPivot, spine, spinePose: null,
+    ikBlend: 0, leftGrip: new THREE.Vector3(),
     actIdleLower, actWalkLower, actRunLower, upperReady, upperRun, upperAimAdd,
     actReload, actAim, actDeath, actAimUp, actAimDown,
     lowerAct: null, upperAct: null, upperShot: null, lowerSwT: 0, upperSwT: 0,
@@ -3200,6 +3203,8 @@ function buildPlayerChar() {
   });
   // 총 로컬 회전 캘리브레이션: Aim 포즈에서 (오른손→왼손)=총열축 기준 1회 산출 (#150)
   pc.gunLocalQuat = calibrateGunLocal(model, mixer, actAim, handR, handL);
+  // 왼손 그립 포즈 캡처(손목+손가락 로컬 회전) — IK 로 손 위치만 옮기고 이 포즈로 총을 쥐게 함 (#204)
+  pc.lGrip = captureLeftGrip(mixer, clips.readyGun || clips.idleGun || clips.idle, handL);
   // 초기 자세: 하체 idle(다리) + 상체 지향 대기 + additive 피치 준비(가중치 0)
   if (pc.actIdleLower) { pc.actIdleLower.reset().play(); pc.lowerAct = pc.actIdleLower; }
   if (pc.upperReady) { pc.upperReady.reset().play(); pc.upperAct = pc.upperReady; }
@@ -3243,6 +3248,8 @@ function setPlayerGun(key) {
   m.position.z += size.z * 0.28;
   m.position.y += 0.02; // 손바닥 위에 얹히도록 살짝
   pc.gunLen = size.z;
+  // 왼손 IK 목표: gunPivot(그립) 로컬에서 총열덮개 지점 (+Z=총열 방향), 무기별 미세보정 (#204)
+  pc.leftGrip.set(0, -0.03, size.z * (w.tpsLeftGrip || 0.44));
   brightenMaterials(m, 3.2);
   m.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
   pc.gunPivot.add(m);
@@ -3283,6 +3290,64 @@ function updateGunHold() {
     pc.gunPivot.quaternion.slerp(_ghAimLocal, ab);      // mocap→조준 블렌드
   } else { pc.aimWorld = null; }
   if (pc.gunKick > 0.001) pc.gunPivot.rotateX(-pc.gunKick); // 반동 젖힘
+}
+
+// readyGun 포즈에서 왼손목+손가락 로컬 회전을 1회 캡처 → 어떤 자세에서도 총 쥔 손 유지 (#204)
+function captureLeftGrip(mixer, clip, handL) {
+  if (!clip || !handL) return null;
+  mixer.stopAllAction();
+  const a = mixer.clipAction(clip); a.reset().setEffectiveWeight(1).play(); a.time = 0;
+  mixer.update(0);
+  const hand = handL.quaternion.clone();
+  const fingers = [];
+  handL.traverse((o) => { if (o !== handL && /J_Bip_L_/.test(o.name)) fingers.push({ bone: o, q: o.quaternion.clone() }); });
+  a.stop(); mixer.stopAllAction();
+  return { hand, fingers };
+}
+
+// 왼손을 총열덮개로 끌어오는 2본 IK (CCD) — 총이 오른손에 고정돼 왼손이 클립대로 놀아
+// 탄창/총을 뚫는 문제 해결 (#204). 재장전 중엔 끔(왼손이 탄창으로 가야 함).
+const _ikTgt = new THREE.Vector3(), _ikJp = new THREE.Vector3(), _ikEp = new THREE.Vector3();
+const _ikToE = new THREE.Vector3(), _ikToT = new THREE.Vector3();
+const _ikBwq = new THREE.Quaternion(), _ikPwq = new THREE.Quaternion(), _ikDq = new THREE.Quaternion();
+const _ikU0 = new THREE.Quaternion(), _ikL0 = new THREE.Quaternion();
+function rotateBoneToward(bone, jointPos, target) {
+  bone.getWorldPosition(_ikJp);
+  pc.handL.getWorldPosition(_ikEp);
+  _ikToE.subVectors(_ikEp, _ikJp); _ikToT.subVectors(target, _ikJp);
+  if (_ikToE.lengthSq() < 1e-8 || _ikToT.lengthSq() < 1e-8) return;
+  _ikToE.normalize(); _ikToT.normalize();
+  _ikDq.setFromUnitVectors(_ikToE, _ikToT);             // 월드 회전: 현재 end방향 → 목표방향
+  bone.getWorldQuaternion(_ikBwq); _ikBwq.premultiply(_ikDq);
+  bone.parent.getWorldQuaternion(_ikPwq);
+  bone.quaternion.copy(_ikPwq.invert().multiply(_ikBwq));
+  bone.updateWorldMatrix(false, true);                  // 자식(팔뚝·손) 월드 갱신
+}
+function updateLeftHandIK(dt) {
+  if (!pc || !pc.lArm || !pc.lFore || !pc.handL || !pc.gunPivot || !pc.curGun) return;
+  const wantIK = pc.upperShot ? 0 : 1;                  // 재장전 중엔 끔
+  pc.ikBlend = (pc.ikBlend || 0) + (wantIK - (pc.ikBlend || 0)) * Math.min(1, dt * 10);
+  if (pc.ikBlend < 0.01) return;
+  pc.gunPivot.updateWorldMatrix(true, false);
+  _ikTgt.copy(pc.leftGrip).applyMatrix4(pc.gunPivot.matrixWorld); // 총열덮개 월드 위치
+  pc.lArm.updateWorldMatrix(true, true);               // 어깨~손 체인 월드 갱신
+  _ikU0.copy(pc.lArm.quaternion); _ikL0.copy(pc.lFore.quaternion); // 애니 원본 (블렌드용)
+  for (let i = 0; i < 3; i++) {                         // CCD: 팔뚝 → 어깨
+    rotateBoneToward(pc.lFore, null, _ikTgt);
+    rotateBoneToward(pc.lArm, null, _ikTgt);
+  }
+  // 애니 원본 ↔ IK 결과 블렌드 (재장전 전환 시 팝 방지)
+  if (pc.ikBlend < 0.999) {
+    const ikU = pc.lArm.quaternion.clone(), ikL = pc.lFore.quaternion.clone();
+    pc.lArm.quaternion.copy(_ikU0).slerp(ikU, pc.ikBlend);
+    pc.lFore.quaternion.copy(_ikL0).slerp(ikL, pc.ikBlend);
+    pc.lArm.updateWorldMatrix(false, true);
+  }
+  // 손목+손가락을 캡처한 그립 포즈로 (총 쥔 손 유지). ikBlend 로 블렌드(재장전 시 클립 복귀)
+  if (pc.lGrip) {
+    pc.handL.quaternion.slerp(pc.lGrip.hand, pc.ikBlend);
+    for (const f of pc.lGrip.fingers) f.bone.quaternion.slerp(f.q, pc.ikBlend);
+  }
 }
 
 // 재장전: 상체 레이어만 재장전 클립으로 교체 (하체는 현재 로코모션 유지) (#180)
@@ -3363,6 +3428,7 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
     if (pc.spine) { if (!pc.spinePose) pc.spinePose = pc.spine.quaternion.clone(); else pc.spinePose.copy(pc.spine.quaternion); }
     pc.gunKick = Math.max(0, (pc.gunKick || 0) - dt * 3.2);
     updateGunHold();
+    updateLeftHandIK(dt);
     return;
   }
 
@@ -3413,6 +3479,7 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   // 사격 반동 킥 감쇠 + 총을 두 손에 정렬 (반동은 updateGunHold 에서 적용) (#122/#131)
   pc.gunKick = Math.max(0, (pc.gunKick || 0) - dt * 3.2);
   updateGunHold();
+  updateLeftHandIK(dt);
 }
 
 // 3인칭 오버숄더 카메라 — 궤도 + 벽 충돌 당김 (#116)
