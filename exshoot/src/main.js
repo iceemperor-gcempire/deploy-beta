@@ -3337,6 +3337,35 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   pc.faceYaw += THREE.MathUtils.clamp(dy, -turn, turn);
   pc.group.rotation.y = pc.faceYaw;
 
+  // ── 견착 모드 (#203): 조준 + 정지 시 전신 aim 클립 = 제대로 된 견착 자세.
+  //    이동 중엔 레이어 방식(다리 이동 유지). additive 상체(#202)로는 총이 어깨로 안 올라와서 전환. ──
+  const wantFull = player.aiming && !moving && !pc.upperShot && !!pc.actAim;
+  if (wantFull && !pc.aimFull) {
+    pc.aimFull = true;
+    for (const a of [pc.lowerAct, pc.upperAct, pc.upperAimAdd, pc.actAimUp, pc.actAimDown]) if (a) a.fadeOut(0.16);
+    pc.lowerAct = null; pc.upperAct = null;
+    pc.actAim.reset().fadeIn(0.16).play();
+  } else if (!wantFull && pc.aimFull) {
+    pc.aimFull = false;
+    pc.actAim.fadeOut(0.16);
+  }
+  if (pc.aimFull) {
+    if (pc.upperAimAdd) pc.upperAimAdd.setEffectiveWeight(0);
+    if (pc.actAimUp) pc.actAimUp.setEffectiveWeight(0);
+    if (pc.actAimDown) pc.actAimDown.setEffectiveWeight(0);
+    pc.actAim.setEffectiveWeight(1);
+    pc.aimBlend += (1 - pc.aimBlend) * Math.min(1, dt * 6);
+    pc.gunAim = (pc.gunAim || 0) + (1 - (pc.gunAim || 0)) * Math.min(1, dt * 14);
+    const wf = pc.fireFaceT > 0 ? 1 : 0;
+    pc.fireHold = (pc.fireHold || 0) + (wf - (pc.fireHold || 0)) * Math.min(1, dt * (wf ? 14 : 6));
+    if (pc.spine && pc.spinePose) pc.spine.quaternion.copy(pc.spinePose);
+    pc.mixer.update(dt);
+    if (pc.spine) { if (!pc.spinePose) pc.spinePose = pc.spine.quaternion.clone(); else pc.spinePose.copy(pc.spine.quaternion); }
+    pc.gunKick = Math.max(0, (pc.gunKick || 0) - dt * 3.2);
+    updateGunHold();
+    return;
+  }
+
   // ── 하체 레이어: 로코모션 (조준/사격/재장전 중에도 항상 다리 구동 → 조준 이동 시 다리 이동) ──
   const lowerDesired = !moving ? pc.actIdleLower : (jog ? pc.actRunLower : pc.actWalkLower);
   pc.lowerSwT = (lowerDesired === pc.lowerAct) ? 0 : pc.lowerSwT + dt;
