@@ -14,12 +14,16 @@
 
   /* ---------- HUD ---------- */
   #hud { display: none; }
-  #crosshair {
-    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-    width: 4px; height: 4px; border-radius: 50%;
-    background: rgba(220, 235, 220, 0.9);
-    box-shadow: 0 0 3px rgba(0,0,0,0.8);
-  }
+  /* 동적 크로스헤어 (#207): 4방향 선의 간격(--gap)이 유효 탄퍼짐을 반영 */
+  #crosshair { position: absolute; left: 50%; top: 50%; width: 0; height: 0; --gap: 6px; }
+  #crosshair .ch-dot { position: absolute; left: -1.5px; top: -1.5px; width: 3px; height: 3px; border-radius: 50%; background: rgba(225,240,225,0.95); box-shadow: 0 0 2px rgba(0,0,0,0.9); }
+  #crosshair .ch-line { position: absolute; background: rgba(225,240,225,0.92); box-shadow: 0 0 2px rgba(0,0,0,0.85); }
+  #crosshair .ch-t, #crosshair .ch-b { width: 2px; height: 7px; left: -1px; }
+  #crosshair .ch-l, #crosshair .ch-r { height: 2px; width: 7px; top: -1px; }
+  #crosshair .ch-t { top: calc(-1 * (var(--gap) + 7px)); }
+  #crosshair .ch-b { top: var(--gap); }
+  #crosshair .ch-l { left: calc(-1 * (var(--gap) + 7px)); }
+  #crosshair .ch-r { left: var(--gap); }
   /* 스코프 조준 화면 (#104): 원형 렌즈 마스크 + 십자 레티클 */
   #scope-overlay {
     position: absolute; inset: 0; display: none; pointer-events: none;
@@ -428,7 +432,13 @@
   <div class="overlay" id="hud">
     <div id="damage-vignette"></div>
     <div id="lowhp-vignette"></div>
-    <div id="crosshair"></div>
+    <div id="crosshair">
+      <div class="ch-dot"></div>
+      <div class="ch-line ch-t"></div>
+      <div class="ch-line ch-b"></div>
+      <div class="ch-line ch-l"></div>
+      <div class="ch-line ch-r"></div>
+    </div>
     <div id="scope-overlay"></div>
     <div id="hitmarker"></div>
 
@@ -605,6 +615,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=db68e69"></script>
+  <script type="module" src="./src/main.js?v=247bacb"></script>
 </body>
 </html>

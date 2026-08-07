@@ -829,6 +829,7 @@ const player = {
   pos: new THREE.Vector3(),
   vel: new THREE.Vector3(),
   yaw: 0, pitch: 0,
+  recoilPitch: 0, recoilYaw: 0, // 반동 시점 오프셋 (사격 시 위로 튀고 회복) (#207)
   grounded: false,
   hp: PLAYER.maxHp,
   stamina: 100,
@@ -846,6 +847,8 @@ const gun = {
   reloading: 0,
   triggerDown: false,
   recoil: 0,
+  bloom: 0,             // 연사 누적 탄퍼짐 (사격 시 증가·정지 시 회복) → 크로스헤어에 반영 (#207)
+  spread: 0,            // 이번 프레임 유효 탄퍼짐 (탄도·크로스헤어 공통 소스)
   swayX: 0, swayY: 0,   // 시선 이동에 따른 뷰모델 끌림
   sprintBlend: 0,       // 0=조준 자세, 1=스프린트 내림 자세
   semiLatch: false,     // 단발 무기 클릭당 1발
@@ -3536,7 +3539,7 @@ let camAimBlend = 0;
 // 1인칭 카메라 — 눈 위치에서 yaw/pitch (#145)
 function updateFPSCamera() {
   player.pitch = THREE.MathUtils.clamp(player.pitch, -1.5, 1.5);
-  camera.rotation.set(player.pitch, player.yaw, 0);
+  camera.rotation.set(player.pitch + player.recoilPitch, player.yaw + player.recoilYaw, 0); // 반동 오프셋 (#207)
   camera.position.set(player.pos.x, player.pos.y + PLAYER.eye, player.pos.z);
 }
 
@@ -3546,8 +3549,8 @@ function updateTPSCamera(dt) {
   const dist = THREE.MathUtils.lerp(CAM.dist, CAM.distAim, camAimBlend);
   const shoulder = THREE.MathUtils.lerp(CAM.shoulder, CAM.shoulderAim, camAimBlend);
 
-  // 카메라 방향은 FPS 와 동일(yaw/pitch) → 화면중앙=시선 유지
-  camera.rotation.set(player.pitch, player.yaw, 0);
+  // 카메라 방향은 FPS 와 동일(yaw/pitch) → 화면중앙=시선 유지. 반동 오프셋 포함 (#207)
+  camera.rotation.set(player.pitch + player.recoilPitch, player.yaw + player.recoilYaw, 0);
   const camFwd = new THREE.Vector3();
   camera.getWorldDirection(camFwd);
   const camRight = new THREE.Vector3().crossVectors(camFwd, WORLD_UP).normalize();
@@ -3656,6 +3659,20 @@ const GUN_ADS = new THREE.Vector3(0, -0.126, -0.66);
 function updateGun(dt) {
   gun.cooldown = Math.max(0, gun.cooldown - dt);
 
+  // 유효 탄퍼짐 (탄도·크로스헤어 공통 소스) + 반동/블룸 회복 (#207)
+  {
+    const hSpeed = Math.hypot(player.vel.x, player.vel.z);
+    const base = player.aiming ? GUN.spreadAds : GUN.spreadHip;
+    const moveS = Math.min(1, hSpeed / 8) * GUN.spreadMove * (currentAtt.includes('grip') ? 0.5 : 1);
+    gun.spread = base + moveS + gun.bloom * 0.02;
+    gun.bloom = Math.max(0, gun.bloom - dt * 2.4); // 연사 멈추면 탄퍼짐 회복
+    // 반동 시점 회복: 사격 중엔 느리게(누적/상승), 정지 시 빠르게 원위치
+    const firing = gun.triggerDown && gun.mag > 0 && gun.reloading <= 0 && gun.raiseT <= 0;
+    const rr = firing ? 5 : 11;
+    player.recoilPitch -= player.recoilPitch * Math.min(1, dt * rr);
+    player.recoilYaw -= player.recoilYaw * Math.min(1, dt * rr);
+  }
+
   // 재장전
   if (gun.reloading > 0) {
     gun.reloading -= dt;
@@ -3727,8 +3744,12 @@ function fireShot() {
   const gripK = currentAtt.includes('grip') ? 0.6 : 1;
   gun.recoil = Math.min(1.6, gun.recoil + GUN.recoil * gripK);
   gun.semiLatch = true; // 단발 무기는 클릭당 1발
-  player.pitch += GUN.kick * gripK + Math.random() * 0.004;
-  player.yaw += (Math.random() - 0.5) * 0.004;
+  // 반동 (#207): 시점이 위로 튀고(수직) 좌우로 랜덤(수평). 연사로 bloom 쌓일수록 강해짐.
+  //  player.pitch 를 직접 안 건드리고 recoilPitch 오프셋에 누적 → 사격 정지 시 회복(아래 updateGun).
+  const rk = 1 + gun.bloom * 0.7;
+  player.recoilPitch = Math.min(0.6, player.recoilPitch + GUN.kick * gripK * 3.0 * rk);
+  player.recoilYaw += (Math.random() - 0.5) * GUN.recoil * 0.018 * gripK;
+  gun.bloom = Math.min(1.5, gun.bloom + (0.13 + GUN.recoil * 0.07) * gripK); // 연사 탄퍼짐 누적
   sfx.shoot();
   if (pc) { pc.gunKick = Math.min(0.5, (pc.gunKick || 0) + 0.2); pc.fireFaceT = 0.4; } // 총 반동 킥 + 사격 중 몸 정렬 (#122)
   muzzleFlashLight.intensity = currentAtt.includes('silencer') ? 10 : 40;
@@ -3761,10 +3782,8 @@ function fireShot() {
   const _camRight = new THREE.Vector3().crossVectors(camDir, WORLD_UP).normalize();
   const tracerStart = muzzle.clone().addScaledVector(_camRight, -muzzle.clone().sub(camera.position).dot(_camRight));
 
-  // 탄퍼짐
-  const hSpeed = Math.hypot(player.vel.x, player.vel.z);
-  let spread = player.aiming ? GUN.spreadAds : GUN.spreadHip;
-  spread += Math.min(1, hSpeed / 8) * GUN.spreadMove * (currentAtt.includes('grip') ? 0.5 : 1);
+  // 탄퍼짐: updateGun 에서 매 프레임 계산한 유효 탄퍼짐(기본+이동+bloom) = 크로스헤어와 동일 소스 (#207)
+  const spread = gun.spread || (player.aiming ? GUN.spreadAds : GUN.spreadHip);
 
   let anyHit = false;
   for (let p = 0; p < GUN.pellets; p++) {
@@ -4626,6 +4645,7 @@ function startRaid(mapKey) {
   player.vel.set(0, 0, 0);
   player.yaw = Math.atan2(spawn.x, spawn.z); // 맵 중앙(0,0)을 바라보게
   player.pitch = 0;
+  player.recoilPitch = 0; player.recoilYaw = 0; gun.bloom = 0; gun.recoil = 0; // 반동 상태 초기화 (#207)
   if (pc) { // 3인칭 캐릭터 초기 정렬 (#116)
     pc.faceYaw = Math.atan2(-Math.sin(player.yaw), -Math.cos(player.yaw));
     pc.group.rotation.y = pc.faceYaw;
@@ -5131,8 +5151,13 @@ document.addEventListener('keyup', (e) => {
 // HUD 갱신
 // ============================================================
 function updateHUD() {
-  // ADS 중엔 가늠자(또는 스코프 오버레이 레티클)로 조준 — 크로스헤어 숨김
-  document.getElementById('crosshair').style.display = scopeShown ? 'none' : 'block';
+  // 동적 크로스헤어 (#207): 스코프 조준 시 숨김. 그 외엔 유효 탄퍼짐(gun.spread)을 간격으로 반영.
+  {
+    const ch = document.getElementById('crosshair');
+    const show = !scopeShown && state.phase === 'raid';
+    ch.style.display = show ? 'block' : 'none';
+    if (show) ch.style.setProperty('--gap', (3 + (gun.spread || 0) * 620).toFixed(1) + 'px');
+  }
   // 저체력 치료 힌트 (#110): useHeal 과 같은 우선순위(붕대 먼저)로 다음 사용 아이템 안내
   {
     const low = player.hp < 45 && player.hp > 0 && state.phase === 'raid';
