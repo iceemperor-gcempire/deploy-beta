@@ -3820,6 +3820,10 @@ function fireShot() {
           p.body.applyImpulse({ x: dir.x * 5 * m, y: 1.5 * m, z: dir.z * 5 * m }, true);
           p.body.applyTorqueImpulse({ x: (Math.random() - 0.5) * m, y: (Math.random() - 0.5) * m, z: (Math.random() - 0.5) * m }, true);
         }
+      } else if (h.face) {
+        // 환경(벽·바닥·정적 소품) 명중 → 탄흔 데칼 (#208)
+        _decalN.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize();
+        spawnDecal(h.point, _decalN);
       }
     }
     // 트레이서는 스코프 무기(스코프 부착·저격총)에서만 — 일반 사격은 총구 시작점이 반동·총열정렬로
@@ -3846,6 +3850,43 @@ function spawnTracer(from, to, color) {
   const line = new THREE.Line(geo, mat);
   scene.add(line);
   tracers.push({ line, life: 0.07 });
+}
+
+// 탄흔 데칼 (#208): 벽·바닥 명중 시 총알구멍. 링버퍼 최대 DECAL_MAX 개(오래된 것부터 재활용)
+//  → 유저가 탄 튀는(반동·탄퍼짐) 패턴을 눈으로 인식.
+let decals = [];
+const DECAL_MAX = 100;
+let _decalGeo = null, _decalMat = null;
+const _decalUp = new THREE.Vector3(0, 0, 1), _decalN = new THREE.Vector3();
+function bulletHoleTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  let rad = g.createRadialGradient(32, 32, 2, 32, 32, 30); // 바깥 먼지 링
+  rad.addColorStop(0, 'rgba(8,6,5,0.95)');
+  rad.addColorStop(0.42, 'rgba(22,18,14,0.7)');
+  rad.addColorStop(0.72, 'rgba(70,64,58,0.22)');
+  rad.addColorStop(1, 'rgba(90,84,78,0)');
+  g.fillStyle = rad; g.beginPath(); g.arc(32, 32, 30, 0, Math.PI * 2); g.fill();
+  g.fillStyle = 'rgba(0,0,0,0.95)'; g.beginPath(); g.arc(32, 32, 6.5, 0, Math.PI * 2); g.fill(); // 중앙 구멍
+  g.strokeStyle = 'rgba(12,10,8,0.55)'; g.lineWidth = 1.1; // 방사형 균열
+  for (let i = 0; i < 7; i++) { const a = (i / 7) * Math.PI * 2 + Math.random(), r = 9 + Math.random() * 16; g.beginPath(); g.moveTo(32, 32); g.lineTo(32 + Math.cos(a) * r, 32 + Math.sin(a) * r); g.stroke(); }
+  const t = new THREE.CanvasTexture(c); t.needsUpdate = true; return t;
+}
+function spawnDecal(point, normal) {
+  if (!_decalGeo) {
+    _decalGeo = new THREE.PlaneGeometry(1, 1);
+    _decalMat = new THREE.MeshBasicMaterial({ map: bulletHoleTexture(), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
+  }
+  const m = new THREE.Mesh(_decalGeo, _decalMat);
+  const s = 0.07 + Math.random() * 0.05;
+  m.scale.set(s, s, s);
+  m.quaternion.setFromUnitVectors(_decalUp, normal); // 면 법선에 정렬
+  m.rotateZ(Math.random() * Math.PI * 2);            // 회전 다양성
+  m.position.copy(point).addScaledVector(normal, 0.012); // z-fighting 방지 살짝 띄움
+  m.renderOrder = 3; m.frustumCulled = false;
+  scene.add(m);
+  decals.push(m);
+  if (decals.length > DECAL_MAX) scene.remove(decals.shift());
 }
 
 // ============================================================
@@ -4630,6 +4671,8 @@ function clearRaidObjects() {
   if (airdropBeacon) { scene.remove(airdropBeacon.beam); scene.remove(airdropBeacon.ring); scene.remove(airdropBeacon.light); airdropBeacon = null; } // (#197)
   for (const t of tracers) scene.remove(t.line);
   tracers = [];
+  for (const d of decals) scene.remove(d); // 탄흔 데칼 정리 (#208)
+  decals = [];
   for (const c of corpses) scene.remove(c);
   corpses = [];
   clearPhysics(); // 물리 소품/래그돌 정리 (#119)
