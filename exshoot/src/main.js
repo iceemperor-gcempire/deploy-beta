@@ -2842,6 +2842,12 @@ function makeExtractBeacon(pos, color) {
   return { beam, ring, light };
 }
 function setupExtractions(spawnPos) {
+  if (state.range) { // 연습장: 퇴장 지점 1곳(짧은 유지), 유료 탈출 없음 (#209)
+    for (const cand of EXTRACT_CANDIDATES) {
+      extractions.push({ name: cand.name, pos: cand.pos.clone(), ...makeExtractBeacon(cand.pos, 0x51ff7a), progress: 0, hold: 1.5 });
+    }
+    return;
+  }
   // 무료 탈출: 스폰에서 먼 가장자리 2곳 (안전하지만 멀다)
   const sorted = [...EXTRACT_CANDIDATES].sort(
     (a, b) => b.pos.distanceTo(spawnPos) - a.pos.distanceTo(spawnPos));
@@ -4646,28 +4652,32 @@ function addTargetBoard(x, z, dist) {
   const label = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 0.58), new THREE.MeshBasicMaterial({ map: rangeLabelTexture(dist + ' m'), transparent: true }));
   label.position.set(x, 3.05, z); scene.add(label);
 }
+const RANGE_FIRE_Z = 58, RANGE_EXIT_Z = 68; // 사격선(스폰) / 퇴장 지점(스폰 10m 뒤, 반경5 밖)
 function buildRangeMap() {
   buildTexMats();
   scene.fog = new THREE.Fog(0xb0b6bd, 90, 280);
   buildGroundTiles(0x9aa0a6); // 콘크리트 회색
-  const backZ = -46, frontZ = 66, hx = 16, midZ = (backZ + frontZ) / 2, lz = frontZ - backZ;
+  const backZ = -48, frontZ = 74, hx = 16, midZ = (backZ + frontZ) / 2, lz = frontZ - backZ;
   addBox(0, 4.5, backZ, hx * 2, 9, 1, 'concrete', { shadow: false });   // 후벽 = 스프레이 받이
-  addBox(0, 3, frontZ, hx * 2, 6, 1, 'concrete', { shadow: false });    // 사수 뒤 벽
+  addBox(0, 3, frontZ, hx * 2, 6, 1, 'concrete', { shadow: false });    // 사수 뒤 벽(퇴장보다 뒤)
   addBox(-hx, 3, midZ, 1, 6, lz, 'concrete', { shadow: false });        // 측벽
   addBox(hx, 3, midZ, 1, 6, lz, 'concrete', { shadow: false });
-  addBox(0, 0.12, 60, hx * 2 - 3, 0.24, 0.4, 'metal', { collide: false }); // 사격선 턱
+  addBox(0, 0.12, RANGE_FIRE_Z - 1.5, hx * 2 - 3, 0.24, 0.4, 'metal', { collide: false }); // 사격선 턱
   const dists = [10, 25, 50, 100], spots = [-7, -2.3, 2.3, 7];          // 좌우 스태거(가림 방지)
-  dists.forEach((d, i) => { const z = 60 - d; if (z > backZ + 1.5) addTargetBoard(spots[i], z, d); });
+  dists.forEach((d, i) => { const z = RANGE_FIRE_Z - d; if (z > backZ + 1.5) addTargetBoard(spots[i], z, d); });
+  // 퇴장 안내판 (뒤돌면 보이게 -z 향함)
+  const exitLbl = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 0.9), new THREE.MeshBasicMaterial({ map: rangeLabelTexture('🚪 퇴장'), transparent: true }));
+  exitLbl.position.set(0, 2.9, RANGE_EXIT_Z); exitLbl.rotation.y = Math.PI; scene.add(exitLbl);
   losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile);
 }
 const MAP_RANGE = {
   key: 'range', name: '🎯 사격 연습장', desc: '적 없음 · 무한 탄약 · 전 무기. 반동/탄퍼짐/탄착군 연습 (10~100m 표적 + 후벽)',
   range: true,
   build: buildRangeMap,
-  flattens: [{ x: 0, z: 8, hw: 20, hd: 64 }],
+  flattens: [{ x: 0, z: 12, hw: 20, hd: 66 }],
   lootSpots: [],
-  extract: [{ name: '퇴장', pos: new THREE.Vector3(0, 0, 71) }],
-  spawns: [new THREE.Vector3(0, 0, 62)],
+  extract: [{ name: '퇴장', pos: new THREE.Vector3(0, 0, RANGE_EXIT_Z) }],
+  spawns: [new THREE.Vector3(0, 0, RANGE_FIRE_Z)],
   barrels: [],
 };
 
@@ -4849,6 +4859,17 @@ function endRaid(result, cause) {
   dom.hud.style.display = 'none';
   gun.triggerDown = false;
   if (pc) { pc.group.visible = false; if (pc.gunPivot) pc.gunPivot.visible = false; } // 3인칭 캐릭터/총 숨김 (#116)
+
+  if (state.range) { // 연습장 퇴장: 통계·인벤토리 반영 없이 곧장 메뉴로 (#209)
+    state.range = false;
+    state.phase = 'menu';
+    state.paused = false;
+    dom.death.style.display = 'none';
+    dom.extract.style.display = 'none';
+    dom.menu.style.display = 'flex';
+    updateMenuStash();
+    return;
+  }
 
   const stash = loadStash();
   stash.raids = (stash.raids || 0) + 1;
