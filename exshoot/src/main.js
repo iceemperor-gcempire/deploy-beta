@@ -3666,6 +3666,7 @@ function updateGun(dt) {
     const moveS = Math.min(1, hSpeed / 8) * GUN.spreadMove * (currentAtt.includes('grip') ? 0.5 : 1);
     gun.spread = base + moveS + gun.bloom * 0.02;
     gun.bloom = Math.max(0, gun.bloom - dt * 2.4); // 연사 멈추면 탄퍼짐 회복
+    if (state.range) gun.reserve = Math.max(gun.reserve, 900); // 연습장 무한 탄약 유지 (#209)
     // 반동 시점 회복: 사격 중엔 느리게(누적/상승), 정지 시 빠르게 원위치
     const firing = gun.triggerDown && gun.mag > 0 && gun.reloading <= 0 && gun.raiseT <= 0;
     const rr = firing ? 5 : 11;
@@ -4621,6 +4622,55 @@ const MAP_URBAN = {
   ],
 };
 
+// ── 사격 연습장 (#209): 반동·탄퍼짐·탄착군 연습. 적 없음·무한탄약·전 무기, 거리별 표적 + 후벽 ──
+function rangeBullseyeTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = '#f4f0e6'; g.fillRect(0, 0, 128, 128);
+  for (const [r, col] of [[60, '#1c1c1c'], [50, '#2b6cc0'], [40, '#c8302e'], [30, '#f0f0f0'], [20, '#c8302e'], [10, '#ffcf3a']]) { g.fillStyle = col; g.beginPath(); g.arc(64, 64, r, 0, Math.PI * 2); g.fill(); }
+  const t = new THREE.CanvasTexture(c); t.needsUpdate = true; return t;
+}
+function rangeLabelTexture(text) {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 88;
+  const g = c.getContext('2d');
+  g.fillStyle = 'rgba(14,20,14,0.82)'; g.fillRect(0, 0, 256, 88);
+  g.fillStyle = '#eaf2df'; g.font = 'bold 56px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, 128, 48);
+  const t = new THREE.CanvasTexture(c); t.needsUpdate = true; return t;
+}
+function addTargetBoard(x, z, dist) {
+  const board = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 1.9), new THREE.MeshLambertMaterial({ map: rangeBullseyeTexture() }));
+  board.position.set(x, 1.55, z); board.receiveShadow = true; // 기본 plane 법선 +z = 사수쪽
+  scene.add(board); obstacleMeshes.push(board); // 탄 맞음 → 데칼로 탄착군 표시
+  addBox(x, 0.78, z + 0.03, 0.12, 1.55, 0.12, 'metal', { collide: false }); // 지지대
+  const label = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 0.58), new THREE.MeshBasicMaterial({ map: rangeLabelTexture(dist + ' m'), transparent: true }));
+  label.position.set(x, 3.05, z); scene.add(label);
+}
+function buildRangeMap() {
+  buildTexMats();
+  scene.fog = new THREE.Fog(0xb0b6bd, 90, 280);
+  buildGroundTiles(0x9aa0a6); // 콘크리트 회색
+  const backZ = -46, frontZ = 66, hx = 16, midZ = (backZ + frontZ) / 2, lz = frontZ - backZ;
+  addBox(0, 4.5, backZ, hx * 2, 9, 1, 'concrete', { shadow: false });   // 후벽 = 스프레이 받이
+  addBox(0, 3, frontZ, hx * 2, 6, 1, 'concrete', { shadow: false });    // 사수 뒤 벽
+  addBox(-hx, 3, midZ, 1, 6, lz, 'concrete', { shadow: false });        // 측벽
+  addBox(hx, 3, midZ, 1, 6, lz, 'concrete', { shadow: false });
+  addBox(0, 0.12, 60, hx * 2 - 3, 0.24, 0.4, 'metal', { collide: false }); // 사격선 턱
+  const dists = [10, 25, 50, 100], spots = [-7, -2.3, 2.3, 7];          // 좌우 스태거(가림 방지)
+  dists.forEach((d, i) => { const z = 60 - d; if (z > backZ + 1.5) addTargetBoard(spots[i], z, d); });
+  losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile);
+}
+const MAP_RANGE = {
+  key: 'range', name: '🎯 사격 연습장', desc: '적 없음 · 무한 탄약 · 전 무기. 반동/탄퍼짐/탄착군 연습 (10~100m 표적 + 후벽)',
+  range: true,
+  build: buildRangeMap,
+  flattens: [{ x: 0, z: 8, hw: 20, hd: 64 }],
+  lootSpots: [],
+  extract: [{ name: '퇴장', pos: new THREE.Vector3(0, 0, 71) }],
+  spawns: [new THREE.Vector3(0, 0, 62)],
+  barrels: [],
+};
+
 // ── 맵 레지스트리 (#165) ──────────────────────────────────
 // 산업지대 데이터 스냅샷 (지금 FLATTENS/LOOT_SPOTS 등은 산업지대 값 — applyMap 이 active 를 교체)
 const MAP_INDUSTRIAL = {
@@ -4629,7 +4679,7 @@ const MAP_INDUSTRIAL = {
   flattens: FLATTENS, lootSpots: LOOT_SPOTS, extract: EXTRACT_CANDIDATES,
   spawns: SPAWN_POINTS, barrels: PHYS_BARRELS,
 };
-const MAPS = { industrial: MAP_INDUSTRIAL, school: MAP_SCHOOL, urban: MAP_URBAN };
+const MAPS = { industrial: MAP_INDUSTRIAL, school: MAP_SCHOOL, urban: MAP_URBAN, range: MAP_RANGE };
 let currentMapKey = 'industrial';
 let builtMapKey = null;
 let staticObjects = []; // 현재 정적 맵이 scene 에 추가한 최상위 오브젝트 (맵 전환 시 제거)
@@ -4682,6 +4732,8 @@ function startRaid(mapKey) {
   if (!assetsReady) return;
   clearRaidObjects();
   applyMap(mapKey || currentMapKey); // 선택 맵 구성 (전환 시 이전 맵 teardown)
+  const isRange = !!(MAPS[currentMapKey] && MAPS[currentMapKey].range); // 사격 연습장 모드 (#209)
+  state.range = isRange;
 
   const spawn = SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)];
   player.pos.copy(spawn);
@@ -4710,9 +4762,9 @@ function startRaid(mapKey) {
   // 로드아웃 반입 무기 (#189): 선택된 것만 반입(미설정 시 소지 전량), 최소 1정 보장
   let lw = Array.isArray(stash0.loadoutW) ? stash0.loadoutW.filter((k) => owned0.includes(k)) : owned0.slice();
   if (!lw.length) lw = [owned0.includes('rifle') ? 'rifle' : (owned0[0] || 'rifle')];
-  carry = lw;
+  carry = isRange ? Object.keys(WEAPONS) : lw; // 연습장은 전 무기 반입 (#209)
   for (const k of Object.keys(weaponAmmo)) delete weaponAmmo[k];
-  for (const k of carry) { const ew = effectiveWeapon(k); weaponAmmo[k] = { mag: ew.magSize, reserve: ew.reserveMax }; }
+  for (const k of carry) { const ew = effectiveWeapon(k); weaponAmmo[k] = { mag: ew.magSize, reserve: isRange ? 9990 : ew.reserveMax }; } // 연습장 무한 탄약
   const eq = stash0.equipped && carry.includes(stash0.equipped) ? stash0.equipped : carry[0];
   equipWeapon(eq, false); // mag/reserve/reload 리셋 포함
   gun.triggerDown = false;
@@ -4749,16 +4801,18 @@ function startRaid(mapKey) {
   const lk = stash0.loadoutKeys; // keyId 배열(undefined = 전량)
   for (const key of ownedKeys) if (lk === undefined || lk.includes(key.keyId)) broughtKeys.add(key.keyId);
   state.kills = 0;
-  state.raidTime = RAID_SECONDS;
+  state.raidTime = isRange ? 999999 : RAID_SECONDS; // 연습장은 시간 제한 없음 (#209)
   state.phase = 'raid';
   state.paused = false;
   pendingExtractFee = 0;
   state.airdropDone = false;
   state.airdropAt = RAID_SECONDS - (90 + Math.random() * 150); // 1.5~4분 경과 시 보급 투하 (#197)
 
-  spawnLoot();
-  spawnPhysProps(); // 동적 물리 배럴/폭발통 (#119)
-  spawnEnemies(spawn);
+  if (!isRange) { // 연습장은 적·루팅·물리통 없음 (#209)
+    spawnLoot();
+    spawnPhysProps(); // 동적 물리 배럴/폭발통 (#119)
+    spawnEnemies(spawn);
+  } else { state.airdropDone = true; }
   setupExtractions(spawn);
   setupCompass();
   refreshInventoryUI();
@@ -5231,8 +5285,8 @@ function updateHUD() {
     const show = carry.length >= 2 ? 'flex' : 'none';
     if (tb.style.display !== show) tb.style.display = show;
   }
-  dom.raidTimer.textContent = fmtTime(state.raidTime);
-  dom.raidTimer.style.color = state.raidTime < 60 ? '#d94f3d' : '#e8eee6';
+  dom.raidTimer.textContent = state.range ? '🎯 사격 연습장' : fmtTime(state.raidTime); // 연습장은 타이머 대신 라벨 (#209)
+  dom.raidTimer.style.color = (!state.range && state.raidTime < 60) ? '#d94f3d' : '#e8eee6';
   dom.kills.textContent = `사살 ${state.kills}`;
   dom.lowhpVignette.style.opacity = player.hp < 40 ? `${(1 - player.hp / 40) * 0.85}` : '0';
 
