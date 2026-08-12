@@ -451,6 +451,10 @@ const GLB_MANIFEST = {
   treePineB: 'assets/env/nature/tree_pineDefaultB.glb',
   treeOak: 'assets/env/nature/tree_default.glb',
   rock: 'assets/env/nature/rock_largeA.glb',
+  // Poly Haven photoscan 리얼 바위 (CC0) — gltf-transform decimate(simplify 0.35 + 512tex + draco) (#211)
+  rockRealA: 'assets/env/nature/rock_real_a.glb', // stone_01 (히어로 대형)
+  rockRealB: 'assets/env/nature/rock_real_b.glb', // rock_07 (중형)
+  rockRealC: 'assets/env/nature/rock_real_c.glb', // rock_09 (소형 각진)
   // Quaternius Ultimate Stylized Nature (CC0) — Blender 로 변형별 개별 GLB 분리 (#165, split_nature.py)
   buildingB: 'assets/env/industrial/building-b.glb',
   buildingF: 'assets/env/industrial/building-f.glb',
@@ -1947,9 +1951,12 @@ function buildIndustrialMap() {
     placeTree(kind, x, z, 6 + Math.random() * 3.5);
   }
 
-  // 바위
-  const rocks = [[-15, 62], [55, -68], [-72, -15], [35, 12]];
-  for (const [x, z] of rocks) placeModel('rock', x, z, { height: 1.4 + Math.random(), rotY: Math.random() * Math.PI * 2 });
+  // 바위 (Poly Haven photoscan 리얼 — 히어로 대형 + 중/소형 변주로 실루엣) #211
+  const rocks = [
+    ['rockRealA', -15, 62, 2.8], ['rockRealB', 55, -68, 1.7],
+    ['rockRealC', -72, -15, 1.3], ['rockRealB', 35, 12, 1.9],
+  ];
+  for (const [key, x, z, h] of rocks) placeModel(key, x, z, { height: h + Math.random() * 0.5, rotY: Math.random() * Math.PI * 2 });
 
   // 나무상자 엄폐물 (Kenney survival-kit / blaster-kit)
   const boxes = [[3, -30], [-18, -10], [22, 5], [48, 30], [-52, -12], [10, 48], [-38, 22], [58, -25]];
