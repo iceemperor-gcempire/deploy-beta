@@ -1802,6 +1802,80 @@ function addHouse(hx, hz, { wall = 'brick' } = {}) {
   addBox(hx - 1.65, 0.75, hz - 1.2, 0.08, 0.66, 0.7, MAT.woodDark, { block: false });
 }
 
+// ── 산업 창고 (#212 Phase 2): kit-of-parts 절차 모듈러 (modular-game-architecture 스킬) ──
+// 콘크리트 플린스 + 골강판 벽 + 필라스터(수직 리듬) + 롤셔터 대형문 + 고측창(clerestory) +
+// 평지붕 + 파라펫(실루엣) + 옥상 환기구/배기관(그리블). 솔리드 셸(랜드마크 — 랜드마크 GLB 대체).
+function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutterH = 4.6 } = {}) {
+  const t = 0.35, plinth = 1.2, gy = terrainH(cx, cz);
+  const wallMat = 'corrugated', baseMat = 'concrete';
+  const fSign = front === 'north' ? 1 : -1;          // north=+z
+  const fz = cz + fSign * d / 2;                       // 정면(셔터) z
+  const bz = cz - fSign * d / 2;                       // 후면(고측창) z
+
+  // 접지 콘크리트 패드
+  addBox(cx, gy + 0.06, cz, w + 1.0, 0.12, d + 1.0, MAT.concreteDark, { collide: false, block: false, shadow: false });
+
+  // 플린스+골강판 벽 세그먼트 헬퍼 (x벽/z벽)
+  const wallSeg = (ax, x, z, s0, s1) => {
+    const sl = s1 - s0; if (sl < 0.15) return;
+    const mid = (s0 + s1) / 2;
+    if (ax === 'x') {
+      addBox(x + mid, gy + plinth / 2, z, sl, plinth, t, baseMat);
+      addBox(x + mid, gy + plinth + (h - plinth) / 2, z, sl, h - plinth, t, wallMat);
+    } else {
+      addBox(x, gy + plinth / 2, z + mid, t, plinth, sl, baseMat);
+      addBox(x, gy + plinth + (h - plinth) / 2, z + mid, t, h - plinth, sl, wallMat);
+    }
+  };
+
+  // 측벽 2개 (동/서, 길이 d) — 통짜
+  wallSeg('z', cx - w / 2, cz, -d / 2, d / 2);
+  wallSeg('z', cx + w / 2, cz, -d / 2, d / 2);
+  // 후면 벽 (고측창 아래까지 통짜; 창은 시각 오버레이)
+  wallSeg('x', cx, bz, -w / 2, w / 2);
+  // 정면 벽 = 셔터 좌우 세그먼트 + 셔터 상단 헤더 + 셔터 패널
+  wallSeg('x', cx, fz, -w / 2, -shutterW / 2);
+  wallSeg('x', cx, fz, shutterW / 2, w / 2);
+  addBox(cx, gy + shutterH + (h - shutterH) / 2, fz, shutterW, h - shutterH, t, wallMat); // 헤더
+  // 롤셔터 패널 (금속 리브) — 닫힌 문(차폐+충돌)
+  addBox(cx, gy + shutterH / 2, fz, shutterW - 0.2, shutterH, t, MAT.metalBlue);
+  for (let sy = 0.28; sy < shutterH; sy += 0.34)
+    addBox(cx, gy + sy, fz + fSign * 0.19, shutterW - 0.3, 0.09, 0.06, MAT.concreteDark, { collide: false, block: false, shadow: false });
+
+  // 필라스터 (측벽 수직 콘크리트 리브, ~4.5m 간격, 0.18m 돌출)
+  const nPil = Math.max(2, Math.round(d / 4.5));
+  for (let i = 0; i <= nPil; i++) {
+    const pz = cz - d / 2 + (d * i) / nPil;
+    for (const sx of [-1, 1])
+      addBox(cx + sx * (w / 2 + 0.06), gy + (h) / 2, pz, 0.36, h, 0.5, baseMat, { collide: false, block: false });
+  }
+
+  // 고측창 (후면 벽 상단 유리 밴드 + 세로 멀리언) — 시각 오버레이(뒤 벽이 차폐)
+  {
+    const wy = gy + h - 1.4, wh = 1.5;
+    addBox(cx, wy, bz - fSign * 0.16, w - 1.6, wh, 0.1, MAT.glass, { collide: false, block: false, shadow: false });
+    for (let mx = -w / 2 + 1.4; mx <= w / 2 - 1.4; mx += 2.0)
+      addBox(cx + mx, wy, bz - fSign * 0.2, 0.12, wh + 0.1, 0.12, baseMat, { collide: false, block: false, shadow: false });
+  }
+
+  // 평지붕 슬래브 + 파라펫 (실루엣)
+  addBox(cx, gy + h + 0.06, cz, w, 0.12, d, MAT.roof, { collide: false });
+  const pH = 0.55, po = 0.1;
+  addBox(cx, gy + h + pH / 2, cz + d / 2 + po, w + 0.4, pH, 0.3, baseMat, { collide: false });
+  addBox(cx, gy + h + pH / 2, cz - d / 2 - po, w + 0.4, pH, 0.3, baseMat, { collide: false });
+  addBox(cx - w / 2 - po, gy + h + pH / 2, cz, 0.3, pH, d + 0.4, baseMat, { collide: false });
+  addBox(cx + w / 2 + po, gy + h + pH / 2, cz, 0.3, pH, d + 0.4, baseMat, { collide: false });
+
+  // 옥상 그리블: 환기구 박스 2 + 배기관 실린더
+  addBox(cx - w * 0.22, gy + h + 0.5, cz + d * 0.12, 1.6, 0.9, 1.2, MAT.metalGreen, { collide: false });
+  addBox(cx + w * 0.18, gy + h + 0.4, cz - d * 0.18, 1.2, 0.7, 1.0, MAT.barrel, { collide: false });
+  {
+    const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.28, 1.8, 10), MAT.barrel);
+    pipe.position.set(cx + w * 0.30, gy + h + 0.9, cz + d * 0.28);
+    pipe.castShadow = true; scene.add(pipe); obstacleMeshes.push(pipe);
+  }
+}
+
 function buildIndustrialMap() {
   buildTexMats(); // 건축 PBR 재질 (#107) — 텍스처 로드 후 1회
   scene.fog = new THREE.Fog(0xaeb6bd, 45, 210); // 기본 안개 복원(맵 전환 시 숲 안개 잔존 방지)
@@ -1915,7 +1989,7 @@ function buildIndustrialMap() {
   }
 
   // 산업 건물 랜드마크 (Kenney city-kit-industrial)
-  placeModel('buildingA', 30, 32, { height: 7.5, rotY: Math.PI });
+  buildWarehouse(30, 32, 22, 15, 7.5, { front: 'north' }); // 히어로 절차 창고 (#212 Phase 2, buildingA 대체)
   placeModel('buildingE', 44, -32, { height: 8, rotY: Math.PI / 2 });
   placeModel('buildingH', -48, 42, { height: 6 });
   placeModel('buildingM', 8, 55, { height: 6.5, rotY: Math.PI });
