@@ -1834,9 +1834,9 @@ function batchBuilder() {
   };
 }
 
-// ── 산업 창고 (#212 Phase 2, #213 배치화): 콘크리트 플린스 + 골강판 벽 + 필라스터 + 롤셔터 +
-// 고측창(clerestory) + 평지붕 + 파라펫 + 옥상 환기구/배기관. 솔리드 셸(랜드마크 GLB 대체).
-function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutterH = 4.6 } = {}) {
+// ── 산업 창고 (#212 Phase 2, #213 배치화, #214 진입가능): 콘크리트 플린스 + 골강판 벽 + 필라스터 +
+// 롤셔터 + 고측창 + 평지붕 + 파라펫 + 옥상 그리블. open:true 면 셔터 롤업·통로 개방·내부 루팅공간.
+function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutterH = 4.6, open = false } = {}) {
   const b = batchBuilder();
   const t = 0.35, plinth = 1.2, gy = terrainH(cx, cz);
   const wallMat = 'corrugated', baseMat = 'concrete';
@@ -1854,8 +1854,15 @@ function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutte
   wallSeg('x', cx, fz, -w / 2, -shutterW / 2);
   wallSeg('x', cx, fz, shutterW / 2, w / 2);
   b.box(cx, gy + shutterH + (h - shutterH) / 2, fz, shutterW, h - shutterH, t, wallMat); // 헤더
-  b.box(cx, gy + shutterH / 2, fz, shutterW - 0.2, shutterH, t, MAT.metalBlue);          // 셔터
-  for (let sy = 0.28; sy < shutterH; sy += 0.34) b.box(cx, gy + sy, fz + fSign * 0.19, shutterW - 0.3, 0.09, 0.06, MAT.concreteDark, false);
+  if (open) { // 롤업된 셔터(문 상단 말린 박스) — 통로 개방(콜라이더 없음)
+    b.box(cx, gy + shutterH - 0.32, fz, shutterW - 0.15, 0.64, t + 0.18, MAT.metalBlue, false);
+    for (let i = 0; i < 4; i++) b.box(cx, gy + shutterH - 0.58 + i * 0.15, fz + fSign * (t / 2 + 0.06), shutterW - 0.28, 0.08, 0.05, MAT.concreteDark, false);
+    // 문지방 램프(진입 유도) 대신 바닥 문턱 트림
+    b.box(cx, gy + 0.09, fz, shutterW, 0.18, 0.4, MAT.concreteDark, false);
+  } else { // 닫힌 셔터(차폐+충돌)
+    b.box(cx, gy + shutterH / 2, fz, shutterW - 0.2, shutterH, t, MAT.metalBlue);
+    for (let sy = 0.28; sy < shutterH; sy += 0.34) b.box(cx, gy + sy, fz + fSign * 0.19, shutterW - 0.3, 0.09, 0.06, MAT.concreteDark, false);
+  }
   const nPil = Math.max(2, Math.round(d / 4.5)); // 필라스터
   for (let i = 0; i <= nPil; i++) { const pz = cz - d / 2 + (d * i) / nPil; for (const sx of [-1, 1]) b.box(cx + sx * (w / 2 + 0.06), gy + h / 2, pz, 0.36, h, 0.5, baseMat, false); }
   { const wy = gy + h - 1.4, wh = 1.5; b.box(cx, wy, bz - fSign * 0.16, w - 1.6, wh, 0.1, MAT.glass, false); for (let mx = -w / 2 + 1.4; mx <= w / 2 - 1.4; mx += 2.0) b.box(cx + mx, wy, bz - fSign * 0.2, 0.12, wh + 0.1, 0.12, baseMat, false); }
@@ -1868,7 +1875,17 @@ function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutte
   b.box(cx - w * 0.22, gy + h + 0.5, cz + d * 0.12, 1.6, 0.9, 1.2, MAT.metalGreen, false); // 옥상 그리블
   b.box(cx + w * 0.18, gy + h + 0.4, cz - d * 0.18, 1.2, 0.7, 1.0, MAT.barrel, false);
   b.cyl(cx + w * 0.30, gy + h + 0.9, cz + d * 0.28, 0.28, 0.28, 1.8, MAT.barrel, 10, false);
+  if (open) { // 내부 루팅공간: 마감 바닥 + 지지기둥(엄폐) + 후면 선반랙
+    b.box(cx, gy + 0.1, cz, w - t * 2, 0.14, d - t * 2, MAT.concreteDark, false); // 실내 바닥
+    const colX = w * 0.24;
+    for (const sx of [-1, 1]) b.box(cx + sx * colX, gy + (h - 0.2) / 2 + 0.2, cz, 0.5, h - 0.2, 0.5, MAT.steel); // 지지기둥(충돌)
+    const rz = bz + fSign * (d * 0.30); // 후면 선반랙
+    b.box(cx, gy + 1.0, rz, w * 0.6, 0.14, 1.0, MAT.rust, true);   // 하단 선반(충돌=엄폐)
+    b.box(cx, gy + 2.1, rz, w * 0.6, 0.14, 1.0, MAT.rust, false);  // 상단 선반
+    for (const px of [-w * 0.27, 0, w * 0.27]) for (const pz of [-0.44, 0.44]) b.box(cx + px, gy + 1.35, rz + pz, 0.1, 2.7, 0.1, MAT.rust, false); // 선반 기둥
+  }
   b.flush();
+  if (open) { const lamp = new THREE.PointLight(0xffd9a8, 14, Math.max(w, d) * 1.15, 2); lamp.position.set(cx, gy + h - 0.7, cz); scene.add(lamp); }
 }
 
 // ── 공장동 (#213): 콘크리트/벽돌 다층 + 층별 리본창 + 코너기둥 + 파라펫 + 옥상 계단탑/설비/굴뚝. ──
@@ -2031,9 +2048,9 @@ function buildIndustrialMap() {
   }
 
   // 산업 건물 랜드마크 (Kenney city-kit-industrial)
-  buildWarehouse(30, 32, 22, 15, 7.5, { front: 'north' }); // 히어로 절차 창고 (#212 Phase 2, buildingA 대체)
+  buildWarehouse(30, 32, 22, 15, 7.5, { front: 'north', open: true }); // 히어로 절차 창고 (#212 Phase 2, buildingA 대체)
   buildFactory(44, -32, 16, 13, 9, { mat: 'concrete', floors: 3 }); // #213 (buildingE)
-  buildWarehouse(-48, 42, 18, 13, 7, { front: 'south' });           // (buildingH)
+  buildWarehouse(-48, 42, 18, 13, 7, { front: 'south', open: true }); // (buildingH)
   buildSilo(8, 55, 3, { r: 2.6, h: 12 });                           // (buildingM)
   buildFactory(-62, -56, 14, 12, 8, { mat: 'brick', floors: 2 });   // (buildingQ)
   placeModel('tank', 58, 62, { height: 7 });
@@ -2082,10 +2099,10 @@ function buildIndustrialMap() {
   }
 
   // 추가 산업 건물 (city-kit-industrial 미사용분)
-  buildWarehouse(-10, -66, 16, 12, 6.5, { front: 'north' }); // #213 (buildingB)
+  buildWarehouse(-10, -66, 16, 12, 6.5, { front: 'north', open: true }); // #213 (buildingB)
   buildSilo(66, -12, 2, { r: 3.0, h: 13 });                  // (buildingF)
   buildFactory(-34, 64, 18, 14, 10, { mat: 'concrete', floors: 3 }); // (buildingG)
-  buildWarehouse(-70, 34, 15, 20, 8, { front: 'south' });    // (buildingN, 세로 배치)
+  buildWarehouse(-70, 34, 15, 20, 8, { front: 'south', open: true }); // (buildingN, 세로 배치)
   placeModel('chimneyMed', -6, -60, { height: 10 });
 
   // 폐차 (Kenney car-kit — 어둡게 칠해 방치된 느낌)
@@ -2270,8 +2287,10 @@ function rollItemsTier(tier) {
 }
 
 let LOOT_SPOTS = [
-  [-28, -18], [-34, -14], [-22, -21],       // 창고 내부
-  [30, 32], [44, -32], [-48, 42], [8, 55],  // 주택 내부
+  [-28, -18], [-34, -14], [-22, -21],       // 중앙 창고 내부(진입가능)
+  [30, 32], [33, 30], [-48, 42], [-45, 44], // 창고 A·H 내부(셔터 오픈, #214)
+  [-10, -66], [-13, -64], [-70, 34], [-70, 38], // 창고 B·N 내부(셔터 오픈)
+  [40, -24], [2, 49],                       // 공장 E·사일로 M 옆 야적(솔리드 건물이라 밖으로 이설)
   [16, -11], [-11, 25], [57, 13], [-57, -34], // 컨테이너 사이
   [0, 0], [-65, 60], [65, -55], [70, 68], [-70, -68], [40, 8],
   [-17.5, -33.5], [-10.5, -30],  // 사무동 실내
