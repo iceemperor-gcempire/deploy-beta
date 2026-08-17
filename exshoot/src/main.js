@@ -813,6 +813,19 @@ function placeModel(key, x, z, { rotY = 0, height = null, width = null, collide 
   return m;
 }
 
+// 프롭 풍화 리컬러 (#216): Kenney 밝은 톤 GLB(탱크·굴뚝 등)를 어둡고 거칠게 → 산업 폐허 톤.
+function weatherModel(m, mul = 0.66, rough = 0.92) {
+  m.traverse((o) => {
+    if (o.isMesh && o.material) {
+      o.material = o.material.clone();
+      if (o.material.color) o.material.color.multiplyScalar(mul);
+      o.material.roughness = Math.max(o.material.roughness ?? 0.5, rough);
+      if (o.material.metalness !== undefined) o.material.metalness = Math.min(o.material.metalness, 0.3);
+    }
+  });
+  return m;
+}
+
 // 나무: 시야/총알은 잎까지 차단, 이동 충돌은 줄기만
 // 나무: 시야/총알은 잎까지 차단(mesh), 이동 충돌·엄폐는 줄기 콜라이더만.
 // trunkR 를 주면 굵은 줄기(엄폐목)로 — 총알·시야를 서서 막을 수 있게 콜라이더 상단도 높인다.
@@ -1642,6 +1655,17 @@ function buildTexMats() {
     m.userData.worldUV = true;
     TEXMAT[key] = m;
   }
+  // 마모 톤 변주 (#216 Phase 4b) — 골강판/콘크리트 단조로움 해소. clone 은 map/normalMap 참조 공유(메모리 부담 X).
+  const variant = (base, hex, rough) => {
+    const src = TEXMAT[base] || MAT.concrete;
+    const m = src.clone(); m.color.setHex(hex); if (rough != null) m.roughness = rough;
+    m.userData = { worldUV: !!(src.userData && src.userData.worldUV) };
+    return m;
+  };
+  TEXMAT.corrugatedRust = variant('corrugated', 0x8f6f52, 0.8);  // 녹슨 갈색 골강판
+  TEXMAT.corrugatedPale = variant('corrugated', 0xc0c3c0, 0.62); // 밝은 아연 골강판
+  TEXMAT.corrugatedGrn = variant('corrugated', 0x70806a, 0.7);   // 바랜 청록 골강판
+  TEXMAT.concreteStain = variant('concrete', 0x8d887b, 0.97);    // 얼룩진 콘크리트
 }
 function matOf(mat) { return typeof mat === 'string' ? (TEXMAT[mat] || MAT.concrete) : mat; }
 
@@ -1865,11 +1889,11 @@ function batchBuilder() {
 
 // ── 산업 창고 (#212 Phase 2, #213 배치화, #214 진입가능): 콘크리트 플린스 + 골강판 벽 + 필라스터 +
 // 롤셔터 + 고측창 + 평지붕 + 파라펫 + 옥상 그리블. open:true 면 셔터 롤업·통로 개방·내부 루팅공간.
-function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutterH = 4.6, open = false } = {}) {
+function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutterH = 4.6, open = false, wall = 'corrugated' } = {}) {
   const b = batchBuilder();
   const t = 0.35, plinth = 1.2, gy = terrainH(cx, cz);
   notePlacement('warehouse', cx, cz, w / 2, d / 2, gy, gy + h); // 겹침 진단 (#215)
-  const wallMat = 'corrugated', baseMat = 'concrete';
+  const wallMat = wall, baseMat = 'concrete'; // wall 변주 (#216)
   const fSign = front === 'north' ? 1 : -1;
   const fz = cz + fSign * d / 2, bz = cz - fSign * d / 2;
   b.box(cx, gy + 0.06, cz, w + 1.0, 0.12, d + 1.0, MAT.concreteDark, false); // 접지 패드
@@ -1893,8 +1917,18 @@ function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutte
     b.box(cx, gy + shutterH / 2, fz, shutterW - 0.2, shutterH, t, MAT.metalBlue);
     for (let sy = 0.28; sy < shutterH; sy += 0.34) b.box(cx, gy + sy, fz + fSign * 0.19, shutterW - 0.3, 0.09, 0.06, MAT.concreteDark, false);
   }
-  const nPil = Math.max(2, Math.round(d / 4.5)); // 필라스터
-  for (let i = 0; i <= nPil; i++) { const pz = cz - d / 2 + (d * i) / nPil; for (const sx of [-1, 1]) b.box(cx + sx * (w / 2 + 0.06), gy + h / 2, pz, 0.36, h, 0.5, baseMat, false); }
+  const nPil = Math.max(2, Math.round(d / 4.5)); // 필라스터 (돌출 강화 #216)
+  for (let i = 0; i <= nPil; i++) { const pz = cz - d / 2 + (d * i) / nPil; for (const sx of [-1, 1]) b.box(cx + sx * (w / 2 + 0.13), gy + h / 2, pz, 0.55, h, 0.6, baseMat, false); }
+  // 그라임 밴드 (#216) — 벽 하단 때 자국(후벽+측벽, 살짝 proud 어두운 띠; 정면 문 제외)
+  b.box(cx, gy + 0.42, bz - fSign * 0.03, w - 0.4, 0.84, 0.06, MAT.concreteDark, false);
+  b.box(cx - w / 2 - 0.03, gy + 0.42, cz, 0.06, 0.84, d - 0.4, MAT.concreteDark, false);
+  b.box(cx + w / 2 + 0.03, gy + 0.42, cz, 0.06, 0.84, d - 0.4, MAT.concreteDark, false);
+  // 녹물 스트릭 (#216) — 측벽 세로 녹자국(파라펫 아래에서 흘러내림)
+  const streakN = Math.max(2, Math.round(d / 5));
+  for (let i = 0; i < streakN; i++) {
+    const sz = cz - d / 2 + d * (i + 0.5) / streakN + (i % 2 ? 0.6 : -0.5);
+    for (const sx of [-1, 1]) b.box(cx + sx * (w / 2 + 0.02), gy + plinth + (h - plinth) * 0.5, sz, 0.06, (h - plinth) * 0.82, 0.13, MAT.rust, false);
+  }
   { const wy = gy + h - 1.4, wh = 1.5; b.box(cx, wy, bz - fSign * 0.16, w - 1.6, wh, 0.1, MAT.glass, false); for (let mx = -w / 2 + 1.4; mx <= w / 2 - 1.4; mx += 2.0) b.box(cx + mx, wy, bz - fSign * 0.2, 0.12, wh + 0.1, 0.12, baseMat, false); }
   b.box(cx, gy + h + 0.06, cz, w, 0.12, d, MAT.roof, false); // 지붕
   const pH = 0.55, po = 0.1;                                  // 파라펫
@@ -2082,11 +2116,11 @@ function buildIndustrialMap() {
   // 산업 건물 랜드마크 (Kenney city-kit-industrial)
   buildWarehouse(30, 32, 22, 15, 7.5, { front: 'north', open: true }); // 히어로 절차 창고 (#212 Phase 2, buildingA 대체)
   buildFactory(44, -32, 16, 13, 9, { mat: 'concrete', floors: 3 }); // #213 (buildingE)
-  buildWarehouse(-48, 42, 18, 13, 7, { front: 'south', open: true }); // (buildingH)
+  buildWarehouse(-48, 42, 18, 13, 7, { front: 'south', open: true, wall: 'corrugatedRust' }); // (buildingH)
   buildSilo(8, 55, 3, { r: 2.6, h: 12 });                           // (buildingM)
   buildFactory(-62, -56, 14, 12, 8, { mat: 'brick', floors: 2 });   // (buildingQ)
-  placeModel('tank', 58, 62, { height: 7 });
-  placeModel('chimney', -44, -28, { height: 14 });
+  weatherModel(placeModel('tank', 58, 62, { height: 7 }));       // #216 리컬러
+  weatherModel(placeModel('chimney', -44, -28, { height: 14 })); // #216 리컬러
 
   // 컨테이너 야적장
   addContainer(12, -8, false, MAT.metalRed);
@@ -2131,11 +2165,11 @@ function buildIndustrialMap() {
   }
 
   // 추가 산업 건물 (city-kit-industrial 미사용분)
-  buildWarehouse(-10, -66, 16, 12, 6.5, { front: 'north', open: true }); // #213 (buildingB)
+  buildWarehouse(-10, -66, 16, 12, 6.5, { front: 'north', open: true, wall: 'corrugatedPale' }); // #213 (buildingB)
   buildSilo(66, -12, 2, { r: 3.0, h: 13 });                  // (buildingF)
-  buildFactory(-34, 64, 18, 14, 10, { mat: 'concrete', floors: 3 }); // (buildingG)
-  buildWarehouse(-70, 34, 15, 20, 8, { front: 'south', open: true }); // (buildingN, 세로 배치)
-  placeModel('chimneyMed', 6, -56, { height: 10 }); // #215 창고 B 밖으로 이설
+  buildFactory(-34, 64, 18, 14, 10, { mat: 'concreteStain', floors: 3 }); // (buildingG)
+  buildWarehouse(-70, 34, 15, 20, 8, { front: 'south', open: true, wall: 'corrugatedGrn' }); // (buildingN, 세로 배치)
+  weatherModel(placeModel('chimneyMed', 6, -56, { height: 10 })); // #215 이설 · #216 리컬러
 
   // 폐차 (Kenney car-kit — 어둡게 칠해 방치된 느낌)
   const wrecks = [
@@ -2236,12 +2270,12 @@ function buildIndustrialMap() {
   }
 
   // 공장/창고 옆 연료 탱크 / 소형 배기 굴뚝 — 건물 밖으로 배치. **스캐터보다 먼저** 놓아 스캐터가 회피 (#215)
-  placeModel('tank', 55, -22, { height: 2.6, rotY: 0.4 });
-  placeModel('tank', -22, -58, { height: 2.4, rotY: 1.9 });
-  placeModel('tank', -70, -45, { height: 2.8, rotY: 2.6 });
-  placeModel('chimneySmall', 55, -40, { height: 3.2 });
-  placeModel('chimneySmall', 2, -71, { height: 3.0 });
-  placeModel('chimneySmall', 62, -8, { height: 3.4 });
+  weatherModel(placeModel('tank', 55, -22, { height: 2.6, rotY: 0.4 }));   // #216 리컬러
+  weatherModel(placeModel('tank', -22, -58, { height: 2.4, rotY: 1.9 }));
+  weatherModel(placeModel('tank', -70, -45, { height: 2.8, rotY: 2.6 }));
+  weatherModel(placeModel('chimneySmall', 55, -40, { height: 3.2 }));
+  weatherModel(placeModel('chimneySmall', 2, -71, { height: 3.0 }));
+  weatherModel(placeModel('chimneySmall', 62, -8, { height: 3.4 }));
   // 고철 패널 엄폐물
   const panels = [[18, -18, 0.3], [-26, 12, 1.8], [44, 22, -0.5], [-8, -44, 2.1]];
   for (const [x, z, r] of panels) placeModel('metalPanel', x, z, { height: 1.7, rotY: r });
