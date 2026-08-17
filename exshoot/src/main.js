@@ -805,7 +805,10 @@ function placeModel(key, x, z, { rotY = 0, height = null, width = null, collide 
   const gy = terrainH(x, z);
   m.position.y = gy - bb.min.y; // 지형 높이에 바닥 정렬
   m.updateMatrixWorld(true);
-  if (collide) colliders.push(colliderFromModel(m, x, z, rotY, gy));
+  if (collide) {
+    colliders.push(colliderFromModel(m, x, z, rotY, gy));
+    notePlacement(key, (bb.min.x + bb.max.x) / 2, (bb.min.z + bb.max.z) / 2, (bb.max.x - bb.min.x) / 2, (bb.max.z - bb.min.z) / 2, gy, gy + (bb.max.y - bb.min.y)); // 겹침 진단 (#215)
+  }
   if (block) m.traverse((o) => { if (o.isMesh) obstacleMeshes.push(o); });
   return m;
 }
@@ -866,6 +869,30 @@ let broughtKeys = new Set(); // 이번 레이드에 반입한 열쇠 keyId (#195
 const weaponAmmo = {};    // 무기별 탄약 상태 { key: { mag, reserve } }
 let colliders = [];       // yaw 정렬 OBB { cx, cz, c, s, hx, hz, minY, maxY }
 let obstacleMeshes = [];  // LOS/총알 차단용
+// 배치 겹침 진단 (#215): 건물/프롭 단위 풋프린트(AABB+y범위) 기록 → checkMapOverlaps 로 겹침 탐지.
+let placements = [];
+let mapOverlaps = [];
+function notePlacement(label, cx, cz, hx, hz, y0, y1) { placements.push({ label, cx, cz, hx, hz, y0, y1 }); }
+// 배치 겹침 검사: 풋프린트가 x/z 로 상당량 겹치고 y범위도 겹치는 쌍을 보고. 스침·경미 겹침은 무시.
+function checkMapOverlaps() {
+  const hits = [];
+  for (let i = 0; i < placements.length; i++) {
+    for (let j = i + 1; j < placements.length; j++) {
+      const a = placements[i], b = placements[j];
+      if (a.y1 <= b.y0 + 0.1 || b.y1 <= a.y0 + 0.1) continue;              // y 범위 분리(위아래)면 겹침 아님
+      const ox = Math.min(a.cx + a.hx, b.cx + b.hx) - Math.max(a.cx - a.hx, b.cx - b.hx);
+      const oz = Math.min(a.cz + a.hz, b.cz + b.hz) - Math.max(a.cz - a.hz, b.cz - b.hz);
+      if (ox <= 0.5 || oz <= 0.5) continue;                                // 안 겹침 / 살짝 스침
+      const frac = (ox * oz) / Math.min(4 * a.hx * a.hz, 4 * b.hx * b.hz); // 작은 쪽 대비 겹침 비율
+      if (frac < 0.22) continue;                                           // 경미한 겹침 무시(엄폐물 인접 등)
+      hits.push({ a: a.label, b: b.label, frac: +frac.toFixed(2), ox: +ox.toFixed(1), oz: +oz.toFixed(1), at: [Math.round(a.cx), Math.round(a.cz)] });
+    }
+  }
+  hits.sort((p, q) => q.frac - p.frac);
+  mapOverlaps = hits;
+  if (hits.length) console.warn(`[map] 배치 겹침 ${hits.length}건 (checkMapOverlaps):`, hits);
+  return hits;
+}
 let enemies = [];
 let interactables = [];   // {pos, mesh, items, opened, label}
 let extractions = [];     // {pos, mesh, ring}
@@ -1720,6 +1747,7 @@ function addWindowWall(cx, cz, len, h, axis, mat, openings, baseY = 0) {
 }
 
 function addBuilding(cx, cz, w, d, h, mat) {
+  notePlacement('building', cx, cz, w / 2, d / 2, terrainH(cx, cz), terrainH(cx, cz) + h); // 겹침 진단 (#215)
   addWallWithDoor(cx, cz + d / 2, w, h, 'x', mat, (Math.random() - 0.5) * (w - 4));
   addWallWithDoor(cx, cz - d / 2, w, h, 'x', mat, (Math.random() - 0.5) * (w - 4));
   addWall(cx - w / 2, cz, d, h, 'z', mat);
@@ -1736,6 +1764,7 @@ function addContainer(cx, cz, rot90, mat) {
 // 남쪽 현관문 + 동쪽 뒷문, 북·서 창문 (사격 가능), 박공지붕 + 굴뚝, 실내 1룸
 function addHouse(hx, hz, { wall = 'brick' } = {}) {
   const W = 9.2, D = 7.2, H = 2.9, t = 0.35;
+  notePlacement('house', hx, hz, W / 2, D / 2, terrainH(hx, hz), terrainH(hx, hz) + H + 2); // 겹침 진단 (#215)
   const a = (26 * Math.PI) / 180;       // 지붕 경사
   const halfD = D / 2 + 0.5;            // 처마 내밈 포함
   const rise = Math.tan(a) * (D / 2);
@@ -1839,6 +1868,7 @@ function batchBuilder() {
 function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutterH = 4.6, open = false } = {}) {
   const b = batchBuilder();
   const t = 0.35, plinth = 1.2, gy = terrainH(cx, cz);
+  notePlacement('warehouse', cx, cz, w / 2, d / 2, gy, gy + h); // 겹침 진단 (#215)
   const wallMat = 'corrugated', baseMat = 'concrete';
   const fSign = front === 'north' ? 1 : -1;
   const fz = cz + fSign * d / 2, bz = cz - fSign * d / 2;
@@ -1892,6 +1922,7 @@ function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutte
 function buildFactory(cx, cz, w, d, h, { mat = 'concrete', floors = 3 } = {}) {
   const b = batchBuilder();
   const t = 0.4, gy = terrainH(cx, cz), plinth = 1.0;
+  notePlacement('factory', cx, cz, w / 2, d / 2, gy, gy + h); // 겹침 진단 (#215)
   b.box(cx, gy + 0.06, cz, w + 1.0, 0.12, d + 1.0, MAT.concreteDark, false);
   const wall = (ax, x, z, len) => {
     if (ax === 'x') { b.box(x, gy + plinth / 2, z, len, plinth, t, mat); b.box(x, gy + plinth + (h - plinth) / 2, z, len, h - plinth, t, mat); }
@@ -1923,6 +1954,7 @@ function buildSilo(cx, cz, count = 3, { r = 2.6, h = 12 } = {}) {
   const b = batchBuilder();
   const gy = terrainH(cx, cz);
   const gap = r * 2.3, x0 = cx - gap * (count - 1) / 2;
+  notePlacement('silo', cx, cz, gap * (count - 1) / 2 + r, r, gy, gy + h); // 겹침 진단 (#215)
   for (let i = 0; i < count; i++) {
     const sx = x0 + gap * i, hh = h * (i % 2 ? 1.0 : 0.82); // 높이 변주
     b.box(sx, gy + 0.2, cz, r * 2.4, 0.4, r * 2.4, MAT.concreteDark, false);       // 베이스 패드
@@ -2092,7 +2124,7 @@ function buildIndustrialMap() {
   for (const [key, x, z, h] of rocks) placeModel(key, x, z, { height: h + Math.random() * 0.5, rotY: Math.random() * Math.PI * 2 });
 
   // 나무상자 엄폐물 (Kenney survival-kit / blaster-kit)
-  const boxes = [[3, -30], [-18, -10], [22, 5], [48, 30], [-52, -12], [10, 48], [-38, 22], [58, -25]];
+  const boxes = [[3, -30], [-13, -6], [22, 5], [48, 30], [-52, -12], [10, 48], [-38, 22], [58, -25]];
   for (const [x, z] of boxes) {
     if (Math.random() < 0.5) placeModel('box', x, z, { height: 1.0, rotY: Math.random() * Math.PI * 2 });
     else placeModel('crateWide', x, z, { height: 1.0, rotY: Math.floor(Math.random() * 4) * Math.PI / 2 });
@@ -2103,7 +2135,7 @@ function buildIndustrialMap() {
   buildSilo(66, -12, 2, { r: 3.0, h: 13 });                  // (buildingF)
   buildFactory(-34, 64, 18, 14, 10, { mat: 'concrete', floors: 3 }); // (buildingG)
   buildWarehouse(-70, 34, 15, 20, 8, { front: 'south', open: true }); // (buildingN, 세로 배치)
-  placeModel('chimneyMed', -6, -60, { height: 10 });
+  placeModel('chimneyMed', 6, -56, { height: 10 }); // #215 창고 B 밖으로 이설
 
   // 폐차 (Kenney car-kit — 어둡게 칠해 방치된 느낌)
   const wrecks = [
@@ -2203,36 +2235,35 @@ function buildIndustrialMap() {
     scene.add(lampG);
   }
 
-  // 건물 주변 디테일 — 소품 스캐터 (드럼통/상자, 지형·충돌 자동)
+  // 공장/창고 옆 연료 탱크 / 소형 배기 굴뚝 — 건물 밖으로 배치. **스캐터보다 먼저** 놓아 스캐터가 회피 (#215)
+  placeModel('tank', 55, -22, { height: 2.6, rotY: 0.4 });
+  placeModel('tank', -22, -58, { height: 2.4, rotY: 1.9 });
+  placeModel('tank', -70, -45, { height: 2.8, rotY: 2.6 });
+  placeModel('chimneySmall', 55, -40, { height: 3.2 });
+  placeModel('chimneySmall', 2, -71, { height: 3.0 });
+  placeModel('chimneySmall', 62, -8, { height: 3.4 });
+  // 고철 패널 엄폐물
+  const panels = [[18, -18, 0.3], [-26, 12, 1.8], [44, 22, -0.5], [-8, -44, 2.1]];
+  for (const [x, z, r] of panels) placeModel('metalPanel', x, z, { height: 1.7, rotY: r });
+  // 건물 주변 디테일 — 소품 스캐터(맨 뒤). clearR = 건물 풋프린트 밖 여유 반경, isPointOpen 1.3 으로 기존 프롭 회피 (#215)
   const PROPS = ['barrel', 'box', 'crateWide'];
-  const scatterProps = (x, z, r, n) => {
+  const scatterProps = (x, z, clearR, n) => {
     for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2;
-      const px = x + Math.cos(a) * (r + Math.random() * 2);
-      const pz = z + Math.sin(a) * (r + Math.random() * 2);
-      if (!isPointOpen(px, pz, 0.8)) continue;
+      const px = x + Math.cos(a) * (clearR + Math.random() * 3.5);
+      const pz = z + Math.sin(a) * (clearR + Math.random() * 3.5);
+      if (!isPointOpen(px, pz, 1.3)) continue;
       placeModel(PROPS[Math.floor(Math.random() * PROPS.length)], px, pz,
         { height: 0.9 + Math.random() * 0.3, rotY: Math.random() * Math.PI * 2 });
     }
   };
-  scatterProps(30, 32, 9, 4);    // buildingA
-  scatterProps(44, -32, 8, 3);   // buildingE
-  scatterProps(8, 55, 7, 3);     // buildingM
-  scatterProps(-62, -56, 8, 3);  // buildingQ
-  scatterProps(-10, -66, 8, 3);  // buildingB
-  scatterProps(-34, 64, 8, 3);   // buildingG
-  scatterProps(-70, 34, 7, 2);   // buildingN
-  // 공장 옆 연료 탱크 / 소형 배기 굴뚝
-  placeModel('tank', 49, -27, { height: 2.6, rotY: 0.4 });
-  placeModel('tank', -16, -63, { height: 2.4, rotY: 1.9 });
-  placeModel('tank', -66, -50, { height: 2.8, rotY: 2.6 });
-  placeModel('chimneySmall', 47.5, -36, { height: 3.2 });
-  placeModel('chimneySmall', -6.5, -69, { height: 3.0 });
-  placeModel('chimneySmall', 62, -8, { height: 3.4 });
-
-  // 고철 패널 엄폐물
-  const panels = [[18, -18, 0.3], [-26, 12, 1.8], [44, 22, -0.5], [-8, -44, 2.1]];
-  for (const [x, z, r] of panels) placeModel('metalPanel', x, z, { height: 1.7, rotY: r });
+  scatterProps(30, 32, 14, 4);   // warehouse A (22x15)
+  scatterProps(44, -32, 12, 3);  // factory E (16x13)
+  scatterProps(8, 55, 11, 3);    // silo M
+  scatterProps(-62, -56, 11, 3); // factory Q (14x12)
+  scatterProps(-10, -66, 12, 3); // warehouse B (16x12)
+  scatterProps(-34, 64, 13, 3);  // factory G (18x14)
+  scatterProps(-70, 34, 14, 2);  // warehouse N (15x20)
 
   // 풀 스캐터 (시야/이동 차단 없음) — 납작 모델이라 width 기준 정규화
   for (let i = 0; i < 46; i++) {
@@ -4842,6 +4873,7 @@ function tearDownStatic() {
   colliders = [];
   obstacleMeshes = [];
   losMeshes = [];
+  placements = [];
   if (physWorld) { physWorld.free && physWorld.free(); physWorld = null; }
 }
 
@@ -4856,6 +4888,7 @@ function applyMap(key) {
   m.build();
   for (const c of scene.children) if (!before.has(c)) staticObjects.push(c);
   buildPhysicsStatics();
+  checkMapOverlaps(); // 배치 겹침 진단 (#215) — 겹침 있으면 console.warn + mapOverlaps 에 저장
   builtMapKey = key;
   currentMapKey = key;
 }
@@ -5530,6 +5563,9 @@ window.__ex = {
   get audio() { return AB; },
   get colliders() { return colliders; },
   get interactables() { return interactables; },
+  get overlaps() { return mapOverlaps; },   // 배치 겹침 진단 결과 (#215)
+  get placements() { return placements; },
+  _checkOverlaps: () => checkMapOverlaps(),
   terrainH,
   equipWeapon,
   lootInteractable,
