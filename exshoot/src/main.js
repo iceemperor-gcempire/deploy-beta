@@ -478,6 +478,7 @@ const GLB_MANIFEST = {
   carSuv: 'assets/env/cars/suv.glb',
   carDelivery: 'assets/env/cars/delivery-flat.glb',
   carTire: 'assets/env/cars/debris-tire.glb',
+  carCovered: 'assets/env/cars/covered_car.glb', // Poly Haven photoscan 리얼 방치차 (#217)
 };
 
 // Quaternius 개별 나무·바위 등록 (split_nature.py 산출) + 숲 나무 구성 (#165)
@@ -1795,7 +1796,8 @@ function addHouse(hx, hz, { wall = 'brick' } = {}) {
 
   // 기초 플린스 (실내 바닥 높이 0.4 — 문지방 스텝업)
   addBox(hx, 0.15, hz, W + 0.5, 0.5, D + 0.5, 'concrete');
-  addBox(hx, 0.37, hz, W - 0.6, 0.06, D - 0.6, 'woodfloor', { collide: false, block: false, shadow: false });
+  // 실내 바닥: 윗면(0.43)을 플린스 윗면(0.40)보다 3cm 위로 → 동일평면 z-fighting 회피 (#217)
+  addBox(hx, 0.40, hz, W - 0.6, 0.06, D - 0.6, 'woodfloor', { collide: false, block: false, shadow: false });
 
   // 벽: 남 현관 / 동 뒷문 / 북 창2 / 서 창1
   addWallWithDoor(hx, hz + D / 2, W, H, 'x', wall, 1.6, 1.2);
@@ -2173,17 +2175,14 @@ function buildIndustrialMap() {
 
   // 폐차 (Kenney car-kit — 어둡게 칠해 방치된 느낌)
   const wrecks = [
-    ['carVan', 2, 26, 0.5], ['carTruck', 38, -14, 2.2], ['carSedan', -22, -30, -0.7],
-    ['carSuv', 26, 44, 1.3], ['carDelivery', -46, 52, 2.8], ['carSedan', 50, 4, -2.4],
+    ['carCovered', 2, 26, 0.5], ['carTruck', 38, -14, 2.2], ['carCovered', -22, -30, -0.7],
+    ['carCovered', 26, 44, 1.3], ['carDelivery', -46, 52, 2.8], ['carCovered', 50, 4, -2.4],
   ];
   for (const [key, x, z, rotY] of wrecks) {
-    const m = placeModel(key, x, z, { height: key === 'carTruck' || key === 'carDelivery' ? 2.4 : 1.6, rotY });
-    m.traverse((o) => {
-      if (o.isMesh && o.material) {
-        o.material = o.material.clone();
-        o.material.color.multiplyScalar(0.62);
-        o.material.roughness = 0.92;
-      }
+    const cov = key === 'carCovered';
+    const m = placeModel(key, x, z, { height: key === 'carTruck' || key === 'carDelivery' ? 2.4 : (cov ? 1.5 : 1.6), rotY });
+    if (!cov) m.traverse((o) => { // 방치차 어둡게 (covered_car 는 photoscan 이라 원톤 유지)
+      if (o.isMesh && o.material) { o.material = o.material.clone(); o.material.color.multiplyScalar(0.62); o.material.roughness = 0.92; }
     });
   }
   const tires = [[4.6, 24.2], [36, -11.5], [-20, -27.5], [27.8, 46.4], [14, -3]];
