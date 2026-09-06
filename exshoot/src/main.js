@@ -479,6 +479,10 @@ const GLB_MANIFEST = {
   carDelivery: 'assets/env/cars/delivery-flat.glb',
   carTire: 'assets/env/cars/debris-tire.glb',
   carCovered: 'assets/env/cars/covered_car.glb', // Poly Haven photoscan 리얼 방치차 (#217)
+  // Poly Haven hidden_alley 도심 그리블 (CC0) — weld→simplify→resize512, plain GLB (#265). 다변형 팩은 placeProp keep 으로 1개만.
+  acUnit: 'assets/env/urban/ac_unit.glb',           // exterior_aircon_unit (clean|rusted 2변형, 19k→3.3k tris)
+  fireEscape: 'assets/env/urban/fire_escape.glb',   // modular_fire_escape (조립 1개, 9.6m)
+  rollShutter: 'assets/env/urban/roll_shutter.glb', // rollershutter_window_01 (plain|graffiti 2변형, 2.1×1.85m)
 };
 
 // Quaternius 개별 나무·바위 등록 (split_nature.py 산출) + 숲 나무 구성 (#165)
@@ -1631,6 +1635,8 @@ const MAT = {
   corpse: new THREE.MeshStandardMaterial({ color: 0x4d4a45, roughness: 1.0 }),
   steel: new THREE.MeshStandardMaterial({ color: 0x9a9ea3, roughness: 0.5, metalness: 0.55 }), // 사일로/탱크 아연강판
   rust: new THREE.MeshStandardMaterial({ color: 0x6e4a33, roughness: 0.9, metalness: 0.2 }),    // 녹/폐자재
+  interior: new THREE.MeshStandardMaterial({ color: 0x1b1d20, roughness: 1.0 }),                // 파인 창 뒤 어두운 실내 배킹 (#265)
+  soot: new THREE.MeshStandardMaterial({ color: 0x17140f, roughness: 1.0 }),                    // 화재 그을음 (#265)
 };
 
 // ── 건축 PBR 재질 (#107): BoxGeometry UV 를 월드 미터로 재기록 + repeat=1/타일크기 ──
@@ -1667,6 +1673,8 @@ function buildTexMats() {
   TEXMAT.corrugatedPale = variant('corrugated', 0xc0c3c0, 0.62); // 밝은 아연 골강판
   TEXMAT.corrugatedGrn = variant('corrugated', 0x70806a, 0.7);   // 바랜 청록 골강판
   TEXMAT.concreteStain = variant('concrete', 0x8d887b, 0.97);    // 얼룩진 콘크리트
+  TEXMAT.brickCity = variant('brick', 0x9c7e6e, 0.93);           // 도심 적벽돌(짙은 톤) (#265)
+  TEXMAT.plasterDirty = variant('plaster', 0xa9a395, 0.97);      // 때 탄 플라스터 (#265)
 }
 function matOf(mat) { return typeof mat === 'string' ? (TEXMAT[mat] || MAT.concrete) : mat; }
 
@@ -4782,6 +4790,167 @@ function buildRoom(cx, cz, w, d, mat) {                        // 진입 가능�
   addWall(cx + w / 2, cz, d, h, 'z', mat);
   addBox(cx, h + 0.1, cz, w + 0.3, 0.2, d + 0.3, 'concrete');  // 지붕
 }
+// ── 시드 PRNG (결정론적 변주 — 매 로드 동일, QA 재현 가능. modular-game-architecture 스킬) ──
+function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// 벽면/옥상 부착 프롭 (#265): placeModel 과 달리 절대 높이 y 에 바닥을 맞춘다(지형 무관). 다변형 GLB(Poly Haven 팩은 변형이
+// X축으로 나란함)는 keep 정규식으로 1개만 남기고 그 bbox 중심을 원점으로 재정렬. 콜라이더 없음(벽·지붕이 막음), 탄착/차폐는 등록.
+function placeProp(key, x, y, z, { rotY = 0, height = null, keep = null, block = true } = {}) {
+  const m = instantiate(key);
+  if (keep) { const drop = []; m.traverse((o) => { if (o.isMesh && !keep.test(o.name)) drop.push(o); }); for (const o of drop) o.parent.remove(o); }
+  m.updateMatrixWorld(true);
+  const bb0 = new THREE.Box3().setFromObject(m);
+  if (height) m.scale.setScalar(height / Math.max(0.001, bb0.max.y - bb0.min.y));
+  m.updateMatrixWorld(true);
+  const bb = new THREE.Box3().setFromObject(m);
+  const g = new THREE.Group();
+  m.position.set(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2); // 바닥 중심 → 원점
+  g.add(m); g.rotation.y = rotY; g.position.set(x, y, z);
+  scene.add(g); g.updateMatrixWorld(true);
+  if (block) g.traverse((o) => { if (o.isMesh) obstacleMeshes.push(o); });
+  return g;
+}
+
+// 상가 간판 캔버스 (#265): 바랜 도색판 + 때·하단 그라임. 시드로 색 조합 결정.
+function signTexture(text, seed) {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 128;
+  const g = c.getContext('2d'), rnd = mulberry32(seed);
+  const pal = [['#1f2a44', '#e8e2cf'], ['#5a1f1f', '#f0e6d2'], ['#243d2c', '#efe9d5'], ['#3a2f22', '#e6d9b8'], ['#0f3a4a', '#efe7d0']];
+  const [bg, fg] = pal[Math.floor(rnd() * pal.length)];
+  g.fillStyle = bg; g.fillRect(0, 0, 512, 128);
+  g.fillStyle = fg; g.font = 'bold 74px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(text, 256, 66);
+  for (let i = 0; i < 46; i++) { g.fillStyle = `rgba(22,18,12,${0.06 + rnd() * 0.2})`; g.fillRect(rnd() * 512, rnd() * 128, 8 + rnd() * 70, 3 + rnd() * 22); }
+  const grd = g.createLinearGradient(0, 72, 0, 128); grd.addColorStop(0, 'rgba(0,0,0,0)'); grd.addColorStop(1, 'rgba(0,0,0,0.6)');
+  g.fillStyle = grd; g.fillRect(0, 72, 512, 56);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.needsUpdate = true; return t;
+}
+const SHOP_NAMES = ['대한슈퍼', '명성부동산', '한빛약국', '동아세탁', '우리분식', '태양전자', '중앙문구', '서울미용실'];
+
+// ── 도심 블록 kit-of-parts (#265 Phase 1): 1층 진입 셸(문·바닥·천장·기둥 = 기존 게임플레이 유지) + 상층 "파인 창"(피어+창턱+
+// 상인방+어두운 배킹+유리 → 오버레이가 아니라 0.3m 깊이) + 발코니 + 층 밴드 + 코너 기둥 + 파라펫 + 옥상(계단탑·물탱크·AC·안테나·환기관)
+// + 상가 롤셔터·간판 + 비상계단 + 마모(그라임 밴드·녹물 스트릭·그을음·판자 막은 창). batchBuilder 병합(재질별 ~10 draw call).
+// 시드 PRNG 로 결정론적 변주. 상층은 도달 불가라 콜라이더 없음(1층 벽·기둥만). 동일평면 회피: 돌출 트림은 2~5cm proud, 끝단은 인접 매스 안으로.
+function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'brickCity', shop = true, fireEscape = null, seed = 1, door = 0 } = {}) {
+  const b = batchBuilder(), rnd = mulberry32(seed);
+  const FH = 3.3, t = 0.35, gy = terrainH(cx, cz), H = floors * FH, trim = MAT.concrete, dark = MAT.concreteDark;
+  notePlacement('ublock', cx, cz, w / 2 + 0.35, d / 2 + 0.35, gy, gy + H + 3); // 겹침 진단 (#215)
+  const faces = [ // ax: 면이 뻗는 축, c: 면 중심의 수직 좌표, n: 바깥 법선 부호, len: 길이
+    { ax: 'x', c: cz + d / 2, n: 1, len: w, key: 'south', front: true }, // +Z 정면(문/상가)
+    { ax: 'x', c: cz - d / 2, n: -1, len: w, key: 'north' },
+    { ax: 'z', c: cx + w / 2, n: 1, len: d, key: 'east' },
+    { ax: 'z', c: cx - w / 2, n: -1, len: d, key: 'west' },
+  ];
+  // 면 로컬 박스: along = 면 방향 오프셋(중심 기준), off = 바깥 돌출(+)/안쪽(−), th = 두께
+  const fbox = (f, along, y, off, len, h, th, m, collide = false) => {
+    if (f.ax === 'x') b.box(cx + along, y, f.c + f.n * off, len, h, th, m, collide);
+    else b.box(f.c + f.n * off, y, cz + along, th, h, len, m, collide);
+  };
+  const fpos = (f, along, off) => (f.ax === 'x' ? [cx + along, f.c + f.n * off] : [f.c + f.n * off, cz + along]); // 월드 [x,z]
+  const fyaw = (f) => (f.ax === 'x' ? (f.n > 0 ? 0 : Math.PI) : (f.n > 0 ? Math.PI / 2 : -Math.PI / 2));   // 모델 +Z → 바깥
+  const bays = (len, sp = 3.2, ww = 1.4) => { const n = Math.max(1, Math.floor((len - 2.6) / sp)), span = n * sp, o = []; for (let i = 0; i <= n; i++) o.push({ at: -span / 2 + i * sp, w: ww }); return o; };
+  // 창 뚫린 벽(1층 = 실제 개구부·콜라이더 / 상층 = 파인 창): 창턱 밴드 + 상인방 밴드 + 피어
+  const winWall = (f, by, openings, collide, sill = 1.0, lintel = 2.2) => {
+    fbox(f, 0, by + sill / 2, 0, f.len, sill, t, mat, collide);
+    fbox(f, 0, by + lintel + (FH - lintel) / 2, 0, f.len, FH - lintel, t, mat, collide);
+    const edges = [-f.len / 2, ...openings.flatMap((o) => [o.at - o.w / 2, o.at + o.w / 2]), f.len / 2];
+    for (let i = 0; i < edges.length; i += 2) { const sl = edges[i + 1] - edges[i]; if (sl > 0.1) fbox(f, (edges[i] + edges[i + 1]) / 2, by + sill + (lintel - sill) / 2, 0, sl, lintel - sill, t, mat, collide); }
+    for (const o of openings) fbox(f, o.at, by + sill + 0.03, t / 2 + 0.05, o.w + 0.3, 0.08, 0.12, trim); // 창턱 트림(proud)
+  };
+  const props = []; // 배치 후 부착 프롭 (배치 빌더 flush 이후)
+
+  // ── 1층: 진입 셸 ──
+  b.box(cx, gy + 0.05, cz, w - t, 0.1, d - t, 'concrete', false);          // 실내 바닥
+  b.box(cx, gy + FH + 0.15, cz, w + 0.2, 0.3, d + 0.2, 'concrete', false); // 천장(=2층 바닥)
+  if (w >= 14) for (const sx of [-1, 1]) b.box(cx + sx * w * 0.25, gy + FH / 2, cz, 0.5, FH, 0.5, trim, true); // 실내 기둥(엄폐)
+  for (const f of faces) {
+    if (f.front) { // 정면: 문 + (상가면 롤셔터·간판)
+      const dw = 2.8;
+      for (const [s0, s1] of [[-f.len / 2, door - dw / 2], [door + dw / 2, f.len / 2]]) if (s1 - s0 > 0.1) fbox(f, (s0 + s1) / 2, gy + FH / 2, 0, s1 - s0, FH, t, mat, true);
+      fbox(f, door, gy + FH - 0.35, 0, dw, 0.7, t, mat, true); // 문 상단
+      fbox(f, door, gy + 2.62, t / 2 + 0.03, dw + 0.5, 0.1, 0.1, MAT.woodDark); // 문틀 상단
+      if (shop) {
+        fbox(f, 0, gy + 2.95, t / 2 + 0.07, f.len - 0.6, 0.7, 0.12, dark); // 파시아 밴드
+        for (const [s0, s1] of [[-f.len / 2 + 0.4, door - dw / 2 - 0.3], [door + dw / 2 + 0.3, f.len / 2 - 0.4]]) {
+          const n = Math.min(2, Math.floor((s1 - s0) / 2.72)); if (n < 1) continue;
+          const mid = (s0 + s1) / 2;
+          for (let i = 0; i < n; i++) { // 롤셔터(닫힌 상가) — plain/graffiti 변형 시드 선택
+            const at = mid + (i - (n - 1) / 2) * 2.72, [px, pz] = fpos(f, at, t / 2 + 0.02 + 0.19);
+            props.push(['rollShutter', px, gy, pz, { rotY: fyaw(f), height: 2.3, keep: rnd() < 0.4 ? /graffiti/ : /^rollershutter_window_01$/ }]);
+          }
+          const [sx, sz] = fpos(f, mid, t / 2 + 0.14); // 간판(캔버스) — 파시아보다 2cm 앞
+          const sign = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(4.8, n * 2.72), 0.62), new THREE.MeshStandardMaterial({ map: signTexture(SHOP_NAMES[Math.floor(rnd() * SHOP_NAMES.length)], seed * 7 + i0(f)), roughness: 0.9 }));
+          sign.position.set(sx, gy + 2.95, sz); sign.rotation.y = fyaw(f); scene.add(sign); obstacleMeshes.push(sign);
+        }
+      }
+    } else { // 측·후면: 실제 개구부(사격 가능) + 일부 판자 막음
+      const ws = bays(f.len); winWall(f, gy, ws, true, 1.0, 2.0);
+      for (const o of ws) if (rnd() < 0.3) for (let k = 0; k < 3; k++) fbox(f, o.at, gy + 1.2 + k * 0.32, 0.02, o.w + 0.24, 0.15, 0.06, MAT.woodDark);
+    }
+    fbox(f, f.front ? (door + 1.4 + f.len / 2) / 2 : 0, gy + 0.4, t / 2 + 0.03, f.front ? (f.len / 2 - door - 1.4) - 0.5 : f.len - 0.5, 0.8, 0.04, dark); // 그라임 밴드(정면은 문 우측)
+    if (f.front) fbox(f, (-f.len / 2 + door - 1.4) / 2, gy + 0.4, t / 2 + 0.03, (door - 1.4 + f.len / 2) - 0.5, 0.8, 0.04, dark); // 정면 문 좌측
+  }
+  function i0(f) { return faces.indexOf(f); }
+
+  // ── 상층: 파인 창 + 발코니 + 층 밴드 + 마모 ──
+  for (let fl = 1; fl < floors; fl++) {
+    const by = gy + fl * FH;
+    for (const f of faces) {
+      const ws = bays(f.len); winWall(f, by, ws, false);
+      fbox(f, 0, by + 1.6, -0.30, f.len - 0.5, 1.3, 0.06, MAT.interior); // 어두운 배킹(창 뒤 실내) — 깊이감
+      for (const o of ws) {
+        const burnt = rnd() < 0.1;
+        if (!burnt) fbox(f, o.at, by + 1.6, -0.22, o.w - 0.04, 1.16, 0.03, MAT.glass);
+        else fbox(f, o.at, by + 2.42, t / 2 + 0.02, o.w + 0.6, 0.46, 0.03, MAT.soot); // 화재 그을음(유리 없음)
+        if (rnd() < 0.22) fbox(f, o.at + (rnd() - 0.5) * 0.5, by + 0.55, t / 2 + 0.03, 0.1, 0.85, 0.04, MAT.rust); // 창 아래 녹물
+      }
+      if (style === 'apartment' && f.ax === 'x') ws.forEach((o, i) => { // 발코니(격창): 슬래브 + 난간
+        if (i % 2 !== 1) return;
+        fbox(f, o.at, by + 0.06, t / 2 + 0.51, 2.2, 0.12, 1.0, trim);
+        for (const px of [-1.05, 0, 1.05]) fbox(f, o.at + px, by + 0.62, t / 2 + 0.97, 0.05, 1.0, 0.05, MAT.rust);
+        for (const ry of [0.62, 1.1]) fbox(f, o.at, by + ry, t / 2 + 0.97, 2.2, 0.05, 0.05, MAT.rust);
+        for (const s of [-1, 1]) fbox(f, o.at + s * 1.075, by + 1.1, t / 2 + 0.5, 0.05, 0.05, 0.95, MAT.rust);
+      });
+      fbox(f, 0, by, t / 2 + 0.03, f.len + 0.1, 0.22, 0.1, trim); // 층 밴드(proud, 끝단은 코너 기둥 안)
+    }
+  }
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) b.box(cx + sx * w / 2, gy + (H + 0.75) / 2, cz + sz * d / 2, 0.7, H + 0.75, 0.7, trim, false); // 코너 기둥(파라펫 위 5cm)
+
+  // ── 옥상 ──
+  b.box(cx, gy + H + 0.05, cz, w - 0.2, 0.1, d - 0.2, MAT.roof, false);
+  for (const f of faces) { fbox(f, 0, gy + H + 0.35, 0, f.len + 0.3, 0.7, t, mat); fbox(f, 0, gy + H + 0.74, 0, f.len + 0.44, 0.08, 0.5, trim); } // 파라펫 + 캡
+  const phx = cx - w * 0.22, phz = cz + d * 0.1;
+  b.box(phx, gy + H + 1.6, phz, 4.2, 3.2, 3.0, mat, false);                          // 계단탑
+  b.box(phx, gy + H + 3.25, phz, 4.5, 0.1, 3.3, trim, false);                        // 계단탑 캡
+  b.box(phx + 2.14, gy + H + 1.05, phz - 0.6, 0.06, 2.1, 0.9, MAT.woodDark, false);  // 계단탑 문(면에서 1cm proud)
+  const wtx = cx + w * 0.26, wtz = cz - d * 0.22;                                    // 물탱크(다리+원통+원뿔)
+  for (const [ox, oz] of [[-0.85, -0.85], [0.85, -0.85], [-0.85, 0.85], [0.85, 0.85]]) b.box(wtx + ox, gy + H + 0.8, wtz + oz, 0.14, 1.5, 0.14, MAT.rust, false);
+  b.cyl(wtx, gy + H + 1.55 + 1.1, wtz, 1.2, 1.2, 2.2, MAT.steel, 14, false);
+  b.cone(wtx, gy + H + 3.75 + 0.35, wtz, 1.26, 0.7, MAT.steel, 14);
+  for (let i = 0; i < 3; i++) b.cyl(cx + (rnd() - 0.5) * w * 0.6, gy + H + 0.7, cz + (rnd() - 0.5) * d * 0.6, 0.12, 0.14, 1.2, MAT.rust, 8, false); // 환기관
+  b.cyl(phx - 1.8, gy + H + 3.3 + 2.0, phz + 1.2, 0.03, 0.04, 4.0, MAT.steel, 6, false); // 안테나
+  b.box(phx - 1.8, gy + H + 7.2, phz + 1.2, 0.7, 0.04, 0.5, MAT.steel, false);
+  b.flush();
+  // 부착 프롭(배치 빌더 이후): 옥상 AC(rusted) + 측벽 AC + 롤셔터/간판 + 비상계단
+  placeProp('acUnit', cx + w * 0.05, gy + H + 0.11, cz - d * 0.3, { rotY: 0.4, height: 0.95, keep: /rusted/ });
+  placeProp('acUnit', cx - w * 0.3, gy + H + 0.11, cz - d * 0.25, { rotY: -1.2, height: 0.95, keep: /rusted/ });
+  const acFace = faces[2]; // 동측벽 창 아래 실외기 3대(시드 층 선택)
+  for (const o of bays(acFace.len).filter((_, i) => i % 2 === 0).slice(0, 3)) {
+    const fl = 1 + Math.floor(rnd() * (floors - 1)), [px, pz] = fpos(acFace, o.at + 0.9, t / 2 + 0.25);
+    placeProp('acUnit', px, gy + fl * FH + 0.21, pz, { rotY: fyaw(acFace), height: 0.85, keep: rnd() < 0.5 ? /rusted/ : /^exterior_aircon_unit$/ });
+    fbox(acFace, o.at + 0.9, gy + fl * FH + 0.17, t / 2 + 0.25, 0.9, 0.06, 0.5, MAT.rust); // 브래킷
+  }
+  for (const [k, x, y, z, o] of props) placeProp(k, x, y, z, o);
+  if (fireEscape) { // 비상계단: 2층부터 파라펫 아래까지, 벽에 붙여
+    const f = faces.find((q) => q.key === fireEscape) || faces[3];
+    const fh = Math.min(H - FH - 0.8, 12.5), [px, pz] = fpos(f, -f.len * 0.04, t / 2 + 0.95); // 중앙 근처(코너 난간 돌출 방지)
+    const fe = placeProp('fireEscape', px, gy + FH + 0.3, pz, { rotY: fyaw(f), height: fh });
+    const bb = new THREE.Box3().setFromObject(fe), wallAt = f.c + f.n * (t / 2 + 0.02); // 벽면에 스냅(모델 깊이 무관)
+    if (f.ax === 'z') fe.position.x += wallAt - (f.n > 0 ? bb.min.x : bb.max.x); else fe.position.z += wallAt - (f.n > 0 ? bb.min.z : bb.max.z);
+    fe.updateMatrixWorld(true);
+  }
+  const lamp = new THREE.PointLight(0xffd9a8, 9, Math.max(w, d) * 1.1, 2); lamp.position.set(cx, gy + FH - 0.5, cz); scene.add(lamp); // 1층 실내 조명(루팅 가시)
+}
+
 function buildUrbanMap() {
   buildTexMats();
   scene.fog = new THREE.Fog(0x949aa2, 42, 190);               // 회색 스모그
@@ -4792,8 +4961,9 @@ function buildUrbanMap() {
   addBox(-W, 3, 0, 1, 6, W * 2 + 2, 'concrete', { shadow: false });
   addBox(W, 3, 0, 1, 6, W * 2 + 2, 'concrete', { shadow: false });
   // 아파트/오피스 블록 (다양한 높이·재질) — 중앙 광장(±16) 개방, 거리 형성
+  buildUrbanBlock(-36, -36, 20, 16, 5, { style: 'apartment', mat: 'brickCity', shop: true, fireEscape: 'west', seed: 11, door: -3 }); // 히어로 블록 (#265 Phase 1)
   for (const [x, z, w, d, f, m] of [
-    [-36, -36, 20, 16, 5, 'brick'], [36, -34, 18, 20, 6, 'concrete'], [-38, 38, 22, 18, 4, 'plaster'],
+    [36, -34, 18, 20, 6, 'concrete'], [-38, 38, 22, 18, 4, 'plaster'],
     [40, 36, 16, 16, 7, 'brick'], [-60, 2, 14, 28, 5, 'concrete'], [60, 6, 16, 22, 6, 'plaster'],
     [0, -58, 30, 14, 4, 'brick'], [4, 60, 26, 14, 5, 'concrete'], [-62, -60, 18, 16, 5, 'plaster'], [62, -62, 16, 18, 6, 'brick'],
   ]) urbanBuilding(x, z, w, d, f, m);
