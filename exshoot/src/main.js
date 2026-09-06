@@ -455,10 +455,7 @@ const GLB_MANIFEST = {
   barrel: 'assets/env/survival/barrel.glb',
   crate: 'assets/env/blaster/crate-medium.glb',
   crateWide: 'assets/env/blaster/crate-wide.glb',
-  treePineA: 'assets/env/nature/tree_pineDefaultA.glb',
-  treePineB: 'assets/env/nature/tree_pineDefaultB.glb',
-  treeOak: 'assets/env/nature/tree_default.glb',
-  rock: 'assets/env/nature/rock_largeA.glb',
+  // (Kenney Nature Kit 나무/바위는 카드 트리·Poly Haven 바위로 대체돼 제거 #289)
   // Poly Haven photoscan 리얼 바위 (CC0) — gltf-transform decimate(simplify 0.35 + 512tex + draco) (#211)
   rockRealA: 'assets/env/nature/rock_real_a.glb', // stone_01 (히어로 대형)
   rockRealB: 'assets/env/nature/rock_real_b.glb', // rock_07 (중형)
@@ -477,8 +474,7 @@ const GLB_MANIFEST = {
   campfire: 'assets/env/survival/campfire-pit.glb',
   metalPanel: 'assets/env/survival/metal-panel.glb',
   boxLarge: 'assets/env/survival/box-large.glb',
-  grassPatch: 'assets/env/survival/patch-grass-large.glb',
-  grassTuft: 'assets/env/survival/grass-large.glb',
+  // (Kenney survival 풀은 풀 카드로 대체돼 제거 #289)
   carVan: 'assets/env/cars/van.glb',
   carTruck: 'assets/env/cars/truck-flat.glb',
   carSedan: 'assets/env/cars/sedan.glb',
@@ -2407,20 +2403,16 @@ function buildIndustrialMap() {
   scatterProps(-34, 64, 13, 3);  // factory G (18x14)
   scatterProps(-70, 34, 14, 2);  // warehouse N (15x20)
 
-  // 풀 스캐터 (시야/이동 차단 없음) — 납작 모델이라 width 기준 정규화
-  for (let i = 0; i < 46; i++) {
-    const x = (Math.random() * 2 - 1) * (WORLD_HALF - 8);
-    const z = (Math.random() * 2 - 1) * (WORLD_HALF - 8);
-    if (!isPointOpen(x, z, 1.5)) continue;
-    const g = placeModel(Math.random() < 0.8 ? 'grassTuft' : 'grassPatch', x, z,
-      { width: 1.0 + Math.random() * 0.9, rotY: Math.random() * Math.PI * 2, collide: false, block: false });
-    g.traverse((o) => {
-      if (o.isMesh && o.material) {
-        o.material = o.material.clone();
-        o.material.color.setRGB(0.58, 0.62, 0.4); // 채도 낮춰 지면 톤과 조화
-      }
-    });
-  }
+  // 풀 스캐터 (시야/이동 차단 없음) — 풀 카드 다발(grass_card 교차 카드 2장, 청크 병합). Kenney 스타일라이즈드 풀 대체 (#289), 시드 고정
+  { const rg = mulberry32(289), fb = forestBatch(), gm = canopyMat('grass_card'); let n = 0;
+    for (let i = 0; i < 120; i++) {
+      const x = (rg() * 2 - 1) * (WORLD_HALF - 8), z = (rg() * 2 - 1) * (WORLD_HALF - 8);
+      if (!isPointOpen(x, z, 1.5)) continue;
+      const w = 0.9 + rg() * 1.1, h = w * 0.5, c = 0.5 + rg() * 0.3, yaw = rg() * Math.PI, gy = terrainH(x, z);
+      for (let k = 0; k < 2; k++) fb.put(x, z, 'grass_card', gm, cardGeo(new THREE.Vector3(x, gy + h / 2 - 0.03, z), w, h, yaw + k * Math.PI / 2, 0, [c * 0.95, c, c * 0.8], rg() < 0.5));
+      n++;
+    }
+    console.log(`[industrial] grass cards ${n}, merged ${fb.flush()}`); } // 0건이어도 남긴다
 
   // LOS 차폐물 목록 (지형 타일 제외 — 지형은 terrainBlocks 해석 검사)
   losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile);
