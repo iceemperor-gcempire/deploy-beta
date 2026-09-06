@@ -501,21 +501,12 @@ const GLB_MANIFEST = {
 };
 
 // Quaternius 개별 나무·바위 등록 (split_nature.py 산출) + 숲 나무 구성 (#165)
-const NATURE_SPLIT_DIR = 'assets/env/nature/quaternius/split/';
-// 나무는 리얼 카드 트리(placeCardTree, #280)로 대체돼 Quaternius 나무 GLB 는 제거. 바위만 지면 클러터용으로 유지(Phase 2 에서 교체 예정).
-const TREE_KEYS = { rock: [] };
-for (const [t, file] of [['rock', 'rock']]) {
-  for (let i = 1; i <= 5; i++) { const k = `q_${t}${i}`; GLB_MANIFEST[k] = `${NATURE_SPLIT_DIR}${file}_${i}.glb`; TREE_KEYS[t].push(k); }
-}
-// 지면 클러터(수풀·풀·꽃) — 숲 디테일용 (#177). 비충돌 통과 오브젝트.
-const CLUTTER_KEYS = { bush: [], grass: [], flower: [] };
-for (const [cat, files] of Object.entries({
-  bush: ['bush', 'bush_flowers', 'plant_1'],
-  grass: ['grass_small', 'grass_large_extruded'],
-  flower: ['flower_1', 'flower_1_clump', 'flower_2', 'flower_2_clump', 'flower_3_clump', 'flower_4_clump', 'flower_5_clump'],
-})) {
-  for (const f of files) { const k = `q_${f}`; GLB_MANIFEST[k] = `${NATURE_SPLIT_DIR}${f}.glb`; CLUTTER_KEYS[cat].push(k); }
-}
+// Quaternius Stylized Nature 는 전부 제거됨 — 나무는 카드 트리(#280), 클러터·바위는 Poly Haven 리얼 프롭(#283). split_nature.py 는 기록용.
+// Poly Haven 숲 프롭 (CC0, decimate). fern/shrub 는 변형 a~d 가 X축으로 나란한 팩 → propGeo keep 으로 1개씩 병합 배치.
+GLB_MANIFEST.fern = 'assets/env/forest/fern.glb';        // fern_02 (a 312 / b 952 / c 898 / d 341 tris)
+GLB_MANIFEST.shrub = 'assets/env/forest/shrub.glb';      // shrub_03 (a~d ~1k tris)
+GLB_MANIFEST.stump = 'assets/env/forest/stump.glb';      // tree_stump_01 (10k, 1.4m)
+GLB_MANIFEST.deadLog = 'assets/env/forest/dead_log.glb'; // dead_tree_trunk_02 (6.6k, 4m 길이 — 엄폐)
 
 // ── 로딩 진행 바 ──
 // path → { loaded, total, done } (total 은 Content-Length 없으면 0)
@@ -585,7 +576,7 @@ async function loadAssets() {
             if ('envMapIntensity' in o.material) o.material.envMapIntensity = 0.2;
           }
           const mn = (o.material.name || '').toLowerCase();
-          if (/leaf|leaves|foliage|bush|plant|grass|flower|petal/.test(mn)) {
+          if (/leaf|leaves|foliage|bush|plant|grass|flower|petal|fern|shrub|ivy/.test(mn)) { // Poly Haven fern_02/shrub_03 도 alphaMode MASK 카드 (#283)
             // 잎/수풀: 텍스처 알파로 잎 실루엣만 남기는 컷아웃 (BLEND 카드가 사각 종이로 보이는 문제) #165
             o.material.transparent = false;
             o.material.alphaTest = 0.4;
@@ -4722,6 +4713,7 @@ function scatterForest(cx0, cz0, cx1, cz1) {
       const jz = z + (rnd() - 0.5) * step * 0.8;
       if (Math.abs(jx) > WORLD_HALF - 4 || Math.abs(jz) > WORLD_HALF - 4) continue;
       if (terrainH(jx, jz) === 0 && insideAnyFlatten(jx, jz)) continue; // 플래튼(운동장/건물) 내부는 비움
+      if (nearPath(jx, jz, 2.8)) continue; // 임도 위 나무 없음 (#283)
       if (rnd() < 0.28) continue; // 성김
       const seed = 1000 + n * 7919; n++;
       if (rnd() < 0.16) {
@@ -4743,27 +4735,73 @@ function insideAnyFlatten(x, z) {
   return false;
 }
 
-// 지면 클러터 산포(#177) — 수풀·풀·꽃·작은 바위. 비충돌·비차폐(통과 가능 장식)로 숲 바닥을 채운다.
-// 건물 안만 비우고 운동장·숲·공터엔 잡초를 깔아 황량함을 줄인다.
+// ── 숲 바닥 (#283 학교 Phase 2): 풀 카드 다발(교차 카드 2장, grass_card) + Poly Haven 고사리/관목(지오메트리 병합) + 리얼 바위.
+// 전부 청크·재질별 병합(forestBatch) → 클러터 ~800개가 ~40 draw call. 비충돌·비차폐(통과 장식, 병합 메시는 탄착만).
+// 플래튼(운동장·건물·스폰)·임도 근처는 비운다.
+const PROP_GEO = {};
+function propGeo(key, keepRe) { // Poly Haven 프롭에서 keep 에 맞는 메시 1개의 geometry(월드 변환 굽기·바닥 중심 원점·속성 통일) + material. 캐시.
+  const ck = key + '|' + keepRe;
+  if (PROP_GEO[ck]) return PROP_GEO[ck];
+  let found = null;
+  ASSETS[key].scene.updateMatrixWorld(true);
+  ASSETS[key].scene.traverse((o) => { if (!found && o.isMesh && keepRe.test(o.name)) found = o; });
+  if (!found) return null;
+  const g = found.geometry.clone(); g.applyMatrix4(found.matrixWorld);
+  g.computeBoundingBox(); const bb = g.boundingBox; g.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+  for (const a of Object.keys(g.attributes)) if (!['position', 'normal', 'uv'].includes(a)) g.deleteAttribute(a);
+  return (PROP_GEO[ck] = { geo: g, mat: found.material, h: bb.max.y - bb.min.y });
+}
+const _ppM = new THREE.Matrix4(), _ppP = new THREE.Vector3(), _ppQ = new THREE.Quaternion(), _ppS = new THREE.Vector3();
+function putProp(fb, key, keepRe, x, z, height, rotY) {
+  const p = propGeo(key, keepRe); if (!p) return false;
+  const s = height / Math.max(0.01, p.h), g = p.geo.clone();
+  g.applyMatrix4(_ppM.compose(_ppP.set(x, terrainH(x, z) - 0.02, z), _ppQ.setFromAxisAngle(_up, rotY), _ppS.set(s, s, s)));
+  fb.put(x, z, key + '|' + keepRe, p.mat, g); return true;
+}
+const SCHOOL_PATHS = [[[0, 54], [0, 84]], [[38, 30], [78, 78]], [[40, 2], [78, -78]], [[-40, 2], [-78, -78]]]; // 흙길 폴리라인 [x,z]: 남문·SE 숲길·NE/NW 임도 (#283)
+function nearPath(x, z, r) {
+  for (const pl of SCHOOL_PATHS) for (let i = 0; i < pl.length - 1; i++) {
+    const [ax, az] = pl[i], [bx, bz] = pl[i + 1], dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz;
+    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / L2));
+    if (Math.hypot(x - (ax + t * dx), z - (az + t * dz)) < r) return true;
+  }
+  return false;
+}
+function buildSchoolPaths() { // 흙길: 지형 추종 스트립(2m 세그먼트), 자갈 텍스처(미터 UV). 1 draw call
+  const src = GROUND_TEX.gravel || GROUND_TEX.ground; if (!src) return;
+  const tex = src.clone(); tex.needsUpdate = true; tex.repeat.set(1, 1);
+  const mat = new THREE.MeshStandardMaterial({ map: tex, color: 0x9a8c78, roughness: 1.0, polygonOffset: true, polygonOffsetFactor: -1 });
+  const geos = [], W = 3.2;
+  for (const pl of SCHOOL_PATHS) for (let i = 0; i < pl.length - 1; i++) {
+    const [ax, az] = pl[i], [bx, bz] = pl[i + 1], len = Math.hypot(bx - ax, bz - az), n = Math.max(2, Math.ceil(len / 2)), yaw = Math.atan2(bx - ax, bz - az);
+    const g = new THREE.PlaneGeometry(W, len, 1, n); g.rotateX(-Math.PI / 2); g.rotateY(yaw); g.translate((ax + bx) / 2, 0, (az + bz) / 2);
+    const p = g.attributes.position, uv = g.attributes.uv;
+    for (let k = 0; k < p.count; k++) { p.setY(k, terrainH(p.getX(k), p.getZ(k)) + 0.04); uv.setXY(k, uv.getX(k) * W / 2.5, uv.getY(k) * len / 2.5); }
+    g.computeVertexNormals(); geos.push(g);
+  }
+  const m = new THREE.Mesh(mergeGeometries(geos, false), mat); m.receiveShadow = true; m.userData.terrainTile = true; scene.add(m); obstacleMeshes.push(m);
+}
 function scatterGroundClutter(cx0, cz0, cx1, cz1) {
-  const grass = CLUTTER_KEYS.grass, bush = CLUTTER_KEYS.bush, flower = CLUTTER_KEYS.flower, rock = TREE_KEYS.rock;
+  const rnd = mulberry32(177), fb = forestBatch(), gm = canopyMat('grass_card');
   const insideBuilding = (x, z) => Math.abs(x) < 35 && Math.abs(z) < 9;
-  const step = 6;
+  const step = 5; let grass = 0, plants = 0, rocks = 0;
+  const fernKeep = [/fern_02_a$/, /fern_02_b$/, /fern_02_c$/, /fern_02_d$/], shrubKeep = [/shrub_03_a$/, /shrub_03_b$/, /shrub_03_c$/];
   for (let x = cx0; x <= cx1; x += step) {
     for (let z = cz0; z <= cz1; z += step) {
-      const jx = x + (Math.random() - 0.5) * step;
-      const jz = z + (Math.random() - 0.5) * step;
+      const jx = x + (rnd() - 0.5) * step, jz = z + (rnd() - 0.5) * step;
       if (Math.abs(jx) > WORLD_HALF - 4 || Math.abs(jz) > WORLD_HALF - 4) continue;
-      if (insideBuilding(jx, jz)) continue;         // 교사 실내는 비움
-      if (Math.random() < 0.5) continue;            // 성김(성능)
-      const r = Math.random();
-      const opt = { collide: false, block: false, rotY: Math.random() * Math.PI * 2 };
-      if (r < 0.5) placeModel(grass[(Math.random() * grass.length) | 0], jx, jz, { ...opt, width: 0.8 + Math.random() * 1.0 });
-      else if (r < 0.72) placeModel(bush[(Math.random() * bush.length) | 0], jx, jz, { ...opt, height: 0.7 + Math.random() * 0.7 });
-      else if (r < 0.9) placeModel(flower[(Math.random() * flower.length) | 0], jx, jz, { ...opt, height: 0.3 + Math.random() * 0.35 });
-      else placeModel(rock[(Math.random() * rock.length) | 0], jx, jz, { ...opt, height: 0.35 + Math.random() * 0.6 });
+      if (insideBuilding(jx, jz) || insideAnyFlatten(jx, jz) || nearPath(jx, jz, 1.8)) continue;
+      const r = rnd(), gy = terrainH(jx, jz);
+      if (r < 0.6) { // 풀 다발: 교차 카드 2장
+        const w = 0.9 + rnd() * 1.2, h = w * 0.5, c = 0.68 + rnd() * 0.36, yaw = rnd() * Math.PI;
+        for (let k = 0; k < 2; k++) fb.put(jx, jz, 'grass_card', gm, cardGeo(new THREE.Vector3(jx, gy + h / 2 - 0.03, jz), w, h, yaw + k * Math.PI / 2, 0, [c, c, c * 0.92], rnd() < 0.5));
+        grass++;
+      } else if (r < 0.74) { if (putProp(fb, 'fern', fernKeep[Math.floor(rnd() * 4)], jx, jz, 0.45 + rnd() * 0.5, rnd() * 6.28)) plants++; }
+      else if (r < 0.82) { if (putProp(fb, 'shrub', shrubKeep[Math.floor(rnd() * 3)], jx, jz, 0.5 + rnd() * 0.6, rnd() * 6.28)) plants++; }
+      else if (r < 0.85) { placeModel(rnd() < 0.5 ? 'rockRealB' : 'rockRealC', jx, jz, { height: 0.3 + rnd() * 0.6, rotY: rnd() * 6.28, collide: false }); rocks++; }
     }
   }
+  console.log(`[clutter] grass ${grass} plants ${plants} rocks ${rocks} merged ${fb.flush()}`); // 0건이어도 남긴다
 }
 
 // 하이트필드 변위 지면 타일 (산업/학교/도심 공용) — tint 로 색조, texKey 로 GROUND_TEX 선택(도심=rubble #268)
@@ -4801,7 +4839,7 @@ function buildGroundTiles(tint, texKey = 'ground') {
 function buildSchoolMap() {
   buildTexMats();
   scene.fog = new THREE.Fog(0x8f9c8b, 55, 210); // 숲 안개 — 녹회색. 카드 트리(#280)는 원경 캐노피가 안개색으로 바래므로 시작 거리를 55m 로
-  buildGroundTiles(0xa9ac82);          // 숲 바닥 (올리브-탄, 붉은기 완화)
+  buildGroundTiles(0xaaa89a, 'forest'); // 숲 바닥 = ambientCG Ground076 낙엽/뿌리 (#283)
   // 외곽 경계벽 (나무로 가림)
   const W = WORLD_HALF;
   addBox(0, 2.5, -W, W * 2 + 2, 5, 1, 'concrete', { shadow: false });
@@ -4816,9 +4854,13 @@ function buildSchoolMap() {
   scene.add(yard);
   buildSchoolBuilding(0, 0);
 
-  // 숲: 맵 전역 산포 + 지면 클러터(수풀·풀·꽃·바위)
+  // 숲: 임도 + 카드 트리 전역 산포 + 숲 바닥(풀 카드·고사리·관목·바위) + 그루터기/쓰러진 줄기 앵커 (#280, #283)
+  buildSchoolPaths();
   scatterForest(-W + 6, -W + 6, W - 6, W - 6);
   scatterGroundClutter(-W + 6, -W + 6, W - 6, W - 6);
+  { const r2 = mulberry32(283);
+    for (const [x, z] of [[8, 66], [-6, 70], [46, 44], [60, -30], [-52, -20], [-66, 50], [30, -50], [-20, -60], [70, 20], [-40, -75]]) if (isPointOpen(x, z, 1.2) && !nearPath(x, z, 2)) placeModel('stump', x, z, { height: 0.5 + r2() * 0.3, rotY: r2() * 6.28 });
+    for (const [x, z, r] of [[14, 72, 0.4], [-50, 40, 1.9], [56, 8, 2.6], [-30, -40, 0.9], [40, -66, 2.2], [-70, -8, 1.3]]) if (isPointOpen(x, z, 2.2) && !nearPath(x, z, 2.5)) placeModel('deadLog', x, z, { height: 1.0, rotY: r }); }
 
   losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile);
 }
