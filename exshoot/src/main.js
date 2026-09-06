@@ -357,6 +357,12 @@ scene.add(sun);
 const fill = new THREE.DirectionalLight(0x9fb6cc, 0.32);
 fill.position.set(55, 28, 40);
 scene.add(fill);
+// 맵별 태양 방향 (#277): MAP.sun=[x,y,z] 이면 그 방향, 없으면 기본(북서광). 필은 항상 반대편. 그림자 카메라(±110, far 250)는 방향 무관.
+const SUN_DEFAULT = [-60, 55, -30], FILL_DEFAULT = [55, 28, 40];
+function setMapSun(s) {
+  if (s) { sun.position.set(s[0], s[1], s[2]); fill.position.set(-s[0] * 0.92, 28, -s[2] * 0.67); }
+  else { sun.position.set(...SUN_DEFAULT); fill.position.set(...FILL_DEFAULT); }
+}
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -619,7 +625,7 @@ async function loadAssets() {
     } catch (e) { console.warn('Rapier init 실패 — 물리 비활성:', e && e.message); }
   })());
   // 건축 PBR 텍스처 (#107) — 실패 시 해당 재질만 단색 폴백
-  for (const key of ['brick', 'plaster', 'rooftile', 'corrugated', 'woodfloor', 'concrete', 'asphalt', 'paving']) { // asphalt/paving: 도심 거리 (#268)
+  for (const key of ['brick', 'plaster', 'rooftile', 'corrugated', 'woodfloor', 'concrete', 'asphalt', 'paving', 'plasterbroken', 'brickdirty']) { // asphalt/paving: 도심 거리 (#268), plasterbroken/brickdirty: 파사드 변주 (#277)
     jobs.push((async () => {
       try {
         const [col, nrm] = await Promise.all([
@@ -1661,6 +1667,8 @@ const TEXMAT_DEF = {
   concrete: [0xb0aca0, 0.95, 2.6, 'concrete'],
   asphalt: [0x8f8e8a, 0.96, 5.0, 'concreteDark'], // ambientCG Road012B 균열 아스팔트 (#268)
   paving: [0xb4b1a7, 0.95, 2.2, 'concrete'],      // ambientCG Concrete047A 보도/광장 (#268)
+  plasterbroken: [0xb9b0a2, 0.95, 2.6, 'concrete'], // ambientCG PaintedPlaster006 벗겨진 페인트 파사드 (#277)
+  brickdirty: [0x9a8578, 0.93, 2.4, 'brick'],       // ambientCG Bricks090 때 탄 공장 벽돌 (#277)
 };
 const TEXMAT = {};
 function buildTexMats() {
@@ -4861,6 +4869,7 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
   b.box(cx, gy + 0.05, cz, w - t, 0.1, d - t, 'concrete', false);          // 실내 바닥
   b.box(cx, gy + FH + 0.15, cz, w + 0.2, 0.3, d + 0.2, 'concrete', false); // 천장(=2층 바닥)
   if (w >= 14) for (const sx of [-1, 1]) b.box(cx + sx * w * 0.25, gy + FH / 2, cz, 0.5, FH, 0.5, trim, true); // 실내 기둥(엄폐)
+  if (shop) b.box(cx + (door < 0 ? 2.6 : -2.6), gy + 0.5, cz + d / 2 - 2.4, Math.min(3.2, w * 0.3), 1.0, 0.7, MAT.woodDark, true); // 상가 카운터(엄폐) (#277)
   for (const f of faces) {
     if (f.front && shop) { // 상가 정면: 솔리드 벽 + 문 + 롤셔터·파시아·간판
       const dw = 2.8;
@@ -4968,6 +4977,11 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
   }
   for (const [k, x, y, z, o] of props) placeProp(k, x, y, z, o);
   if (light) { const f = faces[0], [lx, lz] = fpos(f, door + 1.9, t / 2 + 0.16); placeProp('securityLight', lx, gy + 3.44, lz, { rotY: fyaw(f) }); } // 문 옆 보안등 (#274)
+  { // 1층 실내 소품 (#277): 상자 + 드럼통 — 콜라이더(엄폐)만 등록하고 notePlacement 는 생략(건물 footprint 안이라 겹침 진단 오탐 방지)
+    const prop = (key, x, z, h) => { const ry = rnd() * 6.28, m = placeModel(key, x, z, { height: h, rotY: ry, collide: false }); colliders.push(colliderFromModel(m, x, z, ry, gy)); };
+    prop(rnd() < 0.5 ? 'box' : 'crateWide', cx - w * 0.36, cz - d * 0.3, 1.0);
+    prop('barrel', cx + w * 0.38, cz - d * 0.15, 1.1);
+  }
   if (cut) { // 붕괴 코너 지면 잔해: 리얼 바위(엄폐, 콜라이더) 2개
     const rx = cx + cut.sx * (w / 2 + 1.7), rz = cz + cut.sz * (d / 2 + 1.7);
     placeModel('rockRealB', rx, rz, { height: 1.3 + rnd() * 0.3, rotY: rnd() * 6.28 });
@@ -5045,13 +5059,13 @@ function buildUrbanMap() {
   buildUrbanBlock(-36, -36, 20, 16, 5, { style: 'apartment', mat: 'brickCity', shop: true, fireEscape: 'west', seed: 11, door: -3 }); // 히어로 블록 (#265 Phase 1)
   buildUrbanBlock(36, -34, 18, 20, 6, { style: 'office', mat: 'concrete', shop: false, fireEscape: 'east', seed: 23, door: 2, collapse: 'sw' }); // 붕괴 코너 (#274)
   buildUrbanBlock(-38, 38, 22, 18, 4, { style: 'apartment', mat: 'plasterDirty', shop: true, fireEscape: 'west', seed: 31, door: 4, collapse: 'ne' });
-  buildUrbanBlock(40, 36, 16, 16, 7, { style: 'apartment', mat: 'brick', shop: true, seed: 41, door: -2 });
+  buildUrbanBlock(40, 36, 16, 16, 7, { style: 'apartment', mat: 'brickdirty', shop: true, seed: 41, door: -2 }); // 파사드 변주 (#277)
   buildUrbanBlock(-60, 2, 14, 28, 5, { style: 'office', mat: 'concreteStain', shop: false, fireEscape: 'north', seed: 53, door: 0 });
-  buildUrbanBlock(60, 6, 16, 22, 6, { style: 'apartment', mat: 'plasterDirty', shop: true, fireEscape: 'east', seed: 61, door: -3 });
+  buildUrbanBlock(60, 6, 16, 22, 6, { style: 'apartment', mat: 'plasterbroken', shop: true, fireEscape: 'east', seed: 61, door: -3 });
   buildUrbanBlock(0, -58, 30, 14, 4, { style: 'plain', mat: 'brickCity', shop: true, seed: 71, door: 6 });
   buildUrbanBlock(4, 60, 26, 14, 5, { style: 'office', mat: 'concrete', shop: false, seed: 83, door: -5 });
-  buildUrbanBlock(-62, -60, 18, 16, 5, { style: 'apartment', mat: 'plasterDirty', shop: false, fireEscape: 'west', seed: 97, door: 3 });
-  buildUrbanBlock(62, -62, 16, 18, 6, { style: 'plain', mat: 'brick', shop: false, fireEscape: 'east', seed: 101, door: -1 });
+  buildUrbanBlock(-62, -60, 18, 16, 5, { style: 'apartment', mat: 'plasterbroken', shop: false, fireEscape: 'west', seed: 97, door: 3 });
+  buildUrbanBlock(62, -62, 16, 18, 6, { style: 'plain', mat: 'brickdirty', shop: false, fireEscape: 'east', seed: 101, door: -1 });
   // 중앙 광장: 진입 가능한 1층 상가 2채 + 엄폐
   buildUrbanBlock(-13, -7, 9, 8, 1, { style: 'plain', mat: 'plasterDirty', shop: true, seed: 113, door: -2.5 });
   buildUrbanBlock(13, 9, 9, 8, 1, { style: 'plain', mat: 'brick', shop: true, seed: 127, door: -2.5 });
@@ -5088,6 +5102,10 @@ function buildUrbanRuins() {
   for (const [x, z] of [[-33, -26.6], [-31.5, -26.3], [3, -49.5], [5, -49.2], [-10.5, -2.2], [16, 15], [36, -23.3], [-56.5, 20.3], [62, 17.5], [-24.5, 46]]) if (open(x, z, 0.4)) placeModel('trashbag', x, z, { rotY: rnd() * 6.28, collide: false }); // 쓰레기봉투
   for (const [x, z, k] of [[-17.6, -34, 1], [17.6, 34, 0], [-26.6, 50, 1], [26.6, -50, 0], [-40, -14.8, 1], [44, 17.2, 0]]) if (open(x, z, 0.4)) placeProp('trashCan', x, 0.04, z, { rotY: rnd() * 6.28, keep: k ? /^metal_trash_can_rust$/ : /^metal_trash_can$/ }); // 쓰레기통(본체만)
   for (const [x, z, r] of [[-16.6, -40, Math.PI / 2], [16.6, 40, Math.PI / 2], [-40, -25.4, 0], [56, 26.6, 0]]) if (open(x, z, 0.5)) placeProp('utilityBox', x, 0.04, z, { rotY: r }); // 유틸리티 박스(보도 바깥쪽)
+  const oilMat = new THREE.MeshStandardMaterial({ color: 0x0b0b0c, transparent: true, opacity: 0.5, roughness: 0.35, polygonOffset: true, polygonOffsetFactor: -2, depthWrite: false }); // 도로 오일 얼룩 데칼 (#277)
+  for (const [x, z, r, y] of [[-21, -40, 1.4, 0.036], [-23.5, 10, 1.1, 0.036], [20.5, -52, 1.6, 0.036], [23, 44, 1.2, 0.036], [-48, -21.5, 1.5, 0.026], [40, -19, 1.0, 0.026], [-44, 21, 1.3, 0.026], [50, 23.5, 1.1, 0.026]]) {
+    const m = new THREE.Mesh(new THREE.CircleGeometry(r, 18), oilMat); m.rotation.x = -Math.PI / 2; m.rotation.z = rnd() * 6.28; m.position.set(x, y, z); m.receiveShadow = true; scene.add(m);
+  }
   for (const [x, z] of [[-56, -46.5], [52, 50], [14, -48]]) { // 잔해 더미: 리얼 바위(엄폐) + 콘크리트 조각 (건물 벽에서 3m 이상 이격 — rockRealC 는 납작·넓음)
     if (!open(x, z, 1.5)) continue;
     placeModel('rockRealB', x, z, { height: 1.2 + rnd() * 0.4, rotY: rnd() * 6.28 });
@@ -5101,6 +5119,7 @@ const URBAN_FLATTENS = [
 const MAP_URBAN = {
   key: 'urban', name: '도심 폐허', desc: '무너진 도심 — 아파트 블록·거리 시가전',
   build: buildUrbanMap,
+  sun: [40, 55, 60], // 남동광 — 정면(+z)·상가 파사드 채광 (#277)
   flattens: URBAN_FLATTENS,
   lootSpots: [
     [-13, -7], [13, 9], [0, 0], [-16, 18], [18, -16], [-27, -13], [25, 21], // 광장·상가·엄폐
@@ -5208,6 +5227,7 @@ function applyMap(key) {
   if (builtMapKey) tearDownStatic();
   FLATTENS = m.flattens; LOOT_SPOTS = m.lootSpots; EXTRACT_CANDIDATES = m.extract;
   SPAWN_POINTS = m.spawns; PHYS_BARRELS = m.barrels;
+  setMapSun(m.sun); // 맵별 태양 방향 (#277)
   const before = new Set(scene.children);
   m.build();
   for (const c of scene.children) if (!before.has(c)) staticObjects.push(c);
