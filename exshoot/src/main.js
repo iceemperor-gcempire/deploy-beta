@@ -419,6 +419,7 @@ setupPostFX();
 const ASSETS = {};   // key → gltf
 const GROUND_TEX = {}; // ground/gravel 컬러맵 (없으면 절차 생성 폴백)
 const BUILD_TEX = {};  // 건축 PBR 텍스처 (#107, ambientCG CC0) — key: { col, nrm }
+const CANOPY_TEX = {}; // 카드 트리/풀 카드 알파 텍스처 (#280, make_canopy_cards.py 합성) — key: Texture
 const CHAR_CLIPS = {}; // key(girl*) → { idle, run, death, hitChest, hitHead }
 // VRoid CC0 샘플 (OpenGameArt) → convert_vrm_girl.py 변환. 개체마다 랜덤 선택
 const GIRL_KEYS = ['girlA', 'girlB', 'girlC', 'girlD'];
@@ -501,8 +502,9 @@ const GLB_MANIFEST = {
 
 // Quaternius 개별 나무·바위 등록 (split_nature.py 산출) + 숲 나무 구성 (#165)
 const NATURE_SPLIT_DIR = 'assets/env/nature/quaternius/split/';
-const TREE_KEYS = { pine: [], maple: [], birch: [], normal: [], dead: [], rock: [] };
-for (const [t, file] of [['pine', 'pinetree'], ['maple', 'mapletree'], ['birch', 'birchtree'], ['normal', 'normaltree'], ['dead', 'deadtree'], ['rock', 'rock']]) {
+// 나무는 리얼 카드 트리(placeCardTree, #280)로 대체돼 Quaternius 나무 GLB 는 제거. 바위만 지면 클러터용으로 유지(Phase 2 에서 교체 예정).
+const TREE_KEYS = { rock: [] };
+for (const [t, file] of [['rock', 'rock']]) {
   for (let i = 1; i <= 5; i++) { const k = `q_${t}${i}`; GLB_MANIFEST[k] = `${NATURE_SPLIT_DIR}${file}_${i}.glb`; TREE_KEYS[t].push(k); }
 }
 // 지면 클러터(수풀·풀·꽃) — 숲 디테일용 (#177). 비충돌 통과 오브젝트.
@@ -606,7 +608,13 @@ async function loadAssets() {
     ASSETS[key] = gltf;
   });
   // 지면 PBR 컬러맵 (ambientCG CC0) — 실패해도 절차 생성 텍스처로 폴백
-  jobs.push(...[['ground', 'assets/textures/ground.jpg'], ['gravel', 'assets/textures/gravel.jpg'], ['rubble', 'assets/textures/rubble.jpg']].map(async ([key, path]) => { // rubble = ambientCG Ground107 도심 공터 (#268)
+  // 카드 트리/풀 카드 텍스처 (#280) — RGBA PNG(알파 컷아웃). 실패 시 canopyMat 단색 폴백
+  for (const key of ['canopy_broad_a', 'canopy_broad_b', 'canopy_autumn', 'canopy_pine', 'grass_card']) {
+    jobs.push((async () => {
+      try { const t = await loadTex(`assets/textures/${key}.png`); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy()); CANOPY_TEX[key] = t; } catch { /* 폴백 */ }
+    })());
+  }
+  jobs.push(...[['ground', 'assets/textures/ground.jpg'], ['gravel', 'assets/textures/gravel.jpg'], ['rubble', 'assets/textures/rubble.jpg'], ['forest', 'assets/textures/forest.jpg']].map(async ([key, path]) => { // rubble = ambientCG Ground107 도심 공터 (#268), forest = Ground076 숲 바닥 (#280)
     try {
       const t = await loadTex(path);
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
@@ -625,7 +633,7 @@ async function loadAssets() {
     } catch (e) { console.warn('Rapier init 실패 — 물리 비활성:', e && e.message); }
   })());
   // 건축 PBR 텍스처 (#107) — 실패 시 해당 재질만 단색 폴백
-  for (const key of ['brick', 'plaster', 'rooftile', 'corrugated', 'woodfloor', 'concrete', 'asphalt', 'paving', 'plasterbroken', 'brickdirty']) { // asphalt/paving: 도심 거리 (#268), plasterbroken/brickdirty: 파사드 변주 (#277)
+  for (const key of ['brick', 'plaster', 'rooftile', 'corrugated', 'woodfloor', 'concrete', 'asphalt', 'paving', 'plasterbroken', 'brickdirty', 'barkoak', 'barkfir', 'barkdark']) { // asphalt/paving: 도심 거리 (#268), plasterbroken/brickdirty: 파사드 변주 (#277), bark*: 카드 트리 껍질 (#280)
     jobs.push((async () => {
       try {
         const [col, nrm] = await Promise.all([
@@ -845,15 +853,84 @@ function weatherModel(m, mul = 0.66, rough = 0.92) {
   return m;
 }
 
-// 나무: 시야/총알은 잎까지 차단, 이동 충돌은 줄기만
-// 나무: 시야/총알은 잎까지 차단(mesh), 이동 충돌·엄폐는 줄기 콜라이더만.
-// trunkR 를 주면 굵은 줄기(엄폐목)로 — 총알·시야를 서서 막을 수 있게 콜라이더 상단도 높인다.
-function placeTree(key, x, z, height, trunkR = 0.35) {
-  const m = placeModel(key, x, z, { height, collide: false, block: true, rotY: Math.random() * Math.PI * 2 });
-  const gy = terrainH(x, z);
-  const top = gy + Math.min(4, Math.max(3, height * 0.35)); // 줄기 콜라이더 높이(서서 엄폐)
+// ── 리얼 카드 트리 (#280 학교 Phase 1): 껍질 PBR 원뿔대 줄기·가지 + 캐노피 카드(활엽 = 교차 카드 클러스터 / 침엽 = 티어 카드 / 고사목 = 가지만).
+// 카드 텍스처는 scripts/assets/make_canopy_cards.py 가 ambientCG 잎 아틀라스(CC0)로 합성. 시드 결정론. 청크(44m)·재질별 mergeGeometries →
+// 숲 ~490그루가 ~100 draw call. 이동 콜라이더는 줄기만(서서 엄폐, 옛 placeTree 규약), 병합 메시는 obstacleMeshes(탄착/LOS). vertexColors 로 명도 변주.
+const CANOPY_MAT = {};
+function canopyMat(key) {
+  if (!CANOPY_MAT[key]) CANOPY_MAT[key] = new THREE.MeshStandardMaterial({ map: CANOPY_TEX[key] || null, color: CANOPY_TEX[key] ? 0xffffff : 0x4a6a35, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.95, metalness: 0, vertexColors: true });
+  return CANOPY_MAT[key];
+}
+const FOREST_CHUNK = 44;
+function forestBatch() { // 청크·재질별 지오메트리 누적 → flush 시 병합 메시 1개씩
+  const byKey = new Map();
+  return {
+    put(x, z, mkey, mat, geo) { const k = `${Math.floor(x / FOREST_CHUNK)},${Math.floor(z / FOREST_CHUNK)}|${mkey}`; if (!byKey.has(k)) byKey.set(k, { mat, geos: [] }); byKey.get(k).geos.push(geo); },
+    flush() {
+      let n = 0;
+      for (const { mat, geos } of byKey.values()) { const g = mergeGeometries(geos, false); for (const q of geos) q.dispose(); const m = new THREE.Mesh(g, mat); m.castShadow = m.receiveShadow = true; scene.add(m); obstacleMeshes.push(m); n++; }
+      byKey.clear(); return n;
+    },
+  };
+}
+const _up = new THREE.Vector3(0, 1, 0), _q = new THREE.Quaternion(), _dir = new THREE.Vector3();
+function barkSeg(p0, p1, r0, r1, radial = 7) { // 원뿔대 p0→p1 (반지름 r0→r1). 껍질 UV 를 미터(둘레·길이)로 → TEXMAT repeat(1/tile) 와 정합
+  _dir.subVectors(p1, p0); const len = _dir.length(); _dir.normalize();
+  const g = new THREE.CylinderGeometry(r1, r0, len, radial, 1, true);
+  const uv = g.attributes.uv, circ = Math.PI * (r0 + r1);
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * circ, uv.getY(i) * len);
+  _q.setFromUnitVectors(_up, _dir); g.applyQuaternion(_q);
+  g.translate((p0.x + p1.x) / 2, (p0.y + p1.y) / 2, (p0.z + p1.z) / 2);
+  return g;
+}
+function cardGeo(c, w, h, yaw, tilt, col, flipU) { // 알파 카드 1장 (vertexColors 명도)
+  const g = new THREE.PlaneGeometry(w, h);
+  if (flipU) { const uv = g.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setX(i, 1 - uv.getX(i)); }
+  g.rotateX(tilt); g.rotateY(yaw); g.translate(c.x, c.y, c.z);
+  const n = g.attributes.position.count, cols = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { cols[i * 3] = col[0]; cols[i * 3 + 1] = col[1]; cols[i * 3 + 2] = col[2]; }
+  g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+  return g;
+}
+// kind: 'canopy_broad_a' | 'canopy_broad_b' | 'canopy_autumn' | 'pine' | 'dead'. h = 전고(m). trunkR = 줄기 콜라이더 반경(엄폐목은 크게).
+function placeCardTree(fb, kind, x, z, h, trunkR = 0.35, seed = 1) {
+  const rnd = mulberry32(seed), gy = terrainH(x, z), V = (px, py, pz) => new THREE.Vector3(x + px, gy + py, z + pz);
+  const bark = kind === 'pine' ? 'barkfir' : kind === 'dead' ? 'barkdark' : 'barkoak', bm = matOf(bark);
+  const put = (g) => fb.put(x, z, bark, bm, g), tone = 0.72 + rnd() * 0.3;
+  if (kind === 'pine') {
+    const r0 = 0.06 + h * 0.012;
+    put(barkSeg(V(0, -0.2, 0), V((rnd() - 0.5) * 0.3, h * 0.96, (rnd() - 0.5) * 0.3), r0, 0.03));
+    const T = 5 + Math.floor(rnd() * 3), cm = canopyMat('canopy_pine');
+    for (let i = 0; i < T; i++) {
+      const f = i / (T - 1), y = h * (0.2 + 0.74 * f), w = (h * 0.34) * (1 - 0.78 * f) + 0.9, yaw0 = rnd() * Math.PI, c = tone * (0.6 + 0.4 * f);
+      for (let k = 0; k < 3; k++) fb.put(x, z, 'canopy_pine', cm, cardGeo(V(0, y - w * 0.22, 0), w, w * 0.5, yaw0 + k * Math.PI / 3, 0, [c * 0.95, c, c * 0.9], rnd() < 0.5));
+    }
+  } else if (kind === 'dead') {
+    const r0 = 0.08 + h * 0.014, top = V((rnd() - 0.5) * 0.5, h * 0.78, (rnd() - 0.5) * 0.5);
+    put(barkSeg(V(0, -0.2, 0), top, r0, r0 * 0.35));
+    const nb = 4 + Math.floor(rnd() * 3);
+    for (let i = 0; i < nb; i++) {
+      const a = rnd() * Math.PI * 2, y0 = h * (0.4 + 0.38 * rnd()), L = h * (0.22 + 0.25 * rnd()), up = 0.35 + rnd() * 0.5;
+      const b1 = V(Math.cos(a) * L, y0 + L * up, Math.sin(a) * L);
+      put(barkSeg(V(0, y0, 0), b1, r0 * 0.45 * (1 - y0 / h) + 0.03, 0.015, 5));
+      if (rnd() < 0.6) { const a2 = a + (rnd() - 0.5) * 1.2, L2 = L * 0.55; put(barkSeg(b1, b1.clone().add(new THREE.Vector3(Math.cos(a2) * L2, L2 * 0.6, Math.sin(a2) * L2)), 0.02, 0.008, 5)); }
+    }
+  } else { // 활엽: 줄기 0.5h + 클러스터별 가지 + 교차 카드 3 + 상단 덮개 카드
+    const cm = canopyMat(kind), r0 = 0.07 + h * 0.014, th = h * 0.5, topP = V((rnd() - 0.5) * 0.4, th, (rnd() - 0.5) * 0.4);
+    put(barkSeg(V(0, -0.2, 0), topP, r0, r0 * 0.55));
+    const K = 5 + Math.floor(rnd() * 4), cy = th + h * 0.25, rx = h * 0.27, ry = h * 0.2, cs = [];
+    for (let i = 0; i < K; i++) { const a = (i / K) * Math.PI * 2 + rnd() * 0.8, rr = rx * (0.4 + 0.6 * rnd()); cs.push([Math.cos(a) * rr, cy + (rnd() - 0.5) * ry * 1.4, Math.sin(a) * rr]); }
+    cs.push([0, cy + ry * 0.55, 0], [(rnd() - 0.5) * 2, cy - ry * 0.2, (rnd() - 0.5) * 2]);
+    const b0 = new THREE.Vector3(topP.x, gy + th * 0.88, topP.z);
+    for (const [ox, oy, oz] of cs) {
+      put(barkSeg(b0, V(ox * 0.85, oy - h * 0.06, oz * 0.85), 0.09, 0.03, 5));
+      const s = h * (0.36 + 0.14 * rnd()), hf = Math.min(1, Math.max(0, (oy - cy + ry) / (2 * ry))), c = tone * (0.62 + 0.38 * hf), yaw0 = rnd() * Math.PI;
+      for (let k = 0; k < 3; k++) fb.put(x, z, kind, cm, cardGeo(V(ox, oy, oz), s, s, yaw0 + k * Math.PI / 3, (rnd() - 0.5) * 0.7, [c, c * (0.97 + 0.06 * rnd()), c * 0.9], rnd() < 0.5));
+      fb.put(x, z, kind, cm, cardGeo(V(ox, oy + s * 0.1, oz), s * 0.9, s * 0.9, rnd() * Math.PI, Math.PI / 2 - 0.25, [c * 1.05, c * 1.03, c * 0.92], false));
+    }
+  }
+  const top = gy + Math.min(4, Math.max(3, h * 0.35)); // 줄기 콜라이더(서서 엄폐)
   colliders.push(axisCollider(x - trunkR, x + trunkR, gy, top, z - trunkR, z + trunkR));
-  return m;
 }
 
 // ---------- 전역 상태 ----------
@@ -1669,6 +1746,9 @@ const TEXMAT_DEF = {
   paving: [0xb4b1a7, 0.95, 2.2, 'concrete'],      // ambientCG Concrete047A 보도/광장 (#268)
   plasterbroken: [0xb9b0a2, 0.95, 2.6, 'concrete'], // ambientCG PaintedPlaster006 벗겨진 페인트 파사드 (#277)
   brickdirty: [0x9a8578, 0.93, 2.4, 'brick'],       // ambientCG Bricks090 때 탄 공장 벽돌 (#277)
+  barkoak: [0xbfae96, 1.0, 1.1, 'trunk'],           // ambientCG Bark012 참나무 껍질 — 활엽 줄기 (#280)
+  barkfir: [0xb5a28c, 1.0, 1.0, 'trunk'],           // Bark014 전나무 껍질 — 침엽 줄기
+  barkdark: [0xa39886, 1.0, 1.0, 'trunk'],          // Bark006 어두운 껍질 — 고사목
 };
 const TEXMAT = {};
 function buildTexMats() {
@@ -2173,13 +2253,10 @@ function buildIndustrialMap() {
   const drums = [[5, -25], [7, -25.8], [-42, 10], [30, -50], [-25, 35], [62, -45], [18, 20], [-65, 55]];
   for (const [x, z] of drums) placeModel('barrel', x, z, { height: 1.1, rotY: Math.random() * Math.PI * 2 });
 
-  // 나무 (Quaternius 스타일라이즈드 — 산업지대는 침엽/일반/고사목/자작 위주로 황량하게) #165
-  const trees = [[-70, -60], [-75, 20], [70, 60], [65, -60], [-20, 70], [50, 70], [-70, 70], [75, -20], [-40, -70], [20, -68], [-5, -55], [68, 30]];
-  const treeKinds = [...TREE_KEYS.pine, ...TREE_KEYS.pine, ...TREE_KEYS.normal, ...TREE_KEYS.dead, ...TREE_KEYS.dead, ...TREE_KEYS.birch];
-  for (const [x, z] of trees) {
-    const kind = treeKinds[Math.floor(Math.random() * treeKinds.length)];
-    placeTree(kind, x, z, 6 + Math.random() * 3.5);
-  }
+  // 나무 (리얼 카드 트리 #280 — 산업지대는 침엽/고사목 위주로 황량하게, 리얼 바위와 톤 통일)
+  { const trees = [[-70, -60], [-75, 20], [70, 60], [65, -60], [-20, 70], [50, 70], [-70, 70], [75, -20], [-40, -70], [20, -68], [-5, -55], [68, 30]], fb = forestBatch();
+    trees.forEach(([x, z], i) => placeCardTree(fb, i % 4 === 0 ? 'dead' : i % 4 === 3 ? 'canopy_broad_b' : 'pine', x, z, 6 + ((i * 37) % 10) * 0.4, 0.35, 500 + i));
+    fb.flush(); }
 
   // 바위 (Poly Haven photoscan 리얼 — 히어로 대형 + 중/소형 변주로 실루엣) #211
   const rocks = [
@@ -4541,7 +4618,7 @@ let SPAWN_POINTS = [
 
 // ── 숲 속 고등학교 맵 (#165) ──────────────────────────────
 // 오픈월드풍 나무 (Quaternius 개별 GLB) — 침엽(소나무)·활엽(단풍/일반/자작) 혼합 + 고사목 소량
-let FOREST_TREES = [...TREE_KEYS.pine, ...TREE_KEYS.pine, ...TREE_KEYS.maple, ...TREE_KEYS.maple, ...TREE_KEYS.normal, ...TREE_KEYS.birch, ...TREE_KEYS.dead];
+// (FOREST_TREES 제거 — 숲은 placeCardTree 카드 트리 #280)
 
 // 절차적 고등학교 건물(#178 대형화) — 1층 진입 가능(중앙 현관+복도+교실 7칸),
 // 2~4층 유리창 파사드 매스, 층 밴드·현관 캐노피·옥상 구조물로 "학교"다운 스케일.
@@ -4637,25 +4714,26 @@ function buildSchoolBuilding(cx, cz) {
 // 숲 배치: 격자+지터, 건물/운동장 플래튼·경계 회피.
 // 일부는 대형 엄폐목(굵은 활엽수 줄기) — 플레이어가 서서 은엄폐로 쓸 수 있게. #172
 function scatterForest(cx0, cz0, cx1, cz1) {
-  const step = 6.5;
-  const coverKinds = [...TREE_KEYS.normal, ...TREE_KEYS.maple]; // 활엽수 = 상대적으로 굵은 줄기
+  const step = 6.5, rnd = mulberry32(165), fb = forestBatch(); // 시드 고정 → 매 로드 동일 숲 (QA 재현)
+  let n = 0;
   for (let x = cx0; x <= cx1; x += step) {
     for (let z = cz0; z <= cz1; z += step) {
-      const jx = x + (Math.random() - 0.5) * step * 0.8;
-      const jz = z + (Math.random() - 0.5) * step * 0.8;
+      const jx = x + (rnd() - 0.5) * step * 0.8;
+      const jz = z + (rnd() - 0.5) * step * 0.8;
       if (Math.abs(jx) > WORLD_HALF - 4 || Math.abs(jz) > WORLD_HALF - 4) continue;
       if (terrainH(jx, jz) === 0 && insideAnyFlatten(jx, jz)) continue; // 플래튼(운동장/건물) 내부는 비움
-      if (Math.random() < 0.28) continue; // 성김
-      if (Math.random() < 0.16) {
-        // 대형 엄폐목: 큰 키 + 굵은 줄기 콜라이더(서서 뒤에 숨음)
-        const kind = coverKinds[Math.floor(Math.random() * coverKinds.length)];
-        placeTree(kind, jx, jz, 13 + Math.random() * 4, 0.62); // 13~17m, 줄기반경 0.62m
+      if (rnd() < 0.28) continue; // 성김
+      const seed = 1000 + n * 7919; n++;
+      if (rnd() < 0.16) {
+        // 대형 엄폐목: 큰 키 활엽 + 굵은 줄기 콜라이더(서서 뒤에 숨음)
+        placeCardTree(fb, rnd() < 0.5 ? 'canopy_broad_a' : 'canopy_broad_b', jx, jz, 13 + rnd() * 4, 0.62, seed); // 13~17m, 줄기반경 0.62m
       } else {
-        const kind = FOREST_TREES[Math.floor(Math.random() * FOREST_TREES.length)];
-        placeTree(kind, jx, jz, 6.5 + Math.random() * 4.5); // 6.5~11m, 얇은 줄기
+        const r = rnd(), kind = r < 0.22 ? 'canopy_broad_a' : r < 0.42 ? 'canopy_broad_b' : r < 0.55 ? 'canopy_autumn' : r < 0.9 ? 'pine' : 'dead';
+        placeCardTree(fb, kind, jx, jz, kind === 'pine' ? 9 + rnd() * 5 : 6.5 + rnd() * 4.5, 0.35, seed);
       }
     }
   }
+  console.log(`[forest] card trees ${n}, merged meshes ${fb.flush()}`); // 0건이어도 남긴다
 }
 function insideAnyFlatten(x, z) {
   for (const f of FLATTENS) {
@@ -4722,7 +4800,7 @@ function buildGroundTiles(tint, texKey = 'ground') {
 
 function buildSchoolMap() {
   buildTexMats();
-  scene.fog = new THREE.Fog(0x9fb0a0, 40, 180); // 숲 안개 — 녹회색·조금 더 짙게(깊이감) #177
+  scene.fog = new THREE.Fog(0x8f9c8b, 55, 210); // 숲 안개 — 녹회색. 카드 트리(#280)는 원경 캐노피가 안개색으로 바래므로 시작 거리를 55m 로
   buildGroundTiles(0xa9ac82);          // 숲 바닥 (올리브-탄, 붉은기 완화)
   // 외곽 경계벽 (나무로 가림)
   const W = WORLD_HALF;
@@ -5929,6 +6007,14 @@ window.__ex = {
     return { muzzle: m.toArray().map((v) => +v.toFixed(2)), gunPivot: pc ? pc.gunPivot.position.toArray().map((v) => +v.toFixed(2)) : null, gunLen: pc && pc.gunLen, handR: !!(pc && pc.handR), handL: !!(pc && pc.handL), curGun: !!(pc && pc.curGun) };
   },
   _startRaid(k) { startRaid(k); },
+  // 성능 QA (#280): _perfBegin() … (프레임 진행) … _perfEnd() → 그 사이 누적 draw call/삼각형의 프레임당 평균. renderer.info 는 프레임마다
+  // 리셋되므로 autoReset 을 잠시 끈다. 두 호출로 나눈 이유: 자동화 탭에서는 JS 실행 중 rAF 가 멈춰 한 호출 안의 await 로는 프레임이 안 흐른다.
+  _perfBegin() { const info = renderer.info; info.autoReset = false; info.reset(); this._pf0 = info.render.frame; return this._pf0; },
+  _perfEnd() {
+    const info = renderer.info, frames = Math.max(1, info.render.frame - (this._pf0 || 0));
+    const out = { frames, calls: Math.round(info.render.calls / frames), triangles: Math.round(info.render.triangles / frames) };
+    info.autoReset = true; return out;
+  },
   get _map() { return { current: currentMapKey, built: builtMapKey, maps: Object.keys(MAPS) }; },
   _dbgAim() {
     if (!pc) return null;
