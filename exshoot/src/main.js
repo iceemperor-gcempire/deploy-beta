@@ -485,6 +485,12 @@ const GLB_MANIFEST = {
   rollShutter: 'assets/env/urban/roll_shutter.glb', // rollershutter_window_01 (plain|graffiti 2변형, 2.1×1.85m)
   manhole: 'assets/env/urban/manhole.glb',          // water_manhole_cover (0.7m, 6.3k tris) (#268)
   hydrant: 'assets/env/urban/hydrant.glb',          // fire_hydrant (normal|aged 2변형, 0.8m, 86k→11k tris) (#268)
+  roadBarrier: 'assets/env/urban/road_barrier.glb',     // concrete_road_barrier_02 (1.56×0.44×1.11m, 43k→4.8k) (#274)
+  trashCan: 'assets/env/urban/trash_can.glb',           // metal_trash_can (clean|rust; 뚜껑/손잡이가 옆에 흩어진 팩 → 본체만 keep)
+  utilityBox: 'assets/env/urban/utility_box.glb',       // utility_box_02 (0.92×0.43×1.12m)
+  trashbag: 'assets/env/urban/trashbag.glb',            // trashbag (0.53×0.57m)
+  tyre: 'assets/env/urban/tyre.glb',                    // old_tyre (Ø0.6, 세워진 형태)
+  securityLight: 'assets/env/urban/security_light.glb', // security_light (벽부착, 0.53m)
 };
 
 // Quaternius 개별 나무·바위 등록 (split_nature.py 산출) + 숲 나무 구성 (#165)
@@ -4805,7 +4811,7 @@ const SHOP_NAMES = ['대한슈퍼', '명성부동산', '한빛약국', '동아�
 // 상인방+어두운 배킹+유리 → 오버레이가 아니라 0.3m 깊이) + 발코니 + 층 밴드 + 코너 기둥 + 파라펫 + 옥상(계단탑·물탱크·AC·안테나·환기관)
 // + 상가 롤셔터·간판 + 비상계단 + 마모(그라임 밴드·녹물 스트릭·그을음·판자 막은 창). batchBuilder 병합(재질별 ~10 draw call).
 // 시드 PRNG 로 결정론적 변주. 상층은 도달 불가라 콜라이더 없음(1층 벽·기둥만). 동일평면 회피: 돌출 트림은 2~5cm proud, 끝단은 인접 매스 안으로.
-function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'brickCity', shop = true, fireEscape = null, seed = 1, door = 0 } = {}) {
+function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'brickCity', shop = true, fireEscape = null, seed = 1, door = 0, collapse = null, light = true } = {}) {
   const b = batchBuilder(), rnd = mulberry32(seed);
   const FH = 3.3, t = 0.35, gy = terrainH(cx, cz), H = floors * FH, trim = MAT.concrete, dark = MAT.concreteDark;
   notePlacement('ublock', cx, cz, w / 2 + 0.35, d / 2 + 0.35, gy, gy + H + 3); // 겹침 진단 (#215)
@@ -4815,8 +4821,22 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
     { ax: 'z', c: cx + w / 2, n: 1, len: d, key: 'east' },
     { ax: 'z', c: cx - w / 2, n: -1, len: d, key: 'west' },
   ];
-  // 면 로컬 박스: along = 면 방향 오프셋(중심 기준), off = 바깥 돌출(+)/안쪽(−), th = 두께
+  // 붕괴 코너 (#274): collapse='ne'|'nw'|'se'|'sw' — 상부 2개 층의 코너 cw×cw 매스를 제거. 해당 두 면의 박스는 fbox 가 자동 클리핑.
+  const cut = (collapse && floors >= 3) ? (() => {
+    const sx = collapse.includes('e') ? 1 : -1, sz = collapse.includes('s') ? 1 : -1, cw = Math.min(6, w * 0.38, d * 0.38);
+    return { sx, sz, cw, y0: gy + (floors - 2) * FH, range: (f) => { // 면별 절단 구간 [c0,c1](along). 코너는 면 끝이라 한쪽 끝 구간
+      if (f.ax === 'z' && f.n === sx) return sz < 0 ? [-d / 2 - 1, -d / 2 + cw] : [d / 2 - cw, d / 2 + 1];
+      if (f.ax === 'x' && f.n === sz) return sx < 0 ? [-w / 2 - 1, -w / 2 + cw] : [w / 2 - cw, w / 2 + 1];
+      return null;
+    } };
+  })() : null;
+  // 면 로컬 박스: along = 면 방향 오프셋(중심 기준), off = 바깥 돌출(+)/안쪽(−), th = 두께. 붕괴 구간과 겹치면 잘라내거나 생략
   const fbox = (f, along, y, off, len, h, th, m, collide = false) => {
+    if (cut && y + h / 2 > cut.y0 + 0.01) { const r = cut.range(f); if (r) {
+      let a0 = along - len / 2, a1 = along + len / 2;
+      if (r[0] < -f.len / 2) a0 = Math.max(a0, r[1]); else a1 = Math.min(a1, r[0]);
+      if (a1 - a0 < 0.05) return; along = (a0 + a1) / 2; len = a1 - a0;
+    } }
     if (f.ax === 'x') b.box(cx + along, y, f.c + f.n * off, len, h, th, m, collide);
     else b.box(f.c + f.n * off, y, cz + along, th, h, len, m, collide);
   };
@@ -4894,10 +4914,33 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
       fbox(f, 0, by, t / 2 + 0.03, f.len + 0.1, 0.22, 0.1, trim); // 층 밴드(proud, 끝단은 코너 기둥 안)
     }
   }
-  for (const sx of [-1, 1]) for (const sz of [-1, 1]) b.box(cx + sx * w / 2, gy + (H + 0.75) / 2, cz + sz * d / 2, 0.7, H + 0.75, 0.7, trim, false); // 코너 기둥(파라펫 위 5cm)
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) { // 코너 기둥(파라펫 위 5cm; 붕괴 코너는 절단 높이까지만)
+    const hh = (cut && sx === cut.sx && sz === cut.sz) ? cut.y0 - gy : H + 0.75;
+    b.box(cx + sx * w / 2, gy + hh / 2, cz + sz * d / 2, 0.7, hh, 0.7, trim, false);
+  }
+  if (cut) { // 붕괴 코너 디테일: 노출 슬래브 + 실내 칸막이(코너 룸) + 절단선 톱니 스텁 + 슬래브 위 잔해 + 철근 + 지면 잔해 더미
+    const { sx, sz, cw, y0 } = cut, kx = cx + sx * (w / 2 - cw / 2), kz = cz + sz * (d / 2 - cw / 2);
+    for (let fl = floors - 2; fl < floors; fl++) {
+      const by = gy + fl * FH;
+      b.box(kx, by + 0.12, kz, cw - 0.1, 0.24, cw - 0.1, 'concrete', false);                       // 노출 슬래브
+      b.box(cx + sx * (w / 2 - cw), by + FH / 2, kz, 0.25, FH - 0.3, cw, 'plasterDirty', false);    // 칸막이(안쪽 벽)
+      b.box(kx, by + FH / 2, cz + sz * (d / 2 - cw), cw, FH - 0.3, 0.25, 'plasterDirty', false);
+      for (const [k, hh] of [[0.3, 0.8], [0.9, 0.5], [1.5, 0.25]]) {                                  // 톱니 스텁(양 면)
+        b.box(cx + sx * (w / 2 - cw + k), by + FH * hh / 2, cz + sz * d / 2, 0.6, FH * hh, t, mat, false);
+        b.box(cx + sx * w / 2, by + FH * hh / 2, cz + sz * (d / 2 - cw + k), t, FH * hh, 0.6, mat, false);
+      }
+      for (let i = 0; i < 4; i++) { const s = 0.5 + rnd() * 0.6; b.box(kx + (rnd() - 0.5) * (cw - 1.6), by + 0.24 + s * 0.2, kz + (rnd() - 0.5) * (cw - 1.6), s, s * 0.4, s * 0.8, MAT.concreteDark, false); } // 슬래브 위 잔해
+    }
+    for (let i = 0; i < 3; i++) b.cyl(cx + sx * (w / 2 - 0.3 - rnd() * 1.5), y0 + 0.24 + 0.55, cz + sz * (d / 2 - 0.3 - rnd() * 1.5), 0.02, 0.02, 1.1, MAT.rust, 5, false); // 철근
+    const rx = cx + sx * (w / 2 + 1.7), rz = cz + sz * (d / 2 + 1.7);                                 // 지면 잔해 더미(콘크리트 조각; 바위는 flush 뒤 placeModel)
+    for (let i = 0; i < 6; i++) { const s = 0.4 + rnd() * 0.8; b.box(rx + (rnd() - 0.5) * 3.5, gy + s * 0.25, rz + (rnd() - 0.5) * 3.5, s, s * 0.7, s * 0.8, MAT.concreteDark, false); }
+  }
 
   // ── 옥상 ──
-  b.box(cx, gy + H + 0.05, cz, w - 0.2, 0.1, d - 0.2, MAT.roof, false);
+  if (cut) { const { sx, sz, cw } = cut; // 붕괴 코너 제외 L자 슬래브 2장
+    b.box(cx, gy + H + 0.05, cz - sz * cw / 2, w - 0.2, 0.1, d - 0.2 - cw, MAT.roof, false);
+    b.box(cx - sx * cw / 2, gy + H + 0.05, cz + sz * (d / 2 - cw / 2), w - 0.2 - cw, 0.1, cw - 0.1, MAT.roof, false);
+  } else b.box(cx, gy + H + 0.05, cz, w - 0.2, 0.1, d - 0.2, MAT.roof, false);
   for (const f of faces) { fbox(f, 0, gy + H + 0.35, 0, f.len + 0.3, 0.7, t, mat); fbox(f, 0, gy + H + 0.74, 0, f.len + 0.44, 0.08, 0.5, trim); } // 파라펫 + 캡
   const phx = cx - w * 0.22, phz = cz + d * 0.1;
   if (floors > 1) { // 다층만 계단탑·물탱크 (1층 상가는 옥상이 좁음)
@@ -4924,6 +4967,12 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
     fbox(acFace, o.at + 0.9, gy + fl * FH + 0.17, t / 2 + 0.25, 0.9, 0.06, 0.5, MAT.rust); // 브래킷
   }
   for (const [k, x, y, z, o] of props) placeProp(k, x, y, z, o);
+  if (light) { const f = faces[0], [lx, lz] = fpos(f, door + 1.9, t / 2 + 0.16); placeProp('securityLight', lx, gy + 3.44, lz, { rotY: fyaw(f) }); } // 문 옆 보안등 (#274)
+  if (cut) { // 붕괴 코너 지면 잔해: 리얼 바위(엄폐, 콜라이더) 2개
+    const rx = cx + cut.sx * (w / 2 + 1.7), rz = cz + cut.sz * (d / 2 + 1.7);
+    placeModel('rockRealB', rx, rz, { height: 1.3 + rnd() * 0.3, rotY: rnd() * 6.28 });
+    placeModel('rockRealC', rx - cut.sx * 1.6, rz + cut.sz * 0.5, { height: 0.8, rotY: rnd() * 6.28, collide: false }); // 소형(납작·넓음)은 콜라이더 없이 — 큰 바위가 엄폐, 겹침 진단 제외
+  }
   if (fireEscape && floors >= 3) { // 비상계단: 2층부터 파라펫 아래까지, 벽에 붙여 (3층 이상만)
     const f = faces.find((q) => q.key === fireEscape) || faces[3];
     const fh = Math.min(H - FH - 0.8, 12.5), [px, pz] = fpos(f, -f.len * 0.04, t / 2 + 0.95); // 중앙 근처(코너 난간 돌출 방지)
@@ -4994,8 +5043,8 @@ function buildUrbanMap() {
   // 아파트/오피스 블록 (다양한 높이·재질) — 중앙 광장(±16) 개방, 거리 형성
   // 블록 12동 = buildUrbanBlock 3스타일 변주 (#265 히어로, #271 롤아웃). 1층 진입·루팅 스팟은 건물 중심(기둥 사이) 유지.
   buildUrbanBlock(-36, -36, 20, 16, 5, { style: 'apartment', mat: 'brickCity', shop: true, fireEscape: 'west', seed: 11, door: -3 }); // 히어로 블록 (#265 Phase 1)
-  buildUrbanBlock(36, -34, 18, 20, 6, { style: 'office', mat: 'concrete', shop: false, fireEscape: 'east', seed: 23, door: 2 });
-  buildUrbanBlock(-38, 38, 22, 18, 4, { style: 'apartment', mat: 'plasterDirty', shop: true, fireEscape: 'west', seed: 31, door: 4 });
+  buildUrbanBlock(36, -34, 18, 20, 6, { style: 'office', mat: 'concrete', shop: false, fireEscape: 'east', seed: 23, door: 2, collapse: 'sw' }); // 붕괴 코너 (#274)
+  buildUrbanBlock(-38, 38, 22, 18, 4, { style: 'apartment', mat: 'plasterDirty', shop: true, fireEscape: 'west', seed: 31, door: 4, collapse: 'ne' });
   buildUrbanBlock(40, 36, 16, 16, 7, { style: 'apartment', mat: 'brick', shop: true, seed: 41, door: -2 });
   buildUrbanBlock(-60, 2, 14, 28, 5, { style: 'office', mat: 'concreteStain', shop: false, fireEscape: 'north', seed: 53, door: 0 });
   buildUrbanBlock(60, 6, 16, 22, 6, { style: 'apartment', mat: 'plasterDirty', shop: true, fireEscape: 'east', seed: 61, door: -3 });
@@ -5006,11 +5055,45 @@ function buildUrbanMap() {
   // 중앙 광장: 진입 가능한 1층 상가 2채 + 엄폐
   buildUrbanBlock(-13, -7, 9, 8, 1, { style: 'plain', mat: 'plasterDirty', shop: true, seed: 113, door: -2.5 });
   buildUrbanBlock(13, 9, 9, 8, 1, { style: 'plain', mat: 'brick', shop: true, seed: 127, door: -2.5 });
-  [[-16, 18, 0], [18, -16, 1], [0, 27, 0], [-27, -13, 1], [25, 21, 0], [-4, -22, 1]].forEach(([x, z, rot], i) => addBox(x, 1.3, z, rot ? 2.4 : 5, 2.6, rot ? 5 : 2.4, [MAT.metalRed, MAT.metalBlue, MAT.metalGreen][i % 3])); // 컨테이너 엄폐 (재질키 'metal' 미존재 버그 수정 #268)
+  [[-16, 18, 0], [18, -16, 1]].forEach(([x, z, rot], i) => addBox(x, 1.3, z, rot ? 2.4 : 5, 2.6, rot ? 5 : 2.4, [MAT.metalRed, MAT.metalBlue][i])); // 컨테이너 엄폐 2 (나머지 4 → 바리케이드 #274)
   for (const [x, z, ax] of [[-6, 0, 'x'], [8, -4, 'z'], [-2, 11, 'x'], [10, 6, 'z']]) addWall(x, z, 6, 1.1, ax, 'concrete'); // 낮은 방벽
   for (const [x, z] of [[-10, 4], [10, -8], [0, 16], [-20, 20], [22, -6]]) placeModel('barrel', x, z, { collide: true });
   buildUrbanStreets(); // 도로망·보도·차선·광장·가로등·맨홀·소화전 (#268) — 건물/엄폐 뒤에 호출: 가로등·소화전이 isPointOpen 으로 기존 콜라이더를 피함
+  buildUrbanRuins();   // 폐허화 + 거리 프롭 (#274): 방치차·바리케이드·쓰레기·타이어·잔해 더미
   losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile);
+}
+// ── 도심 폐허화 + 거리 프롭 (#274 Phase 4). 좌표는 도로/건물 footprint 검산값(도로: N-S 아스팔트 |x∓22|<4, E-W |z+20|<4·|z−22|<4, 순환로 |±76|<4).
+// 바리케이드(방호벽 4 + 모래주머니 2)는 내부 교차로 4곳 접근로에 엄폐로, 방치차는 도로 한쪽 차선에. 프롭은 isPointOpen 으로 콜라이더 안이면 생략.
+function buildUrbanRuins() {
+  const rnd = mulberry32(274);
+  const open = (x, z, r = 0.6) => isPointOpen(x, z, r);
+  for (const [key, x, z, rotY] of [['carCovered', -20, -48, 0.2], ['carCovered', 23.5, 6, 3.3], ['carCovered', -8, 20.5, 1.5], ['carCovered', 44, -21, 1.6], ['carCovered', -74, 50, -1.4], ['carTruck', -60, 24, 0.1], ['carDelivery', 76, -40, 1.57]]) {
+    if (!open(x, z, 2.2)) continue;
+    const cov = key === 'carCovered', m = placeModel(key, x, z, { height: cov ? 1.5 : 2.4, rotY });
+    if (!cov) m.traverse((o) => { if (o.isMesh && o.material) { o.material = o.material.clone(); o.material.color.multiplyScalar(0.62); o.material.roughness = 0.92; } }); // 방치차 어둡게
+  }
+  const barricade = (x0, z0, dx, dz, n, rotY) => { // 방호벽 n개 일렬 + 뒤쪽 모래주머니 2
+    for (let i = 0; i < n; i++) { const x = x0 + dx * i, z = z0 + dz * i; if (open(x, z, 0.9)) placeModel('roadBarrier', x, z, { height: 1.05, rotY }); }
+    const bx = x0 + dx * (n - 1) / 2, bz = z0 + dz * (n - 1) / 2, ox = dz ? 1.3 * Math.sign(x0) : 0, oz = dx ? 1.3 * Math.sign(z0) : 0; // 열 뒤쪽(교차로 반대편) 1.3m
+    for (const s of [-1, 1]) { const x = bx + (dx ? s * 1.4 : 0) + ox, z = bz + (dz ? s * 1.4 : 0) + oz; addBox(x, terrainH(x, z) + 0.45, z, dx ? 2.4 : 0.9, 0.9, dz ? 2.4 : 0.9, MAT.sandbag); }
+  };
+  barricade(-25, -30, 1.65, 0, 4, 0);        // (-22,-20) 북측(−z) 접근로(대로 가로지름)
+  barricade(32, -23, 0, 1.65, 4, Math.PI / 2); // (22,-20) 동측 접근로
+  barricade(-32, 19, 0, 1.65, 4, Math.PI / 2); // (-22,22) 서측 접근로
+  barricade(19, 32, 1.65, 0, 4, 0);          // (22,22) 남측(+z) 접근로
+  for (const [x, z] of [[-3, 2], [-1, 2], [-3, 4]]) addBox(x, terrainH(x, z) + 0.45, z, 1.9, 0.9, 0.9, MAT.sandbag); // 광장 모래주머니 진지
+  for (const [x, z] of [[14, -1], [14, 0.7]]) if (open(x, z, 0.9)) placeModel('roadBarrier', x, z, { height: 1.05, rotY: Math.PI / 2 });
+  for (const [x, z] of [[-30, -46], [-28.5, -47], [30, -47.5], [-52, 46], [48, 48], [12, 44]]) if (open(x, z)) placeModel('carTire', x, z, { height: 0.62, rotY: rnd() * 6.28, collide: false }); // 눕힌 타이어
+  for (const [x, z] of [[-29.6, -45.5], [47, 49.2], [13.2, 43.2], [-51, 47.1]]) if (open(x, z)) placeProp('tyre', x, terrainH(x, z), z, { rotY: rnd() * 6.28 }); // 세워진 타이어
+  for (const [x, z] of [[-33, -26.6], [-31.5, -26.3], [3, -49.5], [5, -49.2], [-10.5, -2.2], [16, 15], [36, -23.3], [-56.5, 20.3], [62, 17.5], [-24.5, 46]]) if (open(x, z, 0.4)) placeModel('trashbag', x, z, { rotY: rnd() * 6.28, collide: false }); // 쓰레기봉투
+  for (const [x, z, k] of [[-17.6, -34, 1], [17.6, 34, 0], [-26.6, 50, 1], [26.6, -50, 0], [-40, -14.8, 1], [44, 17.2, 0]]) if (open(x, z, 0.4)) placeProp('trashCan', x, 0.04, z, { rotY: rnd() * 6.28, keep: k ? /^metal_trash_can_rust$/ : /^metal_trash_can$/ }); // 쓰레기통(본체만)
+  for (const [x, z, r] of [[-16.6, -40, Math.PI / 2], [16.6, 40, Math.PI / 2], [-40, -25.4, 0], [56, 26.6, 0]]) if (open(x, z, 0.5)) placeProp('utilityBox', x, 0.04, z, { rotY: r }); // 유틸리티 박스(보도 바깥쪽)
+  for (const [x, z] of [[-56, -46.5], [52, 50], [14, -48]]) { // 잔해 더미: 리얼 바위(엄폐) + 콘크리트 조각 (건물 벽에서 3m 이상 이격 — rockRealC 는 납작·넓음)
+    if (!open(x, z, 1.5)) continue;
+    placeModel('rockRealB', x, z, { height: 1.2 + rnd() * 0.4, rotY: rnd() * 6.28 });
+    placeModel('rockRealC', x + 1.5, z - 0.8, { height: 0.7 + rnd() * 0.3, rotY: rnd() * 6.28, collide: false });
+    for (let i = 0; i < 5; i++) { const s = 0.4 + rnd() * 0.7; addBox(x + (rnd() - 0.5) * 3.6, terrainH(x, z) + s * 0.25, z + (rnd() - 0.5) * 3.6, s, s * 0.7, s * 0.8, MAT.concreteDark, { collide: false }); }
+  }
 }
 const URBAN_FLATTENS = [
   { x: 0, z: 0, hw: 84, hd: 84 }, // 순환로(±76)·탈출점(±80)까지 평탄 (#268)
@@ -5024,6 +5107,7 @@ const MAP_URBAN = {
     [-36, -36], [36, -34], [-38, 38], [40, 36], [0, -58], [4, 60],           // 건물 1층 실내
     [-36, -24], [36, -22], [-38, 26], [40, 24], [0, -46], [4, 48],           // 블록 주변 거리
     [-60, 2], [60, 6], [-62, -60], [62, -62], [-46, 46], [46, 48],           // 외곽 거리·건물
+    [-22.5, -33.5], [35.5, -18], [-35.5, 21.5], [21, 35.5], [-54, -48], [50, 47.5], // 바리케이드 뒤·잔해 더미 옆 (#274)
   ],
   extract: [
     { name: '북 대로', pos: new THREE.Vector3(0, 0, -80) },
