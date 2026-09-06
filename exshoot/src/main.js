@@ -483,6 +483,8 @@ const GLB_MANIFEST = {
   acUnit: 'assets/env/urban/ac_unit.glb',           // exterior_aircon_unit (clean|rusted 2변형, 19k→3.3k tris)
   fireEscape: 'assets/env/urban/fire_escape.glb',   // modular_fire_escape (조립 1개, 9.6m)
   rollShutter: 'assets/env/urban/roll_shutter.glb', // rollershutter_window_01 (plain|graffiti 2변형, 2.1×1.85m)
+  manhole: 'assets/env/urban/manhole.glb',          // water_manhole_cover (0.7m, 6.3k tris) (#268)
+  hydrant: 'assets/env/urban/hydrant.glb',          // fire_hydrant (normal|aged 2변형, 0.8m, 86k→11k tris) (#268)
 };
 
 // Quaternius 개별 나무·바위 등록 (split_nature.py 산출) + 숲 나무 구성 (#165)
@@ -592,7 +594,7 @@ async function loadAssets() {
     ASSETS[key] = gltf;
   });
   // 지면 PBR 컬러맵 (ambientCG CC0) — 실패해도 절차 생성 텍스처로 폴백
-  jobs.push(...[['ground', 'assets/textures/ground.jpg'], ['gravel', 'assets/textures/gravel.jpg']].map(async ([key, path]) => {
+  jobs.push(...[['ground', 'assets/textures/ground.jpg'], ['gravel', 'assets/textures/gravel.jpg'], ['rubble', 'assets/textures/rubble.jpg']].map(async ([key, path]) => { // rubble = ambientCG Ground107 도심 공터 (#268)
     try {
       const t = await loadTex(path);
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
@@ -611,7 +613,7 @@ async function loadAssets() {
     } catch (e) { console.warn('Rapier init 실패 — 물리 비활성:', e && e.message); }
   })());
   // 건축 PBR 텍스처 (#107) — 실패 시 해당 재질만 단색 폴백
-  for (const key of ['brick', 'plaster', 'rooftile', 'corrugated', 'woodfloor', 'concrete']) {
+  for (const key of ['brick', 'plaster', 'rooftile', 'corrugated', 'woodfloor', 'concrete', 'asphalt', 'paving']) { // asphalt/paving: 도심 거리 (#268)
     jobs.push((async () => {
       try {
         const [col, nrm] = await Promise.all([
@@ -1637,6 +1639,9 @@ const MAT = {
   rust: new THREE.MeshStandardMaterial({ color: 0x6e4a33, roughness: 0.9, metalness: 0.2 }),    // 녹/폐자재
   interior: new THREE.MeshStandardMaterial({ color: 0x1b1d20, roughness: 1.0 }),                // 파인 창 뒤 어두운 실내 배킹 (#265)
   soot: new THREE.MeshStandardMaterial({ color: 0x17140f, roughness: 1.0 }),                    // 화재 그을음 (#265)
+  laneYellow: new THREE.MeshStandardMaterial({ color: 0xc4b26a, roughness: 0.95 }),             // 바랜 중앙선 (#268)
+  laneWhite: new THREE.MeshStandardMaterial({ color: 0xd3d1c6, roughness: 0.95 }),              // 바랜 횡단보도/정지선 (#268)
+  lampPole: new THREE.MeshStandardMaterial({ color: 0x3b3e42, roughness: 0.6, metalness: 0.5 }), // 가로등 기둥 (#268)
 };
 
 // ── 건축 PBR 재질 (#107): BoxGeometry UV 를 월드 미터로 재기록 + repeat=1/타일크기 ──
@@ -1648,6 +1653,8 @@ const TEXMAT_DEF = {
   corrugated: [0xa8a8a8, 0.6, 1.8, 'metalBlue'],
   woodfloor: [0xb8a488, 0.85, 2.2, 'wood'],
   concrete: [0xb0aca0, 0.95, 2.6, 'concrete'],
+  asphalt: [0x8f8e8a, 0.96, 5.0, 'concreteDark'], // ambientCG Road012B 균열 아스팔트 (#268)
+  paving: [0xb4b1a7, 0.95, 2.2, 'concrete'],      // ambientCG Concrete047A 보도/광장 (#268)
 };
 const TEXMAT = {};
 function buildTexMats() {
@@ -4667,10 +4674,11 @@ function scatterGroundClutter(cx0, cz0, cx1, cz1) {
   }
 }
 
-// 하이트필드 변위 지면 타일 (산업/학교 공용) — tint 로 색조
-function buildGroundTiles(tint) {
+// 하이트필드 변위 지면 타일 (산업/학교/도심 공용) — tint 로 색조, texKey 로 GROUND_TEX 선택(도심=rubble #268)
+function buildGroundTiles(tint, texKey = 'ground') {
   let groundMat;
-  if (GROUND_TEX.ground) { const t = GROUND_TEX.ground.clone(); t.needsUpdate = true; t.repeat.set(26, 26); groundMat = new THREE.MeshStandardMaterial({ map: t, color: tint, roughness: 1.0 }); }
+  const src = GROUND_TEX[texKey] || GROUND_TEX.ground;
+  if (src) { const t = src.clone(); t.needsUpdate = true; t.repeat.set(26, 26); groundMat = new THREE.MeshStandardMaterial({ map: t, color: tint, roughness: 1.0 }); }
   else groundMat = new THREE.MeshStandardMaterial({ map: makeGroundTexture(), color: tint, roughness: 1.0 });
   const full = WORLD_HALF * 2 + 24, TILES = 6, tw = full / TILES;
   for (let ti = 0; ti < TILES; ti++) {
@@ -4951,10 +4959,57 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
   const lamp = new THREE.PointLight(0xffd9a8, 9, Math.max(w, d) * 1.1, 2); lamp.position.set(cx, gy + FH - 0.5, cz); scene.add(lamp); // 1층 실내 조명(루팅 가시)
 }
 
+// ── 도심 거리 인프라 (#268 Phase 2): 도로망(아스팔트 8m + 보도 2m + 연석) + 중앙 점선/정지선/횡단보도 + 광장 포장 + 가로등(절차) +
+// 맨홀·소화전 프롭. 전부 batchBuilder 박스(worldUV → 재질별 1 draw call). 높이 규약(동일평면 회피): E-W 아스팔트 top 0.02 /
+// N-S 0.03 / 보도·광장 0.04 / 연석 0.14 / 차선은 각 도로 top +0.01. 콜라이더는 가로등 기둥만(연석 14cm 는 통과).
+// 보도는 교차로에서 분절 — N-S 보도가 교차 아스팔트 가장자리(±4)까지 뻗어 코너를 덮고, E-W 보도는 코리더 밖(±6)에서 끝난다.
+const URBAN_NS = [-76, -22, 22, 76], URBAN_EW = [-76, -20, 22, 76]; // 도로 중심선 (외곽 순환로 ±76, 대로 x=±22, 도로 z=−20/+22)
+function buildUrbanStreets() {
+  const b = batchBuilder(), rnd = mulberry32(268);
+  const AW = 8, SW = 2, HALF = AW / 2 + SW, L = 76, NS = URBAN_NS, EW = URBAN_EW;
+  const segs = (lines, cut) => { const o = []; for (let i = 0; i < lines.length - 1; i++) o.push([lines[i] + cut, lines[i + 1] - cut]); return o; };
+  const sides = (line) => [line - AW / 2 - SW / 2, line + AW / 2 + SW / 2]; // 보도 중심(±5)
+  for (const x of NS) b.box(x, 0.02, 0, AW, 0.02, L * 2 + AW, 'asphalt', false); // N-S 아스팔트 top 0.03
+  for (const z of EW) b.box(0, 0.01, z, L * 2 + AW, 0.02, AW, 'asphalt', false); // E-W top 0.02 (교차로 겹침은 높이 차로 회피)
+  for (const x of NS) for (const [z0, z1] of segs(EW, AW / 2)) for (const sx of sides(x)) { // N-S 보도+연석
+    const zc = (z0 + z1) / 2, zl = z1 - z0;
+    b.box(sx, 0.02, zc, SW, 0.04, zl, 'paving', false);
+    b.box(sx + (sx < x ? SW / 2 - 0.1 : -SW / 2 + 0.1), 0.07, zc, 0.2, 0.14, zl, MAT.concreteDark, false);
+  }
+  for (const z of EW) for (const [x0, x1] of segs(NS, HALF)) for (const sz of sides(z)) { // E-W 보도+연석
+    const xc = (x0 + x1) / 2, xl = x1 - x0;
+    b.box(xc, 0.02, sz, xl, 0.04, SW, 'paving', false);
+    b.box(xc, 0.07, sz + (sz < z ? SW / 2 - 0.1 : -SW / 2 + 0.1), xl, 0.14, 0.2, MAT.concreteDark, false);
+  }
+  // 중앙 점선(바랜 노랑, 3m 대시/6m 주기, 일부 지워짐) — 교차로·횡단보도 구간(±9.5) 제외
+  const dash = (ax, line, s0, s1, y) => { for (let s = s0; s + 3 <= s1; s += 6) { if (rnd() < 0.15) continue; if (ax === 'z') b.box(line, y, s + 1.5, 0.15, 0.01, 3, MAT.laneYellow, false); else b.box(s + 1.5, y, line, 3, 0.01, 0.15, MAT.laneYellow, false); } };
+  for (const x of NS) for (const [z0, z1] of segs(EW, 9.5)) dash('z', x, z0, z1, 0.035);
+  for (const z of EW) for (const [x0, x1] of segs(NS, 9.5)) dash('x', z, x0, x1, 0.025);
+  for (const x of [-22, 22]) for (const z of [-20, 22]) for (const s of [-1, 1]) { // 내부 교차로 4곳: 횡단보도(6줄) + 정지선
+    for (let i = 0; i < 6; i++) b.box(x - 3.5 + i * 1.4, 0.035, z + s * 6, 0.6, 0.01, 3, MAT.laneWhite, false);
+    b.box(x, 0.035, z + s * 8.2, AW - 0.6, 0.01, 0.4, MAT.laneWhite, false);
+    for (let i = 0; i < 6; i++) b.box(x + s * 6, 0.025, z - 3.5 + i * 1.4, 3, 0.01, 0.6, MAT.laneWhite, false);
+    b.box(x + s * 8.2, 0.025, z, 0.4, 0.01, AW - 0.6, MAT.laneWhite, false);
+  }
+  b.box(0, 0.02, 1, 32, 0.04, 30, 'paving', false); // 광장 포장 |x|<16, z∈(−14,16) — 대로/도로 보도에 접함
+  const lamp = (x, z, dx, dz) => { // 절차 가로등: 베이스 + 기둥(콜라이더) + 도로쪽 암 + 헤드. 기존 건물/엄폐 콜라이더 안이면 생략
+    if (!isPointOpen(x, z, 1.0)) return;
+    b.box(x, 0.09, z, 0.42, 0.1, 0.42, MAT.concreteDark, false);
+    b.cyl(x, 2.74, z, 0.06, 0.09, 5.2, MAT.lampPole, 8, true);
+    b.box(x + dx * 0.7, 5.3, z + dz * 0.7, dx ? 1.4 : 0.12, 0.1, dz ? 1.4 : 0.12, MAT.lampPole, false);
+    b.box(x + dx * 1.3, 5.22, z + dz * 1.3, dx ? 0.55 : 0.3, 0.2, dz ? 0.55 : 0.3, MAT.steel, false);
+  };
+  for (const x of NS.slice(1, 3)) for (const [z0, z1] of segs(EW, HALF)) for (let z = z0 + 6, i = 0; z < z1 - 3; z += 20, i++) { const s = i % 2 ? 1 : -1; lamp(x + s * 5.6, z, -s, 0); }
+  for (const z of EW.slice(1, 3)) for (const [x0, x1] of segs(NS, HALF)) for (let x = x0 + 6, i = 0; x < x1 - 3; x += 20, i++) { const s = i % 2 ? 1 : -1; lamp(x, z + s * 5.6, 0, -s); }
+  b.flush();
+  for (const [x, z] of [[-24, -48], [20.5, -6], [-20, 40], [24, 60], [-50, -18.5], [46, 23.5], [8, -21.5], [-60, 20.5]]) placeProp('manhole', x, 0.0, z, { rotY: rnd() * Math.PI }); // 맨홀(아스팔트 위 4cm)
+  for (const [x, z, k] of [[-17.3, -30, 1], [-17.3, 31, 0], [17.3, -31, 1], [17.3, 30, 0], [-50, -14.7, 1], [46, 16.7, 0]]) if (isPointOpen(x, z, 0.7)) placeProp('hydrant', x, 0.04, z, { rotY: rnd() * Math.PI * 2, keep: k ? /_aged$/ : /^fire_hydrant(_cap_0[123]|_chain)?$/ }); // 소화전(보도 위, normal/aged; 건물 안이면 생략)
+}
+
 function buildUrbanMap() {
   buildTexMats();
   scene.fog = new THREE.Fog(0x949aa2, 42, 190);               // 회색 스모그
-  buildGroundTiles(0x8f959c);                                 // 아스팔트 회색
+  buildGroundTiles(0xa39d92, 'rubble');                       // 공터 = 벽돌 잔해 흙 (ambientCG Ground107) #268
   const W = WORLD_HALF;
   addBox(0, 3, -W, W * 2 + 2, 6, 1, 'concrete', { shadow: false });
   addBox(0, 3, W, W * 2 + 2, 6, 1, 'concrete', { shadow: false });
@@ -4969,14 +5024,14 @@ function buildUrbanMap() {
   ]) urbanBuilding(x, z, w, d, f, m);
   // 중앙 광장: 진입 가능한 상가 2채 + 엄폐
   buildRoom(-13, -7, 9, 8, 'plaster'); buildRoom(13, 9, 9, 8, 'brick');
-  for (const [x, z, rot] of [[-16, 18, 0], [18, -16, 1], [0, 27, 0], [-27, -13, 1], [25, 21, 0], [-4, -22, 1]]) addBox(x, 1.3, z, rot ? 2.4 : 5, 2.6, rot ? 5 : 2.4, 'metal'); // 컨테이너 엄폐
+  [[-16, 18, 0], [18, -16, 1], [0, 27, 0], [-27, -13, 1], [25, 21, 0], [-4, -22, 1]].forEach(([x, z, rot], i) => addBox(x, 1.3, z, rot ? 2.4 : 5, 2.6, rot ? 5 : 2.4, [MAT.metalRed, MAT.metalBlue, MAT.metalGreen][i % 3])); // 컨테이너 엄폐 (재질키 'metal' 미존재 버그 수정 #268)
   for (const [x, z, ax] of [[-6, 0, 'x'], [8, -4, 'z'], [-2, 11, 'x'], [10, 6, 'z']]) addWall(x, z, 6, 1.1, ax, 'concrete'); // 낮은 방벽
   for (const [x, z] of [[-10, 4], [10, -8], [0, 16], [-20, 20], [22, -6]]) placeModel('barrel', x, z, { collide: true });
+  buildUrbanStreets(); // 도로망·보도·차선·광장·가로등·맨홀·소화전 (#268) — 건물/엄폐 뒤에 호출: 가로등·소화전이 isPointOpen 으로 기존 콜라이더를 피함
   losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile);
 }
 const URBAN_FLATTENS = [
-  { x: 0, z: 0, hw: 74, hd: 74 },
-  ...[[82, 82, 7], [-82, 82, 7], [82, -82, 7], [-82, -82, 7]].map(([x, z, r]) => ({ x, z, r })),
+  { x: 0, z: 0, hw: 84, hd: 84 }, // 순환로(±76)·탈출점(±80)까지 평탄 (#268)
 ];
 const MAP_URBAN = {
   key: 'urban', name: '도심 폐허', desc: '무너진 도심 — 아파트 블록·거리 시가전',
