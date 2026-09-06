@@ -4764,40 +4764,7 @@ const MAP_SCHOOL = {
 };
 
 // ── 도심 맵 (#198) ────────────────────────────────────────
-// 창문 + 1층 진입 실내 (#199). 1층=창문 셸(정면 문)+바닥/천장, 상층=솔리드+창 facade.
-function urbanWins(len) {
-  const sp = 3.2, n = Math.max(1, Math.floor((len - 2.6) / sp)), span = n * sp, o = [];
-  for (let i = 0; i <= n; i++) o.push({ at: -span / 2 + i * sp, w: 1.4 });
-  return o;
-}
-function urbanBuilding(cx, cz, w, d, floors, mat) {
-  const FH = 3.3;
-  // 1층: 진입 셸 — 정면(+Z) 문, 나머지 3면 창문 벽
-  addWallWithDoor(cx, cz + d / 2, w, FH, 'x', mat, 0, 2.8);
-  addWindowWall(cx, cz - d / 2, w, FH, 'x', mat, urbanWins(w), 0);
-  addWindowWall(cx - w / 2, cz, d, FH, 'z', mat, urbanWins(d), 0);
-  addWindowWall(cx + w / 2, cz, d, FH, 'z', mat, urbanWins(d), 0);
-  addBox(cx, 0.05, cz, w, 0.1, d, 'concrete', { block: false }); // 실내 바닥
-  addBox(cx, FH, cz, w, 0.3, d, 'concrete');                      // 천장(=상층 바닥)
-  // 상층: 솔리드 매스 + 각 층 창 facade(어두운 창)
-  if (floors > 1) {
-    const uh = (floors - 1) * FH;
-    addBox(cx, FH + uh / 2, cz, w, uh, d, mat);
-    for (let f = 1; f < floors; f++) {
-      addWindowWall(cx, cz + d / 2 + 0.05, w, FH, 'x', mat, urbanWins(w), f * FH);
-      addWindowWall(cx, cz - d / 2 - 0.05, w, FH, 'x', mat, urbanWins(w), f * FH);
-    }
-  }
-  addBox(cx, floors * FH + 0.25, cz, w + 0.5, 0.5, d + 0.5, 'concrete'); // 옥상 파라펫
-}
-function buildRoom(cx, cz, w, d, mat) {                        // 진입 가능한 작은 상가(문 1개)
-  const h = 3;
-  addWallWithDoor(cx, cz + d / 2, w, h, 'x', mat, 0, 2.4);
-  addWall(cx, cz - d / 2, w, h, 'x', mat);
-  addWall(cx - w / 2, cz, d, h, 'z', mat);
-  addWall(cx + w / 2, cz, d, h, 'z', mat);
-  addBox(cx, h + 0.1, cz, w + 0.3, 0.2, d + 0.3, 'concrete');  // 지붕
-}
+// 1층 진입 실내(#199)는 buildUrbanBlock 이 계승. 옛 박스 건물(urbanBuilding/buildRoom)은 Phase 3 롤아웃(#271)으로 제거.
 // ── 시드 PRNG (결정론적 변주 — 매 로드 동일, QA 재현 가능. modular-game-architecture 스킬) ──
 function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 
@@ -4856,14 +4823,18 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
   const fpos = (f, along, off) => (f.ax === 'x' ? [cx + along, f.c + f.n * off] : [f.c + f.n * off, cz + along]); // 월드 [x,z]
   const fyaw = (f) => (f.ax === 'x' ? (f.n > 0 ? 0 : Math.PI) : (f.n > 0 ? Math.PI / 2 : -Math.PI / 2));   // 모델 +Z → 바깥
   const bays = (len, sp = 3.2, ww = 1.4) => { const n = Math.max(1, Math.floor((len - 2.6) / sp)), span = n * sp, o = []; for (let i = 0; i <= n; i++) o.push({ at: -span / 2 + i * sp, w: ww }); return o; };
-  // 창 뚫린 벽(1층 = 실제 개구부·콜라이더 / 상층 = 파인 창): 창턱 밴드 + 상인방 밴드 + 피어
-  const winWall = (f, by, openings, collide, sill = 1.0, lintel = 2.2) => {
-    fbox(f, 0, by + sill / 2, 0, f.len, sill, t, mat, collide);
+  // 창 뚫린 벽(1층 = 실제 개구부·콜라이더 / 상층 = 파인 창): 창턱 밴드 + 상인방 밴드 + 피어. door={at,w} 면 문 개구부(창턱 밴드 분절, 상인방까지 개방)
+  const winWall = (f, by, openings, collide, sill = 1.0, lintel = 2.2, door = null) => {
+    const ops = door ? [...openings, { at: door.at, w: door.w }].sort((a, b) => a.at - b.at) : openings;
+    if (door) { for (const [s0, s1] of [[-f.len / 2, door.at - door.w / 2], [door.at + door.w / 2, f.len / 2]]) if (s1 - s0 > 0.1) fbox(f, (s0 + s1) / 2, by + sill / 2, 0, s1 - s0, sill, t, mat, collide); }
+    else fbox(f, 0, by + sill / 2, 0, f.len, sill, t, mat, collide);
     fbox(f, 0, by + lintel + (FH - lintel) / 2, 0, f.len, FH - lintel, t, mat, collide);
-    const edges = [-f.len / 2, ...openings.flatMap((o) => [o.at - o.w / 2, o.at + o.w / 2]), f.len / 2];
+    const edges = [-f.len / 2, ...ops.flatMap((o) => [o.at - o.w / 2, o.at + o.w / 2]), f.len / 2];
     for (let i = 0; i < edges.length; i += 2) { const sl = edges[i + 1] - edges[i]; if (sl > 0.1) fbox(f, (edges[i] + edges[i + 1]) / 2, by + sill + (lintel - sill) / 2, 0, sl, lintel - sill, t, mat, collide); }
     for (const o of openings) fbox(f, o.at, by + sill + 0.03, t / 2 + 0.05, o.w + 0.3, 0.08, 0.12, trim); // 창턱 트림(proud)
+    if (door) fbox(f, door.at, by + lintel + 0.02, t / 2 + 0.03, door.w + 0.5, 0.1, 0.1, MAT.woodDark); // 문틀 상단
   };
+  const bay = style === 'office' ? [3.0, 2.2] : [3.2, 1.4]; // office = 넓은 리본창, 발코니 없음
   const props = []; // 배치 후 부착 프롭 (배치 빌더 flush 이후)
 
   // ── 1층: 진입 셸 ──
@@ -4871,12 +4842,12 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
   b.box(cx, gy + FH + 0.15, cz, w + 0.2, 0.3, d + 0.2, 'concrete', false); // 천장(=2층 바닥)
   if (w >= 14) for (const sx of [-1, 1]) b.box(cx + sx * w * 0.25, gy + FH / 2, cz, 0.5, FH, 0.5, trim, true); // 실내 기둥(엄폐)
   for (const f of faces) {
-    if (f.front) { // 정면: 문 + (상가면 롤셔터·간판)
+    if (f.front && shop) { // 상가 정면: 솔리드 벽 + 문 + 롤셔터·파시아·간판
       const dw = 2.8;
       for (const [s0, s1] of [[-f.len / 2, door - dw / 2], [door + dw / 2, f.len / 2]]) if (s1 - s0 > 0.1) fbox(f, (s0 + s1) / 2, gy + FH / 2, 0, s1 - s0, FH, t, mat, true);
       fbox(f, door, gy + FH - 0.35, 0, dw, 0.7, t, mat, true); // 문 상단
       fbox(f, door, gy + 2.62, t / 2 + 0.03, dw + 0.5, 0.1, 0.1, MAT.woodDark); // 문틀 상단
-      if (shop) {
+      {
         fbox(f, 0, gy + 2.95, t / 2 + 0.07, f.len - 0.6, 0.7, 0.12, dark); // 파시아 밴드
         for (const [s0, s1] of [[-f.len / 2 + 0.4, door - dw / 2 - 0.3], [door + dw / 2 + 0.3, f.len / 2 - 0.4]]) {
           const n = Math.min(2, Math.floor((s1 - s0) / 2.72)); if (n < 1) continue;
@@ -4890,8 +4861,10 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
           sign.position.set(sx, gy + 2.95, sz); sign.rotation.y = fyaw(f); scene.add(sign); obstacleMeshes.push(sign);
         }
       }
-    } else { // 측·후면: 실제 개구부(사격 가능) + 일부 판자 막음
-      const ws = bays(f.len); winWall(f, gy, ws, true, 1.0, 2.0);
+    } else { // 측·후면(+비상가 정면: 문 포함): 실제 개구부(사격 가능) + 일부 판자 막음
+      const dr = f.front ? { at: door, w: 2.8 } : null;
+      const ws = bays(f.len, ...bay).filter((o) => !dr || Math.abs(o.at - dr.at) > (dr.w + o.w) / 2 + 0.4);
+      winWall(f, gy, ws, true, 1.0, f.front ? 2.3 : 2.0, dr);
       for (const o of ws) if (rnd() < 0.3) for (let k = 0; k < 3; k++) fbox(f, o.at, gy + 1.2 + k * 0.32, 0.02, o.w + 0.24, 0.15, 0.06, MAT.woodDark);
     }
     fbox(f, f.front ? (door + 1.4 + f.len / 2) / 2 : 0, gy + 0.4, t / 2 + 0.03, f.front ? (f.len / 2 - door - 1.4) - 0.5 : f.len - 0.5, 0.8, 0.04, dark); // 그라임 밴드(정면은 문 우측)
@@ -4903,7 +4876,7 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
   for (let fl = 1; fl < floors; fl++) {
     const by = gy + fl * FH;
     for (const f of faces) {
-      const ws = bays(f.len); winWall(f, by, ws, false);
+      const ws = bays(f.len, ...bay); winWall(f, by, ws, false);
       fbox(f, 0, by + 1.6, -0.30, f.len - 0.5, 1.3, 0.06, MAT.interior); // 어두운 배킹(창 뒤 실내) — 깊이감
       for (const o of ws) {
         const burnt = rnd() < 0.1;
@@ -4927,28 +4900,31 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
   b.box(cx, gy + H + 0.05, cz, w - 0.2, 0.1, d - 0.2, MAT.roof, false);
   for (const f of faces) { fbox(f, 0, gy + H + 0.35, 0, f.len + 0.3, 0.7, t, mat); fbox(f, 0, gy + H + 0.74, 0, f.len + 0.44, 0.08, 0.5, trim); } // 파라펫 + 캡
   const phx = cx - w * 0.22, phz = cz + d * 0.1;
-  b.box(phx, gy + H + 1.6, phz, 4.2, 3.2, 3.0, mat, false);                          // 계단탑
-  b.box(phx, gy + H + 3.25, phz, 4.5, 0.1, 3.3, trim, false);                        // 계단탑 캡
-  b.box(phx + 2.14, gy + H + 1.05, phz - 0.6, 0.06, 2.1, 0.9, MAT.woodDark, false);  // 계단탑 문(면에서 1cm proud)
-  const wtx = cx + w * 0.26, wtz = cz - d * 0.22;                                    // 물탱크(다리+원통+원뿔)
-  for (const [ox, oz] of [[-0.85, -0.85], [0.85, -0.85], [-0.85, 0.85], [0.85, 0.85]]) b.box(wtx + ox, gy + H + 0.8, wtz + oz, 0.14, 1.5, 0.14, MAT.rust, false);
-  b.cyl(wtx, gy + H + 1.55 + 1.1, wtz, 1.2, 1.2, 2.2, MAT.steel, 14, false);
-  b.cone(wtx, gy + H + 3.75 + 0.35, wtz, 1.26, 0.7, MAT.steel, 14);
-  for (let i = 0; i < 3; i++) b.cyl(cx + (rnd() - 0.5) * w * 0.6, gy + H + 0.7, cz + (rnd() - 0.5) * d * 0.6, 0.12, 0.14, 1.2, MAT.rust, 8, false); // 환기관
-  b.cyl(phx - 1.8, gy + H + 3.3 + 2.0, phz + 1.2, 0.03, 0.04, 4.0, MAT.steel, 6, false); // 안테나
-  b.box(phx - 1.8, gy + H + 7.2, phz + 1.2, 0.7, 0.04, 0.5, MAT.steel, false);
+  if (floors > 1) { // 다층만 계단탑·물탱크 (1층 상가는 옥상이 좁음)
+    b.box(phx, gy + H + 1.6, phz, 4.2, 3.2, 3.0, mat, false);                          // 계단탑
+    b.box(phx, gy + H + 3.25, phz, 4.5, 0.1, 3.3, trim, false);                        // 계단탑 캡
+    b.box(phx + 2.14, gy + H + 1.05, phz - 0.6, 0.06, 2.1, 0.9, MAT.woodDark, false);  // 계단탑 문(면에서 1cm proud)
+    const wtx = cx + w * 0.26, wtz = cz - d * 0.22;                                    // 물탱크(다리+원통+원뿔)
+    for (const [ox, oz] of [[-0.85, -0.85], [0.85, -0.85], [-0.85, 0.85], [0.85, 0.85]]) b.box(wtx + ox, gy + H + 0.8, wtz + oz, 0.14, 1.5, 0.14, MAT.rust, false);
+    b.cyl(wtx, gy + H + 1.55 + 1.1, wtz, 1.2, 1.2, 2.2, MAT.steel, 14, false);
+    b.cone(wtx, gy + H + 3.75 + 0.35, wtz, 1.26, 0.7, MAT.steel, 14);
+  }
+  for (let i = 0; i < (floors > 1 ? 3 : 1); i++) b.cyl(cx + (rnd() - 0.5) * w * 0.6, gy + H + 0.7, cz + (rnd() - 0.5) * d * 0.6, 0.12, 0.14, 1.2, MAT.rust, 8, false); // 환기관
+  const anx = floors > 1 ? phx - 1.8 : cx + w * 0.3, anz = floors > 1 ? phz + 1.2 : cz - d * 0.3, anB = floors > 1 ? 3.3 : 0.1; // 안테나(계단탑 위 / 1층은 지붕 위)
+  b.cyl(anx, gy + H + anB + 2.0, anz, 0.03, 0.04, 4.0, MAT.steel, 6, false);
+  b.box(anx, gy + H + anB + 3.9, anz, 0.7, 0.04, 0.5, MAT.steel, false);
   b.flush();
   // 부착 프롭(배치 빌더 이후): 옥상 AC(rusted) + 측벽 AC + 롤셔터/간판 + 비상계단
   placeProp('acUnit', cx + w * 0.05, gy + H + 0.11, cz - d * 0.3, { rotY: 0.4, height: 0.95, keep: /rusted/ });
-  placeProp('acUnit', cx - w * 0.3, gy + H + 0.11, cz - d * 0.25, { rotY: -1.2, height: 0.95, keep: /rusted/ });
-  const acFace = faces[2]; // 동측벽 창 아래 실외기 3대(시드 층 선택)
-  for (const o of bays(acFace.len).filter((_, i) => i % 2 === 0).slice(0, 3)) {
+  if (floors > 1) placeProp('acUnit', cx - w * 0.3, gy + H + 0.11, cz - d * 0.25, { rotY: -1.2, height: 0.95, keep: /rusted/ });
+  const acFace = faces.find((q) => q.key === (fireEscape === 'east' ? 'west' : 'east')); // 비상계단 반대 측벽 창 아래 실외기 3대(시드 층 선택)
+  for (const o of (floors > 1 ? bays(acFace.len, ...bay).filter((_, i) => i % 2 === 0).slice(0, 3) : [])) {
     const fl = 1 + Math.floor(rnd() * (floors - 1)), [px, pz] = fpos(acFace, o.at + 0.9, t / 2 + 0.25);
     placeProp('acUnit', px, gy + fl * FH + 0.21, pz, { rotY: fyaw(acFace), height: 0.85, keep: rnd() < 0.5 ? /rusted/ : /^exterior_aircon_unit$/ });
     fbox(acFace, o.at + 0.9, gy + fl * FH + 0.17, t / 2 + 0.25, 0.9, 0.06, 0.5, MAT.rust); // 브래킷
   }
   for (const [k, x, y, z, o] of props) placeProp(k, x, y, z, o);
-  if (fireEscape) { // 비상계단: 2층부터 파라펫 아래까지, 벽에 붙여
+  if (fireEscape && floors >= 3) { // 비상계단: 2층부터 파라펫 아래까지, 벽에 붙여 (3층 이상만)
     const f = faces.find((q) => q.key === fireEscape) || faces[3];
     const fh = Math.min(H - FH - 0.8, 12.5), [px, pz] = fpos(f, -f.len * 0.04, t / 2 + 0.95); // 중앙 근처(코너 난간 돌출 방지)
     const fe = placeProp('fireEscape', px, gy + FH + 0.3, pz, { rotY: fyaw(f), height: fh });
@@ -5016,14 +4992,20 @@ function buildUrbanMap() {
   addBox(-W, 3, 0, 1, 6, W * 2 + 2, 'concrete', { shadow: false });
   addBox(W, 3, 0, 1, 6, W * 2 + 2, 'concrete', { shadow: false });
   // 아파트/오피스 블록 (다양한 높이·재질) — 중앙 광장(±16) 개방, 거리 형성
+  // 블록 12동 = buildUrbanBlock 3스타일 변주 (#265 히어로, #271 롤아웃). 1층 진입·루팅 스팟은 건물 중심(기둥 사이) 유지.
   buildUrbanBlock(-36, -36, 20, 16, 5, { style: 'apartment', mat: 'brickCity', shop: true, fireEscape: 'west', seed: 11, door: -3 }); // 히어로 블록 (#265 Phase 1)
-  for (const [x, z, w, d, f, m] of [
-    [36, -34, 18, 20, 6, 'concrete'], [-38, 38, 22, 18, 4, 'plaster'],
-    [40, 36, 16, 16, 7, 'brick'], [-60, 2, 14, 28, 5, 'concrete'], [60, 6, 16, 22, 6, 'plaster'],
-    [0, -58, 30, 14, 4, 'brick'], [4, 60, 26, 14, 5, 'concrete'], [-62, -60, 18, 16, 5, 'plaster'], [62, -62, 16, 18, 6, 'brick'],
-  ]) urbanBuilding(x, z, w, d, f, m);
-  // 중앙 광장: 진입 가능한 상가 2채 + 엄폐
-  buildRoom(-13, -7, 9, 8, 'plaster'); buildRoom(13, 9, 9, 8, 'brick');
+  buildUrbanBlock(36, -34, 18, 20, 6, { style: 'office', mat: 'concrete', shop: false, fireEscape: 'east', seed: 23, door: 2 });
+  buildUrbanBlock(-38, 38, 22, 18, 4, { style: 'apartment', mat: 'plasterDirty', shop: true, fireEscape: 'west', seed: 31, door: 4 });
+  buildUrbanBlock(40, 36, 16, 16, 7, { style: 'apartment', mat: 'brick', shop: true, seed: 41, door: -2 });
+  buildUrbanBlock(-60, 2, 14, 28, 5, { style: 'office', mat: 'concreteStain', shop: false, fireEscape: 'north', seed: 53, door: 0 });
+  buildUrbanBlock(60, 6, 16, 22, 6, { style: 'apartment', mat: 'plasterDirty', shop: true, fireEscape: 'east', seed: 61, door: -3 });
+  buildUrbanBlock(0, -58, 30, 14, 4, { style: 'plain', mat: 'brickCity', shop: true, seed: 71, door: 6 });
+  buildUrbanBlock(4, 60, 26, 14, 5, { style: 'office', mat: 'concrete', shop: false, seed: 83, door: -5 });
+  buildUrbanBlock(-62, -60, 18, 16, 5, { style: 'apartment', mat: 'plasterDirty', shop: false, fireEscape: 'west', seed: 97, door: 3 });
+  buildUrbanBlock(62, -62, 16, 18, 6, { style: 'plain', mat: 'brick', shop: false, fireEscape: 'east', seed: 101, door: -1 });
+  // 중앙 광장: 진입 가능한 1층 상가 2채 + 엄폐
+  buildUrbanBlock(-13, -7, 9, 8, 1, { style: 'plain', mat: 'plasterDirty', shop: true, seed: 113, door: -2.5 });
+  buildUrbanBlock(13, 9, 9, 8, 1, { style: 'plain', mat: 'brick', shop: true, seed: 127, door: -2.5 });
   [[-16, 18, 0], [18, -16, 1], [0, 27, 0], [-27, -13, 1], [25, 21, 0], [-4, -22, 1]].forEach(([x, z, rot], i) => addBox(x, 1.3, z, rot ? 2.4 : 5, 2.6, rot ? 5 : 2.4, [MAT.metalRed, MAT.metalBlue, MAT.metalGreen][i % 3])); // 컨테이너 엄폐 (재질키 'metal' 미존재 버그 수정 #268)
   for (const [x, z, ax] of [[-6, 0, 'x'], [8, -4, 'z'], [-2, 11, 'x'], [10, 6, 'z']]) addWall(x, z, 6, 1.1, ax, 'concrete'); // 낮은 방벽
   for (const [x, z] of [[-10, 4], [10, -8], [0, 16], [-20, 20], [22, -6]]) placeModel('barrel', x, z, { collide: true });
