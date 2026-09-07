@@ -239,6 +239,7 @@ const dom = {
   deathCause: $('death-cause'), deathLoot: $('death-loot'),
   extractStats: $('extract-stats'), extractLoot: $('extract-loot'),
   scopeOverlay: $('scope-overlay'), healHint: $('heal-hint'),
+  rangeHud: $('range-hud'), rhShots: $('rh-shots'), rhHits: $('rh-hits'), rhAcc: $('rh-acc'), rhLast: $('rh-last'), rhGroup: $('rh-group'), // 사격 연습장 스코어 (#292)
 };
 
 // ---------- 모바일 감지 ----------
@@ -1763,6 +1764,10 @@ function buildTexMats() {
   TEXMAT.concreteStain = variant('concrete', 0x8d887b, 0.97);    // 얼룩진 콘크리트
   TEXMAT.brickCity = variant('brick', 0x9c7e6e, 0.93);           // 도심 적벽돌(짙은 톤) (#265)
   TEXMAT.plasterDirty = variant('plaster', 0xa9a395, 0.97);      // 때 탄 플라스터 (#265)
+  if (GROUND_TEX.ground) { // 흙 박스 재질(사격장 버름 #292) — 지면 컬러맵을 worldUV 박스에 4m 타일로
+    const t = GROUND_TEX.ground.clone(); t.needsUpdate = true; t.repeat.set(1 / 4, 1 / 4);
+    TEXMAT.dirt = new THREE.MeshStandardMaterial({ map: t, color: 0xb8a88c, roughness: 1.0 }); TEXMAT.dirt.userData = { worldUV: true };
+  }
 }
 function matOf(mat) { return typeof mat === 'string' ? (TEXMAT[mat] || MAT.concrete) : mat; }
 
@@ -4099,6 +4104,7 @@ function fireShot() {
   // 탄퍼짐: updateGun 에서 매 프레임 계산한 유효 탄퍼짐(기본+이동+bloom) = 크로스헤어와 동일 소스 (#207)
   const spread = gun.spread || (player.aiming ? GUN.spreadAds : GUN.spreadHip);
 
+  if (state.range) { rangeScore.shots++; updateRangeHud(); } // 연습장 발사 카운트(산탄은 1발) — 빗나가도 즉시 갱신 (#292)
   let anyHit = false;
   for (let p = 0; p < GUN.pellets; p++) {
     const dir = aimPoint.clone().sub(muzzle).normalize();
@@ -4134,6 +4140,10 @@ function fireShot() {
           p.body.applyImpulse({ x: dir.x * 5 * m, y: 1.5 * m, z: dir.z * 5 * m }, true);
           p.body.applyTorqueImpulse({ x: (Math.random() - 0.5) * m, y: (Math.random() - 0.5) * m, z: (Math.random() - 0.5) * m }, true);
         }
+      } else if (ud && ud.rangeTarget) { // 연습장 표적 (#292): 점수/존/공 반응 + 종이·실루엣엔 탄흔
+        rangeHit(ud.rangeTarget, h);
+        if (ud.rangeTarget.kind !== 'gong' && h.face) { _decalN.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize(); spawnDecal(h.point, _decalN); }
+        anyHit = true;
       } else if (h.face) {
         // 환경(벽·바닥·정적 소품) 명중 → 탄흔 데칼 (#208)
         _decalN.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize();
@@ -5322,27 +5332,129 @@ function rangeLabelTexture(text) {
   g.fillText(text, 128, 48);
   const t = new THREE.CanvasTexture(c); t.needsUpdate = true; return t;
 }
-function addTargetBoard(x, z, dist) {
+// ── 사격 연습장 보완 (#292): 리얼 사격장(자갈·흙 버름 백스톱·골강판 셸터·레인 4) + 반응 표적(종이 링 점수 / 실루엣 HEAD·BODY 존 /
+// 스틸 공 진자 흔들림 + 거리 지연 딩) + 스코어 HUD(발사·명중·명중률·마지막·5발 그룹). T 로 리셋. 표적은 obstacleMeshes 에 들어가 탄 레이에 맞는다.
+let rangeTargets = [];
+const rangeScore = { shots: 0, hits: 0, last: '—', groups: new Map(), groupText: '—' };
+function rangeSilhouetteTexture() { // 실루엣 표적: 판지 + 회색 인체 + 머리(빨강)/몸통 중심(노랑) 존
+  const c = document.createElement('canvas'); c.width = 128; c.height = 256; const g = c.getContext('2d');
+  g.fillStyle = '#c9b48e'; g.fillRect(0, 0, 128, 256);
+  g.fillStyle = '#3a3a3a'; g.beginPath(); g.arc(64, 44, 20, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.moveTo(30, 74); g.lineTo(98, 74); g.lineTo(108, 250); g.lineTo(20, 250); g.closePath(); g.fill();
+  g.lineWidth = 3; g.strokeStyle = '#d64c3c'; g.beginPath(); g.arc(64, 44, 22, 0, Math.PI * 2); g.stroke();
+  g.strokeStyle = '#e0c060'; g.beginPath(); g.rect(40, 96, 48, 70); g.stroke();
+  const t = new THREE.CanvasTexture(c); t.needsUpdate = true; return t;
+}
+function rangeFrame(x, z, w, h) { for (const s of [-1, 1]) addBox(x + s * w / 2, h / 2, z + 0.06, 0.1, h, 0.1, MAT.woodDark, { collide: false }); addBox(x, h, z + 0.06, w + 0.2, 0.08, 0.1, MAT.woodDark, { collide: false }); }
+function addRangeLabel(x, z, dist) { const l = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 0.58), new THREE.MeshBasicMaterial({ map: rangeLabelTexture(dist + ' m'), transparent: true })); l.position.set(x, 3.05, z); scene.add(l); }
+function addPaperTarget(x, z, dist) { // 종이 과녁: 링 점수 10~3 (텍스처 링 반지름 비율)
+  rangeFrame(x, z, 1.3, 2.6);
   const board = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 1.9), new THREE.MeshLambertMaterial({ map: rangeBullseyeTexture() }));
-  board.position.set(x, 1.55, z); board.receiveShadow = true; // 기본 plane 법선 +z = 사수쪽
-  scene.add(board); obstacleMeshes.push(board); // 탄 맞음 → 데칼로 탄착군 표시
-  addBox(x, 0.78, z + 0.03, 0.12, 1.55, 0.12, 'metal', { collide: false }); // 지지대
-  const label = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 0.58), new THREE.MeshBasicMaterial({ map: rangeLabelTexture(dist + ' m'), transparent: true }));
-  label.position.set(x, 3.05, z); scene.add(label);
+  board.position.set(x, 1.55, z); board.receiveShadow = true; scene.add(board); obstacleMeshes.push(board); // 기본 plane 법선 +z = 사수쪽
+  board.userData.rangeTarget = { kind: 'paper', dist, mesh: board, id: rangeTargets.length, hw: 0.65, hh: 0.95 };
+  rangeTargets.push(board.userData.rangeTarget); addRangeLabel(x, z, dist);
+}
+function addSilhouette(x, z, dist) { // 실루엣: HEAD / BODY / 가장자리
+  rangeFrame(x, z, 0.9, 2.5);
+  const board = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 1.8), new THREE.MeshLambertMaterial({ map: rangeSilhouetteTexture() }));
+  board.position.set(x, 1.4, z); board.receiveShadow = true; scene.add(board); obstacleMeshes.push(board);
+  board.userData.rangeTarget = { kind: 'silhouette', dist, mesh: board, id: rangeTargets.length };
+  rangeTargets.push(board.userData.rangeTarget); addRangeLabel(x, z, dist);
+}
+function addGong(x, z, dist, r) { // 스틸 공: 녹슨 프레임 크로스바에 체인 2줄로 매단 원판 — 피격 시 진자 흔들림 + 딩
+  const top = 2.6, L = 0.55;
+  for (const s of [-1, 1]) addBox(x + s * (r + 0.35), top / 2, z, 0.08, top, 0.08, MAT.rust, { collide: false });
+  addBox(x, top, z, r * 2 + 0.9, 0.08, 0.08, MAT.rust, { collide: false });
+  const pivot = new THREE.Group(); pivot.position.set(x, top, z); scene.add(pivot);
+  for (const s of [-1, 1]) { const ch = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, L, 5), MAT.rust); ch.position.set(s * r * 0.6, -L / 2, 0); pivot.add(ch); }
+  const plate = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.03, 24), MAT.steel); plate.rotation.x = Math.PI / 2; plate.position.set(0, -L - r, 0);
+  plate.castShadow = true; pivot.add(plate); obstacleMeshes.push(plate);
+  plate.userData.rangeTarget = { kind: 'gong', dist, mesh: plate, id: rangeTargets.length, pivot, L: L + r, ang: 0, vel: 0 };
+  rangeTargets.push(plate.userData.rangeTarget); addRangeLabel(x, z + 0.3, dist);
+}
+function gongRing(dist) { // 금속 딩: 배음 3개 사인 감쇠, 거리만큼 늦게(340 m/s)·작게 — 소리로 명중 확인
+  const ctx = audio(), t0 = ctx.currentTime + dist / 340, vol = 0.35 / (1 + dist / 45);
+  for (const [f, g, d] of [[2350, 1.0, 0.7], [3560, 0.5, 0.45], [1180, 0.35, 0.9]]) {
+    const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f;
+    const gn = ctx.createGain(); gn.gain.setValueAtTime(0.0001, t0); gn.gain.exponentialRampToValueAtTime(vol * g, t0 + 0.004); gn.gain.exponentialRampToValueAtTime(0.0001, t0 + d);
+    o.connect(gn).connect(sfxBus); o.start(t0); o.stop(t0 + d + 0.05);
+  }
+}
+function rangeHit(t, h) {
+  rangeScore.hits++;
+  const local = t.mesh.worldToLocal(h.point.clone());
+  let label;
+  if (t.kind === 'paper') {
+    const rn = Math.hypot(local.x / t.hw, local.y / t.hh), score = rn < 0.16 ? 10 : rn < 0.31 ? 9 : rn < 0.47 ? 8 : rn < 0.63 ? 7 : rn < 0.78 ? 6 : rn < 0.94 ? 5 : 3;
+    label = `${t.dist}m ${score}점${score === 10 ? ' ★' : ''}`;
+  } else if (t.kind === 'silhouette') {
+    const head = Math.hypot(local.x, local.y - 0.63) < 0.17, body = Math.abs(local.x) < 0.3 && local.y > -0.35 && local.y < 0.42;
+    label = `${t.dist}m ${head ? 'HEAD ★' : body ? 'BODY' : '가장자리'}`;
+  } else { t.vel += 2.2 + Math.random() * 0.6; gongRing(t.dist); label = `${t.dist}m 공 ♪`; } // 사수는 항상 +z 쪽 → 뒤로 ~40° 흔들림(6 이면 한 바퀴 넘어감)
+  rangeScore.last = label;
+  if (t.kind !== 'gong') { // 같은 표적 최근 5발 그룹 크기(최대 쌍 거리, cm)
+    const arr = rangeScore.groups.get(t.id) || []; arr.push([local.x, local.y]); while (arr.length > 5) arr.shift(); rangeScore.groups.set(t.id, arr);
+    let mx = 0; for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) mx = Math.max(mx, Math.hypot(arr[i][0] - arr[j][0], arr[i][1] - arr[j][1]));
+    rangeScore.groupText = arr.length >= 2 ? `${Math.round(mx * 100)} cm (${arr.length}발 @${t.dist}m)` : '—';
+  }
+  updateRangeHud();
+}
+function updateRangeTargets(dt) { // 스틸 공 진자: θ'' = −(g/L)·sin θ − c·θ'
+  for (const t of rangeTargets) if (t.kind === 'gong' && (t.vel || t.ang)) {
+    t.vel += (-(9.8 / t.L) * Math.sin(t.ang) - 1.4 * t.vel) * dt; t.ang += t.vel * dt; t.pivot.rotation.x = t.ang;
+    if (Math.abs(t.ang) < 0.002 && Math.abs(t.vel) < 0.01) { t.ang = 0; t.vel = 0; t.pivot.rotation.x = 0; }
+  }
+}
+function resetRange() { // T: 카운트·그룹·공·탄흔 리셋
+  rangeScore.shots = 0; rangeScore.hits = 0; rangeScore.last = '—'; rangeScore.groups.clear(); rangeScore.groupText = '—';
+  for (const t of rangeTargets) if (t.kind === 'gong') { t.ang = 0; t.vel = 0; t.pivot.rotation.x = 0; }
+  for (const d of decals) scene.remove(d); decals = [];
+  updateRangeHud();
+}
+function updateRangeHud() {
+  if (!dom.rangeHud) return;
+  dom.rhShots.textContent = rangeScore.shots; dom.rhHits.textContent = rangeScore.hits;
+  dom.rhAcc.textContent = rangeScore.shots ? Math.round(100 * rangeScore.hits / rangeScore.shots) + '%' : '—';
+  dom.rhLast.textContent = rangeScore.last; dom.rhGroup.textContent = rangeScore.groupText || '—';
 }
 const RANGE_FIRE_Z = 58, RANGE_EXIT_Z = 68; // 사격선(스폰) / 퇴장 지점(스폰 10m 뒤, 반경5 밖)
 function buildRangeMap() {
   buildTexMats();
   scene.fog = new THREE.Fog(0xb0b6bd, 90, 280);
-  buildGroundTiles(0x9aa0a6); // 콘크리트 회색
-  const backZ = -48, frontZ = 74, hx = 16, midZ = (backZ + frontZ) / 2, lz = frontZ - backZ;
-  addBox(0, 4.5, backZ, hx * 2, 9, 1, 'concrete', { shadow: false });   // 후벽 = 스프레이 받이
-  addBox(0, 3, frontZ, hx * 2, 6, 1, 'concrete', { shadow: false });    // 사수 뒤 벽(퇴장보다 뒤)
-  addBox(-hx, 3, midZ, 1, 6, lz, 'concrete', { shadow: false });        // 측벽
-  addBox(hx, 3, midZ, 1, 6, lz, 'concrete', { shadow: false });
-  addBox(0, 0.12, RANGE_FIRE_Z - 1.5, hx * 2 - 3, 0.24, 0.4, 'metal', { collide: false }); // 사격선 턱
-  const dists = [10, 25, 50, 100], spots = [-7, -2.3, 2.3, 7];          // 좌우 스태거(가림 방지)
-  dists.forEach((d, i) => { const z = RANGE_FIRE_Z - d; if (z > backZ + 1.5) addTargetBoard(spots[i], z, d); });
+  buildGroundTiles(0xb3ada2, 'gravel'); // 자갈 마당 (#292)
+  const backZ = -48, frontZ = 74, hx = 16, midZ = (backZ + frontZ) / 2, lz = frontZ - backZ, rr = mulberry32(292);
+  const b = batchBuilder();
+  // 버름(흙 둔덕, 3단 계단형): 측면 2 + 백스톱(높고 두꺼움). 콘크리트 벽 대체 — 밑단만 콜라이더
+  const berm = (cx, cz, len, ax, h, base) => { let y = 0; for (const [w, sh] of [[base, h * 0.42], [base * 0.62, h * 0.33], [base * 0.28, h * 0.25]]) { if (ax === 'x') b.box(cx, y + sh / 2, cz, len, sh, w, 'dirt', y === 0); else b.box(cx, y + sh / 2, cz, w, sh, len, 'dirt', y === 0); y += sh; } };
+  berm(0, backZ, hx * 2 + 12, 'x', 9, 7);                                       // 백스톱
+  berm(-hx, midZ, lz + 6, 'z', 4.5, 5); berm(hx, midZ, lz + 6, 'z', 4.5, 5);    // 측면
+  addBox(0, 3, frontZ, hx * 2 + 4, 6, 1, 'concreteStain', { shadow: false });   // 사수 뒤 벽
+  b.box(0, 0.4, frontZ - 0.53, hx * 2 + 2, 0.8, 0.06, MAT.concreteDark, false);  // 그라임
+  // 사격 셸터: 콘크리트 패드 + 강관 기둥 8 + 골강판 지붕(살짝 경사) + 레인 4(사격대·모래주머니 받침·칸막이)
+  b.box(0, 0.03, 60, 30, 0.06, 8, 'paving', false);
+  for (const x of [-14, -5, 5, 14]) for (const z of [56.5, 62.5]) b.cyl(x, 1.7, z, 0.07, 0.07, 3.4, MAT.lampPole, 8, true);
+  addBoxRot(0, 3.5, 59.5, 30.5, 0.1, 7.6, 'corrugatedPale', { rx: 0.05 });
+  for (const s of [-1, 1]) b.box(s * 7, 1.05, 57.4, 0.06, 2.1, 2.4, MAT.woodDark, true);
+  for (const x of [-10.5, -3.5, 3.5, 10.5]) {
+    b.box(x, 0.98, 56.9, 1.7, 0.06, 0.8, MAT.wood, true); for (const lx of [-0.75, 0.75]) b.box(x + lx, 0.48, 56.9, 0.06, 0.96, 0.7, MAT.woodDark, false);
+    b.box(x, 1.13, 56.65, 0.7, 0.24, 0.35, MAT.sandbag, false);
+  }
+  b.box(0, 0.1, RANGE_FIRE_Z - 1.7, hx * 2 - 4, 0.2, 0.3, MAT.laneWhite, false); // 사격선(백색 턱)
+  for (let d = 25; d <= 100; d += 25) { const z = RANGE_FIRE_Z - d; if (z > backZ + 6) for (const s of [-1, 1]) b.box(s * (hx - 2), 0.2, z, 0.4, 0.4, 0.08, MAT.laneWhite, false); } // 거리 마커
+  b.flush();
+  for (const [k, x, z] of [['crateWide', -12.5, 64], ['box', -9.6, 64.8], ['crateWide', 12.5, 64.2]]) weatherModel(placeModel(k, x, z, { height: 0.9, rotY: rr() * 6.28 }), 0.6, 0.95); // 탄약 상자(리컬러, crateWide 는 폭 2.3m 라 간격)
+  weatherModel(placeModel('barrel', 14.5, 64.5, { height: 1.0 }), 0.7, 0.9);
+  for (let i = -8; i <= 8; i += 2) placeProp('tyre', i * 1.1 + (rr() - 0.5) * 0.3, 0, backZ + 4.2, { rotY: (rr() - 0.5) * 0.4 }); // 백스톱 앞 타이어 열
+  for (const [x, z] of [[-12, backZ + 5.5], [13, backZ + 5.5]]) addBox(x, 0.45, z, 2.4, 0.9, 0.9, MAT.sandbag);
+  // 표적: 10m 실루엣+종이, 25/50m 종이+스틸 공+실루엣, 100m 종이+스틸 공(큰)
+  addSilhouette(-6, RANGE_FIRE_Z - 10, 10); addPaperTarget(6, RANGE_FIRE_Z - 10, 10);
+  addPaperTarget(-2.3, RANGE_FIRE_Z - 25, 25); addGong(3.5, RANGE_FIRE_Z - 25, 25, 0.25); addSilhouette(9, RANGE_FIRE_Z - 25, 25);
+  addPaperTarget(-7, RANGE_FIRE_Z - 50, 50); addGong(-1.5, RANGE_FIRE_Z - 50, 50, 0.3); addSilhouette(7, RANGE_FIRE_Z - 50, 50);
+  addPaperTarget(2.3, RANGE_FIRE_Z - 100, 100); addGong(8, RANGE_FIRE_Z - 100, 100, 0.4);
+  { const fb = forestBatch(); // 버름 뒤·옆 카드 트리(실루엣)
+    for (let i = 0; i < 14; i++) { const x = -34 + i * 5.2 + (rr() - 0.5) * 3, z = backZ - 9 - rr() * 12; placeCardTree(fb, rr() < 0.55 ? 'pine' : rr() < 0.8 ? 'canopy_broad_b' : 'canopy_broad_a', x, z, 8 + rr() * 6, 0.35, 900 + i); }
+    for (let i = 0; i < 10; i++) { const s = i < 5 ? -1 : 1, x = s * (hx + 8 + rr() * 8), z = backZ + 10 + rr() * 100; placeCardTree(fb, rr() < 0.6 ? 'pine' : 'canopy_broad_a', x, z, 7 + rr() * 5, 0.35, 950 + i); }
+    fb.flush(); }
   // 퇴장 안내판 (뒤돌면 보이게 -z 향함)
   const exitLbl = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 0.9), new THREE.MeshBasicMaterial({ map: rangeLabelTexture('🚪 퇴장'), transparent: true }));
   exitLbl.position.set(0, 2.9, RANGE_EXIT_Z); exitLbl.rotation.y = Math.PI; scene.add(exitLbl);
@@ -5352,6 +5464,7 @@ const MAP_RANGE = {
   key: 'range', name: '🎯 사격 연습장', desc: '적 없음 · 무한 탄약 · 전 무기. 반동/탄퍼짐/탄착군 연습 (10~100m 표적 + 후벽)',
   range: true,
   build: buildRangeMap,
+  sun: [20, 60, 80], // 사수 뒤(+z)에서 비추는 광 — 표적면·백스톱이 그늘지지 않게 (#292)
   flattens: [{ x: 0, z: 12, hw: 20, hd: 66 }],
   lootSpots: [],
   extract: [{ name: '퇴장', pos: new THREE.Vector3(0, 0, RANGE_EXIT_Z) }],
@@ -5379,6 +5492,7 @@ function tearDownStatic() {
   obstacleMeshes = [];
   losMeshes = [];
   placements = [];
+  rangeTargets = []; // 연습장 표적 (#292)
   if (physWorld) { physWorld.free && physWorld.free(); physWorld = null; }
 }
 
@@ -5425,6 +5539,7 @@ function startRaid(mapKey) {
   applyMap(mapKey || currentMapKey); // 선택 맵 구성 (전환 시 이전 맵 teardown)
   const isRange = !!(MAPS[currentMapKey] && MAPS[currentMapKey].range); // 사격 연습장 모드 (#209)
   state.range = isRange;
+  dom.rangeHud.style.display = isRange ? 'block' : 'none'; if (isRange) resetRange(); // 스코어 HUD (#292)
 
   const spawn = SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)];
   player.pos.copy(spawn);
@@ -5933,6 +6048,7 @@ document.addEventListener('keydown', (e) => {
     if (n >= 1 && n <= 6) switchWeapon(n - 1);
   }
   if (e.code === 'KeyR') startReload();
+  if (e.code === 'KeyT' && state.range) resetRange(); // 연습장 표적·탄흔 리셋 (#292)
   if (e.code === 'KeyQ') useHeal();
   if (e.code === 'KeyV') toggleViewMode();
   if (e.code === 'KeyE') {
@@ -6033,6 +6149,7 @@ function loop() {
     updateGun(dt);
     for (const e of enemies) updateEnemy(e, dt);
     updatePhysics(dt); // Rapier 스텝 + 소품/래그돌 동기화 (#119)
+    if (state.range) updateRangeTargets(dt); // 스틸 공 흔들림 (#292)
     updateExtraction(dt);
     updateEvents(dt);
     updateAcoustics(dt);
@@ -6091,6 +6208,7 @@ window.__ex = {
     return { muzzle: m.toArray().map((v) => +v.toFixed(2)), gunPivot: pc ? pc.gunPivot.position.toArray().map((v) => +v.toFixed(2)) : null, gunLen: pc && pc.gunLen, handR: !!(pc && pc.handR), handL: !!(pc && pc.handL), curGun: !!(pc && pc.curGun) };
   },
   _startRaid(k) { startRaid(k); },
+  _fire() { if (state.phase === 'raid') fireShot(); }, // QA: 트리거 게이트(포인터락·raiseT 등) 우회 1발 (#292)
   // 성능 QA (#280): _perfBegin() … (프레임 진행) … _perfEnd() → 그 사이 누적 draw call/삼각형의 프레임당 평균. renderer.info 는 프레임마다
   // 리셋되므로 autoReset 을 잠시 끈다. 두 호출로 나눈 이유: 자동화 탭에서는 JS 실행 중 rAF 가 멈춰 한 호출 안의 await 로는 프레임이 안 흐른다.
   _perfBegin() { const info = renderer.info; info.autoReset = false; info.reset(); this._pf0 = info.render.frame; return this._pf0; },

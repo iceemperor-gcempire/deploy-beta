@@ -74,6 +74,18 @@
     #heal-hint, #tb-heal.urgent { animation: none; }
   }
 
+  /* 사격 연습장 스코어 (#292) */
+  #range-hud { position: absolute; left: 28px; top: 112px; display: none; min-width: 214px; padding: 10px 12px;
+    background: rgba(8,12,10,0.55); border: 1px solid rgba(160,190,150,0.25); border-radius: 6px;
+    font-size: 12px; letter-spacing: 1px; color: #cfe0cf; text-shadow: 0 0 6px rgba(0,0,0,0.9); }
+  #range-hud .rh-title { font-size: 11px; letter-spacing: 3px; color: #9fd99f; margin-bottom: 6px; }
+  #range-hud .rh-row { display: flex; justify-content: space-between; gap: 12px; line-height: 1.7; }
+  #range-hud .rh-big { font-size: 20px; font-weight: 700; color: #e8eee6; }
+  #range-hud .rh-last { color: #d9b23c; }
+  #range-hud .rh-hint { margin-top: 6px; font-size: 10.5px; color: #7f8f7f; }
+  body.mobile #range-hud { left: 12px; top: 74px; min-width: 150px; font-size: 11px; padding: 6px 8px; }
+  body.mobile #range-hud .rh-hint { display: none; }
+
   #ammo {
     position: absolute; right: 28px; bottom: 22px; text-align: right;
     text-shadow: 0 0 6px rgba(0,0,0,0.9);
@@ -454,6 +466,16 @@
       <div id="kills">사살 0</div>
     </div>
 
+    <div id="range-hud">
+      <div class="rh-title">🎯 사격 연습장</div>
+      <div class="rh-row"><span>발사</span><span class="rh-big" id="rh-shots">0</span></div>
+      <div class="rh-row"><span>명중</span><span class="rh-big" id="rh-hits">0</span></div>
+      <div class="rh-row"><span>명중률</span><span id="rh-acc">—</span></div>
+      <div class="rh-row"><span>마지막</span><span class="rh-last" id="rh-last">—</span></div>
+      <div class="rh-row"><span>5발 그룹</span><span id="rh-group">—</span></div>
+      <div class="rh-hint"><b>T</b> 표적·탄흔 리셋 · 스틸 공은 거리만큼 늦게 울립니다</div>
+    </div>
+
     <div id="vitals">
       <div class="bar-label">체력</div>
       <div class="bar"><div id="hp-fill"></div></div>
@@ -615,6 +637,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=c20b64d"></script>
+  <script type="module" src="./src/main.js?v=6b95ec3"></script>
 </body>
 </html>
