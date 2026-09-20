@@ -82,11 +82,13 @@
   #range-hud .rh-row { display: flex; justify-content: space-between; gap: 12px; line-height: 1.7; }
   #range-hud .rh-big { font-size: 20px; font-weight: 700; color: #e8eee6; }
   #range-hud .rh-last { color: #d9b23c; }
-  #range-hud .rh-hint { margin-top: 6px; font-size: 10.5px; color: #7f8f7f; }
+  #range-hud .rh-hint { margin-top: 6px; font-size: 10.5px; color: #7f8f7f; max-width: 232px; line-height: 1.5; }
   #recoil-trace { position: absolute; left: 50%; top: 50%; width: 240px; height: 240px; margin: -120px 0 0 -120px; display: none; pointer-events: none; } /* 반동 궤적 (#295) */
   #tb-reset, #tb-drill { display: none; left: 14px; width: 48px; height: 48px; font-size: 11px; }
-  #tb-reset { top: 214px; } #tb-drill { top: 270px; }
-  body.mobile #hud.range #tb-reset, body.mobile #hud.range #tb-drill { display: flex; }
+  #tb-reset { top: 214px; } #tb-drill { top: 270px; } #tb-mode { top: 326px; }
+  #tb-mode { display: none; left: 14px; width: 48px; height: 48px; font-size: 11px; }
+  body.mobile #hud.range #tb-reset, body.mobile #hud.range #tb-drill, body.mobile #hud.range #tb-mode { display: flex; }
+  #range-hud .rh-warn { color: #ff6a55; font-weight: 700; }
   body.mobile #range-hud { left: 12px; top: 74px; min-width: 150px; font-size: 11px; padding: 6px 8px; }
   body.mobile #range-hud .rh-hint { display: none; }
 
@@ -480,7 +482,10 @@
       <div class="rh-row"><span>5발 그룹</span><span id="rh-group">—</span></div>
       <div class="rh-row"><span>드릴</span><span class="rh-last" id="rh-drill">Y 시작</span></div>
       <div class="rh-row"><span>베스트</span><span id="rh-best">—</span></div>
-      <div class="rh-hint"><b>T</b> 리셋 · <b>Y</b> 드릴(팝업 5기) · 무기별 통계 · 이동 표적은 맞힐수록 빨라짐</div>
+      <div class="rh-row"><span>최근</span><span id="rh-hist">—</span></div>
+      <div class="rh-row"><span>반동 패턴</span><span id="rh-pat">—</span></div>
+      <div class="rh-row"><span>거리</span><span id="rh-dist">—</span></div>
+      <div class="rh-hint"><b>T</b> 리셋 · <b>Y</b> 드릴 · <b>U</b> 모드(표준/시간제한/HEAD) · 무기+부착물별 통계</div>
     </div>
 
     <div id="vitals">
@@ -528,6 +533,7 @@
       <div class="tbtn" id="tb-interact">열기</div>
       <div class="tbtn" id="tb-reset">리셋</div>
       <div class="tbtn" id="tb-drill">드릴</div>
+      <div class="tbtn" id="tb-mode">모드</div>
     </div>
   </div>
 
@@ -646,6 +652,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=bf24f12"></script>
+  <script type="module" src="./src/main.js?v=5f3d5f5"></script>
 </body>
 </html>

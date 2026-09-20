@@ -241,6 +241,7 @@ const dom = {
   scopeOverlay: $('scope-overlay'), healHint: $('heal-hint'),
   rangeHud: $('range-hud'), rhShots: $('rh-shots'), rhHits: $('rh-hits'), rhAcc: $('rh-acc'), rhLast: $('rh-last'), rhGroup: $('rh-group'), // 사격 연습장 스코어 (#292)
   rhTitle: $('rh-title'), rhDrill: $('rh-drill'), rhBest: $('rh-best'), recoilTrace: $('recoil-trace'), // 무기별 통계·드릴·반동 궤적 (#295)
+  rhHist: $('rh-hist'), rhPat: $('rh-pat'), rhDist: $('rh-dist'), // 최근 기록·반동 패턴·거리계 (#298)
 };
 
 // ---------- 모바일 감지 ----------
@@ -4106,7 +4107,12 @@ function fireShot() {
   // 탄퍼짐: updateGun 에서 매 프레임 계산한 유효 탄퍼짐(기본+이동+bloom) = 크로스헤어와 동일 소스 (#207)
   const spread = gun.spread || (player.aiming ? GUN.spreadAds : GUN.spreadHip);
 
-  if (state.range) { rs().shots++; updateRangeHud(); recoilTrace.push({ yaw: player.recoilYaw, pitch: player.recoilPitch, t: performance.now() }); if (recoilTrace.length > 40) recoilTrace.shift(); } // 연습장 발사 카운트(산탄은 1발) — 빗나가도 즉시 갱신 (#292) + 반동 궤적 (#295)
+  if (state.range) { // 연습장 발사 카운트(산탄은 1발) — 빗나가도 즉시 갱신 (#292) + 반동 궤적 (#295) + 연사 버스트 기록 (#298)
+    const now = performance.now(); rs().shots++; updateRangeHud();
+    recoilTrace.push({ yaw: player.recoilYaw, pitch: player.recoilPitch, t: now }); if (recoilTrace.length > 40) recoilTrace.shift();
+    if (now - recoilPat.lastT > 500) { recoilPat.burst = []; recoilPat.saved = false; }
+    recoilPat.burst.push([player.recoilYaw, player.recoilPitch]); recoilPat.lastT = now;
+  }
   let anyHit = false;
   for (let p = 0; p < GUN.pellets; p++) {
     const dir = aimPoint.clone().sub(muzzle).normalize();
@@ -5339,11 +5345,25 @@ function rangeLabelTexture(text) {
 let rangeTargets = [];
 // 무기별 통계 (#295): GUN.key 별 { shots, hits, last, groups, groupText }. rs() = 현재 무기 통계. T 는 전부 리셋.
 const rangeStats = new Map();
-function rs() { const k = (typeof GUN !== 'undefined' && GUN && GUN.key) || 'rifle'; let v = rangeStats.get(k); if (!v) { v = { shots: 0, hits: 0, last: '—', groups: new Map(), groupText: '—' }; rangeStats.set(k, v); } return v; }
-// 드릴 (#295): 팝업 실루엣 5기가 무작위 순서로 하나씩 서고, 맞히면 눕고 다음이 선다. 총 시간·정확도 → 무기별 베스트(localStorage exshoot_range_best)
-const drill = { active: false, order: [], idx: 0, t: 0, wait: 0, shots0: 0, result: '', best: {} };
+// 통계 키 = 무기 + 부착물(정렬) (#298): 'rifle', 'rifle+grip+scope' … 부착물 조합별로 따로 센다
+const ATT_SHORT = { scope: '스코프', silencer: '소음기', grip: '그립' };
+function statKey() { const k = (typeof GUN !== 'undefined' && GUN && GUN.key) || 'rifle'; const a = (currentAtt || []).slice().sort(); return a.length ? k + '+' + a.join('+') : k; }
+function statLabel() { const n = (typeof GUN !== 'undefined' && GUN && GUN.name) || '사격 연습장'; const a = (currentAtt || []).map((x) => ATT_SHORT[x] || x); return a.length ? `${n} +${a.join('·')}` : n; }
+function rs() { const k = statKey(); let v = rangeStats.get(k); if (!v) { v = { shots: 0, hits: 0, last: '—', groups: new Map(), groupText: '—' }; rangeStats.set(k, v); } return v; }
+// 드릴 (#295): 팝업 실루엣 5기가 무작위 순서로 하나씩 서고, 맞히면 눕고 다음이 선다. 총 시간·정확도 → 베스트(localStorage exshoot_range_best)
+// 모드 (#298, U 전환): 표준 / 시간제한(limit 초 안에 못 맞히면 눕음 = 놓침, 놓침당 penalty 초) / HEAD(머리만 인정). 베스트 키 = 통계키(+'|모드'), 최근 기록 exshoot_range_hist
+const DRILL_MODES = [{ key: 'standard', name: '표준' }, { key: 'timed', name: '시간제한', limit: 2.5, penalty: 3 }, { key: 'head', name: 'HEAD' }];
+const drill = { active: false, order: [], idx: 0, t: 0, wait: 0, shots0: 0, result: '', best: {}, mode: 0, upT: 0, misses: 0, hist: [] };
 try { drill.best = JSON.parse(localStorage.getItem('exshoot_range_best')) || {}; } catch { drill.best = {}; }
+try { drill.hist = JSON.parse(localStorage.getItem('exshoot_range_hist')) || []; } catch { drill.hist = []; }
+function drillMode() { return DRILL_MODES[drill.mode]; }
+function drillBestKey() { const m = drillMode().key; return m === 'standard' ? statKey() : statKey() + '|' + m; }
+function cycleDrillMode() { if (drill.active) return; drill.mode = (drill.mode + 1) % DRILL_MODES.length; drill.result = ''; addFeed(`드릴 모드: ${drillMode().name}${drillMode().limit ? ` (표적당 ${drillMode().limit}s, 놓치면 +${drillMode().penalty}s)` : drillMode().key === 'head' ? ' (머리만 인정)' : ''}`); tone({ freq: 620, dur: 0.07, gain: 0.1 }); updateRangeHud(); }
 const recoilTrace = []; // 최근 사격의 반동 오프셋 [{yaw, pitch, t}] → 크로스헤어 위 궤적 (#295)
+// 반동 패턴 스냅샷 (#298): 5발 이상 연사(발사 간격 <0.5s)가 끝나면 통계키별로 첫 발 기준 상대 오프셋을 저장(localStorage exshoot_recoil_pat) → 회색으로 현재 궤적 뒤에 겹쳐 비교
+const recoilPat = { store: {}, burst: [], lastT: 0, saved: true };
+try { recoilPat.store = JSON.parse(localStorage.getItem('exshoot_recoil_pat')) || {}; } catch { recoilPat.store = {}; }
+let rfTick = 0; const _rfDir = new THREE.Vector3(); // 거리계 (#298): 4프레임마다 조준 레이 거리
 function rangeSilhouetteTexture() { // 실루엣 표적: 판지 + 회색 인체 + 머리(빨강)/몸통 중심(노랑) 존
   const c = document.createElement('canvas'); c.width = 128; c.height = 256; const g = c.getContext('2d');
   g.fillStyle = '#c9b48e'; g.fillRect(0, 0, 128, 256);
@@ -5408,17 +5428,19 @@ function startDrill() { // Y: 드릴 시작(진행 중이면 재시작)
   const ps = drillTargets(); if (!state.range || !ps.length) return;
   for (const t of ps) t.up = false;
   const order = ps.map((_, i) => i); for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
-  Object.assign(drill, { active: true, order, idx: 0, t: 0, wait: 0.8, shots0: rs().shots, result: '' });
-  addFeed('드릴 시작 — 표적이 서면 쏘세요 (5기)'); tone({ freq: 880, dur: 0.12, gain: 0.12 });
+  Object.assign(drill, { active: true, order, idx: 0, t: 0, wait: 0.8, shots0: rs().shots, result: '', upT: 0, misses: 0 });
+  addFeed(`드릴 시작 [${drillMode().name}] — 표적이 서면 ${drillMode().key === 'head' ? '머리를 ' : ''}쏘세요 (5기)`); tone({ freq: 880, dur: 0.12, gain: 0.12 });
   updateRangeHud();
 }
 function finishDrill() {
-  const ps = drillTargets(), n = ps.length, shots = Math.max(n, rs().shots - drill.shots0), acc = Math.round(100 * n / shots), time = +drill.t.toFixed(1), key = GUN.key;
+  const ps = drillTargets(), n = ps.length, m = drillMode(), hitN = n - drill.misses, shots = Math.max(hitN, rs().shots - drill.shots0), acc = shots ? Math.round(100 * hitN / shots) : 0;
+  const pen = (m.penalty || 0) * drill.misses, time = +(drill.t + pen).toFixed(1), key = drillBestKey();
   drill.active = false;
   const prev = drill.best[key], isBest = !prev || time < prev.time;
   if (isBest) { drill.best[key] = { time, acc }; try { localStorage.setItem('exshoot_range_best', JSON.stringify(drill.best)); } catch {} }
-  drill.result = `${time}s · ${acc}%${isBest ? ' ★NEW' : ''}`;
-  addFeed(`드릴 완료 ${time}s · 정확도 ${acc}%${isBest ? ' — 베스트 갱신!' : ''}`); tone({ freq: isBest ? 1320 : 660, dur: 0.25, gain: 0.14 });
+  drill.hist.unshift({ key, time, acc, ts: Date.now() }); drill.hist = drill.hist.slice(0, 30); try { localStorage.setItem('exshoot_range_hist', JSON.stringify(drill.hist)); } catch {}
+  drill.result = `[${m.name}] ${time}s${pen ? `(+${pen}s)` : ''} · ${acc}%${isBest ? ' ★NEW' : ''}`;
+  addFeed(`드릴 완료 [${m.name}] ${time}s · 정확도 ${acc}%${drill.misses ? ` · 놓침 ${drill.misses}` : ''}${isBest ? ' — 베스트 갱신!' : ''}`); tone({ freq: isBest ? 1320 : 660, dur: 0.25, gain: 0.14 });
   updateRangeHud();
 }
 function gongRing(dist) { // 금속 딩: 배음 3개 사인 감쇠, 거리만큼 늦게(340 m/s)·작게 — 소리로 명중 확인
@@ -5441,7 +5463,7 @@ function rangeHit(t, h) {
     const head = Math.hypot(local.x, local.y - 0.63) < 0.17, body = Math.abs(local.x) < 0.3 && local.y > -0.35 && local.y < 0.42;
     label = `${t.dist}m ${t.mover ? '이동 ' : t.popup ? '드릴 ' : ''}${head ? 'HEAD ★' : body ? 'BODY' : '가장자리'}`;
     if (t.mover && (head || body)) { t.mover.level = t.mover.level % MOVER_SPEEDS.length + 1; label += ` → Lv${t.mover.level}`; tone({ freq: 520 + t.mover.level * 120, dur: 0.08, gain: 0.1 }); }
-    if (t.popup && drill.active && (head || body)) { t.up = false; drill.idx++; drill.wait = 0.7; tone({ freq: 740, dur: 0.06, gain: 0.1 }); } // 드릴 진행
+    if (t.popup && drill.active && (drillMode().key === 'head' ? head : (head || body))) { t.up = false; drill.idx++; drill.wait = 0.7; tone({ freq: 740, dur: 0.06, gain: 0.1 }); } // 드릴 진행 (HEAD 모드는 머리만)
   } else { t.vel += 2.2 + Math.random() * 0.6; gongRing(t.dist); label = `${t.dist}m 공 ♪`; } // 사수는 항상 +z 쪽 → 뒤로 ~40° 흔들림(6 이면 한 바퀴 넘어감)
   st.last = label;
   if (t.kind !== 'gong' && !t.mover && !t.popup) { // 고정 표적만: 같은 표적 최근 5발 그룹 크기(최대 쌍 거리, cm)
@@ -5465,26 +5487,32 @@ function updateRangeTargets(dt) { // 스틸 공 진자(θ'' = −(g/L)·sin θ �
   }
   if (drill.active) {
     drill.t += dt;
-    if (drill.wait > 0) { drill.wait -= dt; if (drill.wait <= 0) { const ps = drillTargets(); if (drill.idx >= ps.length) finishDrill(); else ps[drill.order[drill.idx]].up = true; } }
+    if (drill.wait > 0) { drill.wait -= dt; if (drill.wait <= 0) { const ps = drillTargets(); if (drill.idx >= ps.length) finishDrill(); else { ps[drill.order[drill.idx]].up = true; drill.upT = 0; } } }
+    else if (drillMode().limit) { // 시간제한: 표적당 limit 초 — 넘기면 스스로 눕고 놓침 (#298)
+      drill.upT += dt;
+      if (drill.upT > drillMode().limit) { const t = drillTargets()[drill.order[drill.idx]]; if (t) t.up = false; drill.misses++; drill.idx++; drill.wait = 0.7; tone({ freq: 220, dur: 0.15, gain: 0.12 }); }
+    }
     if ((drill.t * 10 | 0) !== drill._shown) { drill._shown = drill.t * 10 | 0; updateRangeHud(); } // 0.1s 단위 갱신
   }
 }
 function resetRange() { // T: 전 무기 통계·그룹·공·드릴·이동 단계·반동 궤적·탄흔 리셋
-  rangeStats.clear(); recoilTrace.length = 0;
-  Object.assign(drill, { active: false, order: [], idx: 0, t: 0, wait: 0, result: '' });
+  rangeStats.clear(); recoilTrace.length = 0; recoilPat.burst = []; recoilPat.saved = true;
+  Object.assign(drill, { active: false, order: [], idx: 0, t: 0, wait: 0, result: '', upT: 0, misses: 0 });
   for (const t of rangeTargets) { if (t.kind === 'gong') { t.ang = 0; t.vel = 0; t.pivot.rotation.x = 0; } if (t.popup) t.up = false; if (t.mover) t.mover.level = 1; }
   for (const d of decals) scene.remove(d); decals = [];
   updateRangeHud();
 }
 function updateRangeHud() {
   if (!dom.rangeHud) return;
-  const st = rs();
-  if (dom.rhTitle) dom.rhTitle.textContent = `🎯 ${GUN && GUN.name ? GUN.name : '사격 연습장'}`;
+  const st = rs(), m = drillMode(), bk = drillBestKey(), n = drillTargets().length;
+  if (dom.rhTitle) dom.rhTitle.textContent = `🎯 ${statLabel()}`;
   dom.rhShots.textContent = st.shots; dom.rhHits.textContent = st.hits;
   dom.rhAcc.textContent = st.shots ? Math.round(100 * st.hits / st.shots) + '%' : '—';
   dom.rhLast.textContent = st.last; dom.rhGroup.textContent = st.groupText || '—';
-  if (dom.rhDrill) dom.rhDrill.textContent = drill.active ? `${Math.min(drill.idx, drillTargets().length)}/${drillTargets().length} · ${drill.t.toFixed(1)}s` : (drill.result || 'Y 시작');
-  if (dom.rhBest) { const b = drill.best[GUN && GUN.key]; dom.rhBest.textContent = b ? `${b.time}s · ${b.acc}%` : '—'; }
+  if (dom.rhDrill) dom.rhDrill.textContent = drill.active ? `[${m.name}] ${Math.min(drill.idx, n)}/${n} · ${drill.t.toFixed(1)}s${drill.misses ? ` · 놓침 ${drill.misses}` : ''}` : (drill.result || `[${m.name}] Y 시작 · U 모드`);
+  if (dom.rhBest) { const b = drill.best[bk]; dom.rhBest.textContent = b ? `${b.time}s · ${b.acc}%` : '—'; }
+  if (dom.rhHist) { const h = drill.hist.filter((x) => x.key === bk).slice(0, 3); dom.rhHist.textContent = h.length ? h.map((x) => `${x.time}s`).join(' · ') : '—'; }
+  if (dom.rhPat) { const pt = recoilPat.store[statKey()]; dom.rhPat.textContent = pt ? `${pt.length}발 저장 (회색)` : '5발+ 연사 시 저장'; }
 }
 const RANGE_FIRE_Z = 58, RANGE_EXIT_Z = 68; // 사격선(스폰) / 퇴장 지점(스폰 10m 뒤, 반경5 밖)
 function buildRangeMap() {
@@ -5914,6 +5942,7 @@ if (IS_MOBILE) {
   onHold('tb-heal', () => { if (inRaid()) useHeal(); });
   onHold('tb-reset', () => { if (inRaid() && state.range) resetRange(); }); // 연습장 (#295)
   onHold('tb-drill', () => { if (inRaid() && state.range) startDrill(); });
+  onHold('tb-mode', () => { if (inRaid() && state.range) cycleDrillMode(); }); // (#298)
   onHold('tb-inv', () => {
     if (state.phase !== 'raid') return;
     dom.inventory.style.display = dom.inventory.style.display === 'block' ? 'none' : 'block';
@@ -6123,6 +6152,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'KeyR') startReload();
   if (e.code === 'KeyT' && state.range) resetRange(); // 연습장 표적·탄흔 리셋 (#292)
   if (e.code === 'KeyY' && state.range) startDrill(); // 연습장 드릴 시작 (#295)
+  if (e.code === 'KeyU' && state.range) cycleDrillMode(); // 드릴 모드 전환 (#298)
   if (e.code === 'KeyQ') useHeal();
   if (e.code === 'KeyV') toggleViewMode();
   if (e.code === 'KeyE') {
@@ -6152,9 +6182,25 @@ function updateHUD() {
     const now = performance.now(); while (recoilTrace.length && now - recoilTrace[0].t > 3000) recoilTrace.shift();
     const showT = state.range && recoilTrace.length > 0 && !scopeShown;
     dom.recoilTrace.style.display = showT ? 'block' : 'none';
+    // 버스트 종료(0.6s 무발사) 시 5발 이상이면 패턴 스냅샷 저장 (#298)
+    if (state.range && !recoilPat.saved && recoilPat.burst.length >= 5 && now - recoilPat.lastT > 600) {
+      const b = recoilPat.burst, [y0, p0] = b[0];
+      recoilPat.store[statKey()] = b.slice(0, 30).map(([y, pp]) => [+(y - y0).toFixed(4), +(pp - p0).toFixed(4)]); recoilPat.saved = true;
+      try { localStorage.setItem('exshoot_recoil_pat', JSON.stringify(recoilPat.store)); } catch {}
+      updateRangeHud();
+    }
     if (showT) {
       const c = dom.recoilTrace, g = c.getContext('2d'), W = c.width, H = c.height, ppr = (innerHeight / 2) / Math.tan(camera.fov * Math.PI / 360);
       g.clearRect(0, 0, W, H); g.lineWidth = 1;
+      const pat = recoilPat.store[statKey()]; // 저장 패턴(회색): 현재 궤적 첫 점에 앵커해 비교
+      if (pat) {
+        const ax = W / 2 - recoilTrace[0].yaw * ppr, ay = H / 2 - recoilTrace[0].pitch * ppr; let qx = null, qy = null;
+        for (const [dy, dp] of pat) {
+          const x = Math.max(3, Math.min(W - 3, ax - dy * ppr)), y = Math.max(3, Math.min(H - 3, ay - dp * ppr));
+          if (qx !== null) { g.strokeStyle = 'rgba(200,210,200,0.35)'; g.beginPath(); g.moveTo(qx, qy); g.lineTo(x, y); g.stroke(); }
+          g.fillStyle = 'rgba(200,210,200,0.55)'; g.beginPath(); g.arc(x, y, 2, 0, Math.PI * 2); g.fill(); qx = x; qy = y;
+        }
+      }
       let px = null, py = null;
       for (const r of recoilTrace) {
         const a = Math.max(0.15, 1 - (now - r.t) / 3000), x = Math.max(3, Math.min(W - 3, W / 2 - r.yaw * ppr)), y = Math.max(3, Math.min(H - 3, H / 2 - r.pitch * ppr));
@@ -6163,6 +6209,13 @@ function updateHUD() {
         px = x; py = y;
       }
     }
+  }
+  // 거리계 + 사격선 이탈 경고 (#298, 연습장): 4프레임마다 조준 레이 거리
+  if (state.range && dom.rhDist && (rfTick = (rfTick + 1) % 4) === 0) {
+    const warn = player.pos.z < RANGE_FIRE_Z - 2.0; // 사격선 턱(RANGE_FIRE_Z−1.7)을 넘어서면 경고
+    let txt = '—';
+    if (!warn) { camera.getWorldDirection(_rfDir); _aimRay.set(camera.position, _rfDir); _aimRay.far = 400; const h = _aimRay.intersectObjects(obstacleMeshes, false); if (h.length) txt = `${h[0].point.distanceTo(player.pos).toFixed(1)} m`; } // 사수 기준 거리(카메라 아님)
+    dom.rhDist.textContent = warn ? '⚠ 사격선 이탈' : txt; dom.rhDist.classList.toggle('rh-warn', warn);
   }
   // 저체력 치료 힌트 (#110): useHeal 과 같은 우선순위(붕대 먼저)로 다음 사용 아이템 안내
   {
@@ -6300,7 +6353,7 @@ window.__ex = {
   },
   _startRaid(k) { startRaid(k); },
   _fire() { if (state.phase !== 'raid') return; if (gun.mag <= 0) gun.mag = GUN.magSize; fireShot(); }, // QA: 트리거 게이트(포인터락·raiseT 등) 우회 1발, 탄창 자동 보충 (#292)
-  get rangeTargets() { return rangeTargets; }, get drill() { return drill; }, _startDrill() { startDrill(); }, _rangeTick(dt) { updateRangeTargets(dt); }, // QA (#295) — 자동화 탭은 rAF 가 느려 드릴/이동 표적 시간을 수동 진행
+  get rangeTargets() { return rangeTargets; }, get drill() { return drill; }, _startDrill() { startDrill(); }, _rangeTick(dt) { updateRangeTargets(dt); }, _cycleDrillMode() { cycleDrillMode(); }, get recoilPat() { return recoilPat; }, // QA (#295/#298) — 자동화 탭은 rAF 가 느려 드릴/이동 표적 시간을 수동 진행
   // 성능 QA (#280): _perfBegin() … (프레임 진행) … _perfEnd() → 그 사이 누적 draw call/삼각형의 프레임당 평균. renderer.info 는 프레임마다
   // 리셋되므로 autoReset 을 잠시 끈다. 두 호출로 나눈 이유: 자동화 탭에서는 JS 실행 중 rAF 가 멈춰 한 호출 안의 await 로는 프레임이 안 흐른다.
   _perfBegin() { const info = renderer.info; info.autoReset = false; info.reset(); this._pf0 = info.render.frame; return this._pf0; },
