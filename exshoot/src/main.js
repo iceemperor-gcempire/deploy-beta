@@ -2552,10 +2552,19 @@ const ENEMY = {
   shotInterval: 0.13,
   magSize: 9, // 3점사 × 3회 후 재장전
   damageMin: 7, damageMax: 14,
+  velocity: 700, lead: 0.6, // 발사체 탄속 m/s · 이동 리드 비율 (#316)
 };
 
 const HITBOX_MAT = new THREE.MeshBasicMaterial();
 const CHAR_HEIGHT = 1.75;
+// ── 플레이어 히트박스 (#316): 적 발사체 레이캐스트 전용(비표시). 적과 같은 캡슐(0.22, 1.0 @0.85) + 머리 구(0.16 @1.60) — 플레이어는 앉기 없음.
+// 위치·요는 updateProjectiles 에서 레이 검사 직전에 player.pos/yaw 로 맞춘다(자동화 탭처럼 프레임이 없어도 정확).
+const playerHit = { group: new THREE.Group() };
+playerHit.body = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 1.0, 4, 8), HITBOX_MAT); playerHit.body.position.y = 0.85; playerHit.body.visible = false;
+playerHit.head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 8), HITBOX_MAT); playerHit.head.position.y = 1.60; playerHit.head.visible = false;
+playerHit.body.userData = { playerHit: true, part: 'body' }; playerHit.head.userData = { playerHit: true, part: 'head' };
+playerHit.group.add(playerHit.body, playerHit.head); scene.add(playerHit.group);
+function syncPlayerHit() { playerHit.group.position.copy(player.pos); playerHit.group.rotation.y = player.yaw || 0; playerHit.group.updateMatrixWorld(true); }
 
 function makeEnemyMesh() {
   const g = new THREE.Group();
@@ -3052,9 +3061,18 @@ function enemyHitPart(e, hitboxPart, point) {
   const lp = e.group.worldToLocal(_ehp.copy(point));
   const y = e.crouched ? (lp.y - 0.60) / 0.68 + 0.85 : lp.y;
   e.lastHitLocal = [+lp.x.toFixed(3), +y.toFixed(3)]; // QA
+  return partFromLocal(lp.x, y);
+}
+function partFromLocal(x, y) { // 캡슐 로컬(발 기준 높이 y, 측면 x) → 부위. 적·플레이어 공용 (#313/#316)
   if (y < 0.80) return 'legs';
-  if (Math.abs(lp.x) > 0.14 && y >= 0.95 && y <= 1.45) return 'arms';
+  if (Math.abs(x) > 0.14 && y >= 0.95 && y <= 1.45) return 'arms';
   return y < 1.05 ? 'stomach' : 'thorax';
+}
+function playerHitPart(hitboxPart, point) { // 적 탄 피격점 → 플레이어 부위 (#316): damagePlayer 의 랜덤 배정 대신 실제 피격점
+  if (hitboxPart === 'head') return 'head';
+  const lp = playerHit.group.worldToLocal(_ehp.copy(point));
+  player.lastHitLocal = [+lp.x.toFixed(3), +lp.y.toFixed(3)]; // QA
+  return partFromLocal(lp.x, lp.y);
 }
 // 부위 피해 적용 — 반환: 이번 피격으로 새로 파괴된 부위(없으면 null). 사망 처리는 호출측(e.hp <= 0 검사).
 function damageEnemyPart(e, part, dmg) {
@@ -3088,24 +3106,34 @@ function enemyShoot(e, dist) {
   // 트레이서: 총구 → 플레이어 근처
   const muzzleH = e.crouched ? 0.85 : 1.3;
   const muzzle = new THREE.Vector3(0.28, muzzleH, 0.95).applyEuler(new THREE.Euler(0, e.group.rotation.y, 0)).add(e.pos);
-  const targetPos = playerEyePos();
-
-  // 명중 판정 (거리/이동 기반 확률, 앉아쏴는 안정 보너스, 팔 파괴 시 절반 #313)
+  // 발사체 (#316): 명중 롤(enemyAccuracy)은 그대로 두고 "어디를 겨누나"로 바꾼다 — 명중 롤이면 몸 안의 점(15% 머리), 빗나감 롤이면
+  // 몸 바깥 링(0.5~1.6 m). 실제 명중은 탄이 물리적으로 판정(엄폐가 막고, 비행 중 이동하면 빗나감). 이동 리드 = 비행시간 × 속도 × ENEMY.lead.
   const acc = enemyAccuracy(e, dist);
-  const hit = Math.random() < acc && hasLineOfSight(new THREE.Vector3(e.pos.x, e.pos.y + (e.crouched ? 1.05 : 1.6), e.pos.z), targetPos);
-
-  const endPoint = targetPos.clone();
-  if (!hit) {
-    endPoint.x += (Math.random() - 0.5) * 3;
-    endPoint.y += (Math.random() - 0.3) * 2;
-    endPoint.z += (Math.random() - 0.5) * 3;
+  const hit = Math.random() < acc;
+  const head = hit && Math.random() < 0.15;
+  const aim = new THREE.Vector3(player.pos.x, player.pos.y + (head ? 1.6 : 0.5 + Math.random() * 0.9), player.pos.z);
+  const tof = muzzle.distanceTo(aim) / ENEMY.velocity;
+  aim.x += player.vel.x * tof * ENEMY.lead; aim.z += player.vel.z * tof * ENEMY.lead;
+  const fwd = aim.clone().sub(muzzle); fwd.y = 0; fwd.normalize();
+  const right = new THREE.Vector3(-fwd.z, 0, fwd.x); // 사선에 수직인 측면 축
+  if (hit) aim.addScaledVector(right, (Math.random() - 0.5) * 0.4); // 몸통 폭 안 산포(±0.2, 캡슐 r 0.22) → 팔 판정 ~15%
+  else { // 빗나감: 항상 측면으로 0.45~1.45 m 비켜 겨눔(수직만 비끼면 몸에 맞아 명중률이 롤보다 올라간다 — v0.74 검증에서 발견)
+    aim.addScaledVector(right, (Math.random() < 0.5 ? -1 : 1) * (0.45 + Math.random()));
+    aim.y += (Math.random() - 0.4) * 1.0;
+    if (aim.y < player.pos.y + 0.05) aim.y = player.pos.y + 0.05; // 발밑 지면에 맞게(땅 속으로 사라지지 않게)
   }
-  spawnTracer(muzzle, endPoint, 0xffaa66);
-
-  if (hit && state.phase === 'raid') {
-    const dmg = (ENEMY.damageMin + Math.random() * (ENEMY.damageMax - ENEMY.damageMin)) * (e.boss ? 1.5 : 1);
-    damagePlayer(dmg, Math.random() < 0.15); // 15% 헤드샷 (헬멧으로 방어 가능)
-  }
+  const dir = aim.sub(muzzle).normalize();
+  const dmg = (ENEMY.damageMin + Math.random() * (ENEMY.damageMax - ENEMY.damageMin)) * (e.boss ? 1.5 : 1);
+  return spawnEnemyProjectile(muzzle, dir, dmg, e, hit);
+}
+let lastEnemyShot = null; // QA
+function spawnEnemyProjectile(muzzle, dir, dmg, e, rolled) {
+  const pr = { pos: muzzle.clone(), vel: dir.clone().multiplyScalar(ENEMY.velocity), t: 0, dist: 0, range: ENEMY.fireRange * 3, dmgBody: dmg, dmgHead: dmg,
+    line: null, enemy: true, from: e, rolled, result: null };
+  const geo = new THREE.BufferGeometry().setFromPoints([muzzle, muzzle]); // 라이브 트레이서(총구→현재 위치), 소멸 후 0.07s 페이드
+  pr.line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffaa66, transparent: true, opacity: 0.85 })); scene.add(pr.line);
+  projectiles.push(pr); lastEnemyShot = pr;
+  return pr;
 }
 
 const ARMOR_MAX = 80;
@@ -4262,14 +4290,17 @@ function updateProjectiles(dt) {
   if (!projectiles.length) return;
   const targets = [...obstacleMeshes, ...propMeshes];
   for (const e of enemies) if (!e.dead) targets.push(e.body, e.head);
+  let targetsE = null; // 적 탄: 장애물+소품+플레이어 히트박스 (아군 통과) (#316)
   let anyHit = false;
   for (let i = projectiles.length - 1; i >= 0; i--) {
-    const pr = projectiles[i], v0y = pr.vel.y;
+    const pr = projectiles[i]; if (!pr) continue; // 피격 사망 → clearRaidObjects 가 배열을 교체한 뒤의 인덱스
+    const v0y = pr.vel.y;
     pr.vel.y -= BALLISTICS.g * dt;
     _pNext.copy(pr.pos).addScaledVector(pr.vel, dt); _pNext.y += (v0y - pr.vel.y) * 0.5 * dt; // 정확 적분: v0·dt − ½g·dt²
     _pDir.subVectors(_pNext, pr.pos); const seg = _pDir.length(); _pDir.normalize();
     _shootRay.set(pr.pos, _pDir); _shootRay.far = seg;
-    const hits = _shootRay.intersectObjects(targets, false);
+    if (pr.enemy && !targetsE) { syncPlayerHit(); targetsE = [...obstacleMeshes, ...propMeshes, playerHit.body, playerHit.head]; }
+    const hits = _shootRay.intersectObjects(pr.enemy ? targetsE : targets, false);
     let done = false;
     if (hits.length) { if (resolveBulletHit(hits[0], _pDir, pr)) anyHit = true; _pNext.copy(hits[0].point); done = true; }
     pr.pos.copy(_pNext); pr.dist += seg; pr.t += dt;
@@ -4284,6 +4315,10 @@ function updateProjectiles(dt) {
 // 명중 처리 — 적(부위 데미지)/물리통(폭발·임펄스)/연습장 표적/환경 탄흔. 적·표적 명중 시 true(히트마커)
 function resolveBulletHit(h, dir, pr) {
   const ud = h.object.userData;
+  if (ud && ud.playerHit) { // 적 탄 → 플레이어 (#316): 피격점 부위 → damagePlayer(헬멧/방탄복/부위 풀은 기존 경로)
+    if (pr.enemy && state.phase === 'raid') { const part = playerHitPart(ud.part, h.point); pr.result = part; damagePlayer(pr.dmgBody, part === 'head', part); }
+    return false;
+  }
   if (ud && ud.enemy && !ud.enemy.dead) {
     const part = enemyHitPart(ud.enemy, ud.part, h.point); // 피격점 → 부위 (#313)
     const dmg = part === 'head' ? pr.dmgHead : pr.dmgBody;
@@ -4310,15 +4345,8 @@ function resolveBulletHit(h, dir, pr) {
     return true;
   }
   if (h.face) { _decalN.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize(); spawnDecal(h.point, _decalN); } // 환경 탄흔 (#208)
+  if (pr.enemy) pr.result = 'env';
   return false;
-}
-
-function spawnTracer(from, to, color) {
-  const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
-  const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85 });
-  const line = new THREE.Line(geo, mat);
-  scene.add(line);
-  tracers.push({ line, life: 0.07 });
 }
 
 // 탄흔 데칼 (#208): 벽·바닥 명중 시 총알구멍. 링버퍼 최대 DECAL_MAX 개(오래된 것부터 재활용)
@@ -6532,6 +6560,11 @@ window.__ex = {
   ENEMY_PARTS, _enemyPart(i, x, y, z) { const e = enemies[i]; return enemyHitPart(e, 'body', new THREE.Vector3(x, y, z)); },
   _hitEnemy(i, part, dmg) { const e = enemies[i]; if (!e || e.dead) return null; const b = damageEnemyPart(e, part, dmg); if (e.hp <= 0) killEnemy(e); else e.state = 'combat'; return b; },
   _enemyAcc(i, dist) { return enemyAccuracy(enemies[i], dist); }, _stepEnemy(i, dt) { updateEnemy(enemies[i], dt); },
+  // 적 발사체 (#316) QA: 적 i 가 현재 거리로 1발 → 발사체 객체(rolled/result), 플레이어 히트박스 판정
+  _enemyShoot(i) { const e = enemies[i]; const d = Math.hypot(player.pos.x - e.pos.x, player.pos.z - e.pos.z); return enemyShoot(e, d); },
+  get lastEnemyShot() { return lastEnemyShot; }, playerHit, _playerPart(x, y, z) { syncPlayerHit(); return playerHitPart('body', new THREE.Vector3(x, y, z)); },
+  _rayHit(ox, oy, oz, dx, dy, dz, far = 200) { _shootRay.set(new THREE.Vector3(ox, oy, oz), new THREE.Vector3(dx, dy, dz).normalize()); _shootRay.far = far; const h = _shootRay.intersectObjects([...obstacleMeshes, ...propMeshes], false)[0]; return h ? { name: h.object.name, type: h.object.type, ud: Object.keys(h.object.userData || {}), d: +h.distance.toFixed(2), p: h.point.toArray().map(v => +v.toFixed(2)) } : null; },
+  _los(a, b) { return hasLineOfSight(new THREE.Vector3(...a), new THREE.Vector3(...b)); }, _openPoint() { return randomOpenPoint(); },
   hurt(n, hs = false, part = null) { damagePlayer(n, hs, part); }, get parts() { return player.parts; }, get bleeds() { return player.bleeds; }, get inventory() { return inventory; }, carryWeight, CARRY, _stepPlayer(dt) { updatePlayer(dt); }, _hud() { updateHUD(); }, _useMed() { useMed(); }, // (#304/#307) QA
   // 물리 디버그 (#119)
   get physReady() { return physReady; },
