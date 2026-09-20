@@ -56,42 +56,42 @@ const WEAPONS = {
   rifle: {
     key: 'rifle', name: 'AK 소총', model: 'rifle', price: 0, viewLen: 0.62,
     fireInterval: 0.11, magSize: 30, reserveMax: 90, reloadTime: 2.2,
-    damageBody: 34, damageHead: 95, range: 200,
+    damageBody: 34, damageHead: 95, range: 200, velocity: 715, // 탄속 m/s (#301)
     spreadHip: 0.022, spreadAds: 0.005, spreadMove: 0.02,
     pellets: 1, auto: true, adsFov: 55, recoil: 0.35, kick: 0.006, sfxRate: 1, sfxVol: 0.45,
   },
   revolver: {
     key: 'revolver', name: '리볼버', model: 'revolver', price: 12000, viewLen: 0.34,
     fireInterval: 0.5, magSize: 6, reserveMax: 24, reloadTime: 2.8,
-    damageBody: 60, damageHead: 170, range: 120,
+    damageBody: 60, damageHead: 170, range: 120, velocity: 260, // 탄속 m/s (#301)
     spreadHip: 0.03, spreadAds: 0.006, spreadMove: 0.025,
     pellets: 1, auto: false, adsFov: 60, recoil: 0.7, kick: 0.012, sfxRate: 1.15, sfxVol: 0.5,
   },
   smg2: {
     key: 'smg2', name: 'SMG', model: 'smg2', price: 18000, viewLen: 0.5,
     fireInterval: 0.07, magSize: 35, reserveMax: 105, reloadTime: 1.9,
-    damageBody: 22, damageHead: 55, range: 120,
+    damageBody: 22, damageHead: 55, range: 120, velocity: 400, // 탄속 m/s (#301)
     spreadHip: 0.03, spreadAds: 0.012, spreadMove: 0.018,
     pellets: 1, auto: true, adsFov: 62, recoil: 0.22, kick: 0.004, sfxRate: 1.3, sfxVol: 0.38,
   },
   shotgun: {
     key: 'shotgun', name: '펌프 샷건', model: 'shotgun', price: 34000, viewLen: 0.60,
     fireInterval: 0.85, magSize: 6, reserveMax: 30, reloadTime: 2.6,
-    damageBody: 13, damageHead: 24, range: 46,
+    damageBody: 13, damageHead: 24, range: 46, velocity: 400, // 탄속 m/s (#301)
     spreadHip: 0.055, spreadAds: 0.038, spreadMove: 0.02,
     pellets: 8, auto: false, adsFov: 62, recoil: 0.9, kick: 0.02, sfxRate: 0.7, sfxVol: 0.55,
   },
   bullpup: {
     key: 'bullpup', name: '불펍 소총', model: 'bullpup', price: 55000, viewLen: 0.62,
     fireInterval: 0.09, magSize: 36, reserveMax: 108, reloadTime: 2.0,
-    damageBody: 38, damageHead: 105, range: 220,
+    damageBody: 38, damageHead: 105, range: 220, velocity: 900, // 탄속 m/s (#301)
     spreadHip: 0.02, spreadAds: 0.004, spreadMove: 0.018,
     pellets: 1, auto: true, adsFov: 52, recoil: 0.32, kick: 0.005, sfxRate: 1.08, sfxVol: 0.45,
   },
   sniper: {
     key: 'sniper', name: '볼트액션 저격총', model: 'sniper', price: 90000, viewLen: 0.78, tpsScale: 1.2,
     fireInterval: 1.5, magSize: 5, reserveMax: 20, reloadTime: 2.9,
-    damageBody: 110, damageHead: 260, range: 400,
+    damageBody: 110, damageHead: 260, range: 400, velocity: 830, // 탄속 m/s (#301)
     spreadHip: 0.05, spreadAds: 0.0012, spreadMove: 0.035,
     pellets: 1, auto: false, adsFov: 18, recoil: 1.1, kick: 0.016, sfxRate: 0.82, sfxVol: 0.55,
   },
@@ -4113,58 +4113,13 @@ function fireShot() {
     if (now - recoilPat.lastT > 500) { recoilPat.burst = []; recoilPat.saved = false; }
     recoilPat.burst.push([player.recoilYaw, player.recoilPitch]); recoilPat.lastT = now;
   }
-  let anyHit = false;
-  for (let p = 0; p < GUN.pellets; p++) {
+  for (let p = 0; p < GUN.pellets; p++) { // 탄퍼짐 적용 방향으로 발사체 생성 (#301) — 명중은 비행 후 updateProjectiles 에서
     const dir = aimPoint.clone().sub(muzzle).normalize();
     dir.x += (Math.random() - 0.5) * spread * 2;
     dir.y += (Math.random() - 0.5) * spread * 2;
     dir.z += (Math.random() - 0.5) * spread * 2;
     dir.normalize();
-    _shootRay.set(muzzle, dir);
-    _shootRay.far = GUN.range;
-    const hits = _shootRay.intersectObjects(targets, false);
-    let endPoint = muzzle.clone().add(dir.clone().multiplyScalar(GUN.range));
-    if (hits.length > 0) {
-      const h = hits[0];
-      endPoint = h.point;
-      const ud = h.object.userData;
-      if (ud && ud.enemy && !ud.enemy.dead) {
-        const dmg = ud.part === 'head' ? GUN.damageHead : GUN.damageBody;
-        ud.enemy.hp -= dmg;
-        if (ud.enemy.hp > 0) enemyHitReact(ud.enemy, ud.part === 'head');
-        // 피격당한 적은 즉시 교전 상태
-        ud.enemy.lastKnown.copy(player.pos);
-        if (ud.enemy.hp <= 0) killEnemy(ud.enemy);
-        else ud.enemy.state = 'combat';
-        anyHit = true;
-      } else if (ud && ud.physProp && !ud.physProp.exploded) {
-        // 물리 배럴 피격 — 폭발통은 폭발, 일반통은 임펄스로 튐 (#119)
-        const p = ud.physProp;
-        if (p.explosive) {
-          p.exploded = true; blackenProp(p); removeMovementCollider(p);
-          explodeAt(propWorldPos(p).clone());
-        } else {
-          const m = p.body.mass();
-          p.body.applyImpulse({ x: dir.x * 5 * m, y: 1.5 * m, z: dir.z * 5 * m }, true);
-          p.body.applyTorqueImpulse({ x: (Math.random() - 0.5) * m, y: (Math.random() - 0.5) * m, z: (Math.random() - 0.5) * m }, true);
-        }
-      } else if (ud && ud.rangeTarget) { // 연습장 표적 (#292): 점수/존/공 반응 + 종이·실루엣엔 탄흔
-        rangeHit(ud.rangeTarget, h);
-        if (ud.rangeTarget.kind !== 'gong' && h.face) { _decalN.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize(); spawnDecal(h.point, _decalN); }
-        anyHit = true;
-      } else if (h.face) {
-        // 환경(벽·바닥·정적 소품) 명중 → 탄흔 데칼 (#208)
-        _decalN.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize();
-        spawnDecal(h.point, _decalN);
-      }
-    }
-    // 트레이서는 스코프 무기(스코프 부착·저격총)에서만 — 일반 사격은 총구 시작점이 반동·총열정렬로
-    // 흔들려 궤적이 지저분해서 제외. 스코프는 정조준 상태라 안정적 (#183)
-    if (currentAtt.includes('scope') || GUN.key === 'sniper') spawnTracer(tracerStart, endPoint, 0xffe0a0);
-  }
-  if (anyHit) {
-    showHitmarker();
-    sfx.hitmarker();
+    spawnProjectile(muzzle, dir, tracerStart);
   }
 }
 
@@ -4176,6 +4131,73 @@ function showHitmarker() {
 // ============================================================
 // 트레이서 / 이펙트
 // ============================================================
+// ── 탄도 (#301): 플레이어 탄은 즉시 레이가 아니라 발사체 — 무기별 탄속(velocity m/s) + 중력 낙차. 매 프레임 이동 구간을 레이로 검사(터널링 없음),
+// 사거리(range)·3초·지면 아래에서 소멸. 명중 처리는 resolveBulletHit(적/물리통/연습장 표적/탄흔) 로 분리. 적 사격은 기존 즉시 판정 유지.
+let projectiles = [];
+const BALLISTICS = { g: 9.8, maxTime: 3.0 };
+function spawnProjectile(muzzle, dir, tracerStart) {
+  const pr = { pos: muzzle.clone(), vel: dir.clone().multiplyScalar(GUN.velocity || 700), t: 0, dist: 0, range: GUN.range, dmgBody: GUN.damageBody, dmgHead: GUN.damageHead, line: null };
+  if (currentAtt.includes('scope') || GUN.key === 'sniper') { // 라이브 트레이서(스코프 무기만 #183): 시작점→현재 위치, 소멸 후 0.07s 페이드
+    const geo = new THREE.BufferGeometry().setFromPoints([tracerStart, muzzle]);
+    pr.line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffe0a0, transparent: true, opacity: 0.85 })); scene.add(pr.line);
+  }
+  projectiles.push(pr);
+}
+const _pDir = new THREE.Vector3(), _pNext = new THREE.Vector3();
+function updateProjectiles(dt) {
+  if (!projectiles.length) return;
+  const targets = [...obstacleMeshes, ...propMeshes];
+  for (const e of enemies) if (!e.dead) targets.push(e.body, e.head);
+  let anyHit = false;
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const pr = projectiles[i], v0y = pr.vel.y;
+    pr.vel.y -= BALLISTICS.g * dt;
+    _pNext.copy(pr.pos).addScaledVector(pr.vel, dt); _pNext.y += (v0y - pr.vel.y) * 0.5 * dt; // 정확 적분: v0·dt − ½g·dt²
+    _pDir.subVectors(_pNext, pr.pos); const seg = _pDir.length(); _pDir.normalize();
+    _shootRay.set(pr.pos, _pDir); _shootRay.far = seg;
+    const hits = _shootRay.intersectObjects(targets, false);
+    let done = false;
+    if (hits.length) { if (resolveBulletHit(hits[0], _pDir, pr)) anyHit = true; _pNext.copy(hits[0].point); done = true; }
+    pr.pos.copy(_pNext); pr.dist += seg; pr.t += dt;
+    if (pr.line) { const a = pr.line.geometry.attributes.position; a.setXYZ(1, pr.pos.x, pr.pos.y, pr.pos.z); a.needsUpdate = true; pr.line.geometry.computeBoundingSphere(); }
+    if (done || pr.dist >= pr.range || pr.t > BALLISTICS.maxTime || pr.pos.y < -5) {
+      if (pr.line) tracers.push({ line: pr.line, life: 0.07 });
+      projectiles.splice(i, 1);
+    }
+  }
+  if (anyHit) { showHitmarker(); sfx.hitmarker(); }
+}
+// 명중 처리 — 적(부위 데미지)/물리통(폭발·임펄스)/연습장 표적/환경 탄흔. 적·표적 명중 시 true(히트마커)
+function resolveBulletHit(h, dir, pr) {
+  const ud = h.object.userData;
+  if (ud && ud.enemy && !ud.enemy.dead) {
+    const dmg = ud.part === 'head' ? pr.dmgHead : pr.dmgBody;
+    ud.enemy.hp -= dmg;
+    if (ud.enemy.hp > 0) enemyHitReact(ud.enemy, ud.part === 'head');
+    ud.enemy.lastKnown.copy(player.pos); // 피격당한 적은 즉시 교전 상태
+    if (ud.enemy.hp <= 0) killEnemy(ud.enemy);
+    else ud.enemy.state = 'combat';
+    return true;
+  }
+  if (ud && ud.physProp && !ud.physProp.exploded) { // 물리 배럴 피격 — 폭발통은 폭발, 일반통은 임펄스로 튐 (#119)
+    const p = ud.physProp;
+    if (p.explosive) { p.exploded = true; blackenProp(p); removeMovementCollider(p); explodeAt(propWorldPos(p).clone()); }
+    else {
+      const m = p.body.mass();
+      p.body.applyImpulse({ x: dir.x * 5 * m, y: 1.5 * m, z: dir.z * 5 * m }, true);
+      p.body.applyTorqueImpulse({ x: (Math.random() - 0.5) * m, y: (Math.random() - 0.5) * m, z: (Math.random() - 0.5) * m }, true);
+    }
+    return false;
+  }
+  if (ud && ud.rangeTarget) { // 연습장 표적 (#292): 점수/존/공 반응 + 종이·실루엣엔 탄흔
+    rangeHit(ud.rangeTarget, h);
+    if (ud.rangeTarget.kind !== 'gong' && h.face) { _decalN.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize(); spawnDecal(h.point, _decalN); }
+    return true;
+  }
+  if (h.face) { _decalN.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize(); spawnDecal(h.point, _decalN); } // 환경 탄흔 (#208)
+  return false;
+}
+
 function spawnTracer(from, to, color) {
   const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
   const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85 });
@@ -5624,6 +5646,7 @@ function clearRaidObjects() {
   extractions = [];
   if (airdropBeacon) { scene.remove(airdropBeacon.beam); scene.remove(airdropBeacon.ring); scene.remove(airdropBeacon.light); airdropBeacon = null; } // (#197)
   for (const t of tracers) scene.remove(t.line);
+  for (const pr of projectiles) if (pr.line) scene.remove(pr.line); projectiles = []; // 발사체 정리 (#301)
   tracers = [];
   for (const d of decals) scene.remove(d); // 탄흔 데칼 정리 (#208)
   decals = [];
@@ -6214,7 +6237,7 @@ function updateHUD() {
   if (state.range && dom.rhDist && (rfTick = (rfTick + 1) % 4) === 0) {
     const warn = player.pos.z < RANGE_FIRE_Z - 2.0; // 사격선 턱(RANGE_FIRE_Z−1.7)을 넘어서면 경고
     let txt = '—';
-    if (!warn) { camera.getWorldDirection(_rfDir); _aimRay.set(camera.position, _rfDir); _aimRay.far = 400; const h = _aimRay.intersectObjects(obstacleMeshes, false); if (h.length) txt = `${h[0].point.distanceTo(player.pos).toFixed(1)} m`; } // 사수 기준 거리(카메라 아님)
+    if (!warn) { camera.getWorldDirection(_rfDir); _aimRay.set(camera.position, _rfDir); _aimRay.far = 400; const h = _aimRay.intersectObjects(obstacleMeshes, false); if (h.length) { const d = h[0].point.distanceTo(player.pos), v = GUN.velocity || 700, drop = 0.5 * BALLISTICS.g * (d / v) ** 2; txt = `${d.toFixed(1)} m · 낙차 ${drop < 0.005 ? '0' : '−' + Math.round(drop * 100)} cm`; } } // 사수 기준 거리 + 현재 무기 낙차 (#301)
     dom.rhDist.textContent = warn ? '⚠ 사격선 이탈' : txt; dom.rhDist.classList.toggle('rh-warn', warn);
   }
   // 저체력 치료 힌트 (#110): useHeal 과 같은 우선순위(붕대 먼저)로 다음 사용 아이템 안내
@@ -6291,6 +6314,7 @@ function loop() {
     }
     updatePlayer(dt);
     updateGun(dt);
+    updateProjectiles(dt); // 발사체 비행·명중 (#301)
     for (const e of enemies) updateEnemy(e, dt);
     updatePhysics(dt); // Rapier 스텝 + 소품/래그돌 동기화 (#119)
     if (state.range) updateRangeTargets(dt); // 스틸 공 흔들림 (#292)
@@ -6353,7 +6377,8 @@ window.__ex = {
   },
   _startRaid(k) { startRaid(k); },
   _fire() { if (state.phase !== 'raid') return; if (gun.mag <= 0) gun.mag = GUN.magSize; fireShot(); }, // QA: 트리거 게이트(포인터락·raiseT 등) 우회 1발, 탄창 자동 보충 (#292)
-  get rangeTargets() { return rangeTargets; }, get drill() { return drill; }, _startDrill() { startDrill(); }, _rangeTick(dt) { updateRangeTargets(dt); }, _cycleDrillMode() { cycleDrillMode(); }, get recoilPat() { return recoilPat; }, // QA (#295/#298) — 자동화 탭은 rAF 가 느려 드릴/이동 표적 시간을 수동 진행
+  get rangeTargets() { return rangeTargets; }, get drill() { return drill; }, _startDrill() { startDrill(); }, _rangeTick(dt) { updateRangeTargets(dt); }, _cycleDrillMode() { cycleDrillMode(); }, get recoilPat() { return recoilPat; }, // QA (#295/#298)
+  _flushProjectiles() { for (let k = 0; k < 200 && projectiles.length; k++) updateProjectiles(0.02); return projectiles.length; }, _stepProjectiles(dt) { updateProjectiles(dt); }, get projectiles() { return projectiles; }, // QA (#301): 발사체를 즉시 비행 완료 / 수동 스텝 — 자동화 탭은 rAF 가 느려 드릴/이동 표적 시간을 수동 진행
   // 성능 QA (#280): _perfBegin() … (프레임 진행) … _perfEnd() → 그 사이 누적 draw call/삼각형의 프레임당 평균. renderer.info 는 프레임마다
   // 리셋되므로 autoReset 을 잠시 끈다. 두 호출로 나눈 이유: 자동화 탭에서는 JS 실행 중 rAF 가 멈춰 한 호출 안의 await 로는 프레임이 안 흐른다.
   _perfBegin() { const info = renderer.info; info.autoReset = false; info.reset(); this._pf0 = info.render.frame; return this._pf0; },
