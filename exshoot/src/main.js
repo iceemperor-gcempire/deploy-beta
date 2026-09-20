@@ -56,42 +56,42 @@ const WEAPONS = {
   rifle: {
     key: 'rifle', name: 'AK 소총', model: 'rifle', price: 0, viewLen: 0.62,
     fireInterval: 0.11, magSize: 30, reserveMax: 90, reloadTime: 2.2,
-    damageBody: 34, damageHead: 95, range: 200, velocity: 715, // 탄속 m/s (#301)
+    damageBody: 34, damageHead: 95, range: 200, velocity: 715, kg: 3.6, // 탄속 m/s (#301)
     spreadHip: 0.022, spreadAds: 0.005, spreadMove: 0.02,
     pellets: 1, auto: true, adsFov: 55, recoil: 0.35, kick: 0.006, sfxRate: 1, sfxVol: 0.45,
   },
   revolver: {
     key: 'revolver', name: '리볼버', model: 'revolver', price: 12000, viewLen: 0.34,
     fireInterval: 0.5, magSize: 6, reserveMax: 24, reloadTime: 2.8,
-    damageBody: 60, damageHead: 170, range: 120, velocity: 260, // 탄속 m/s (#301)
+    damageBody: 60, damageHead: 170, range: 120, velocity: 260, kg: 1.1, // 탄속 m/s (#301)
     spreadHip: 0.03, spreadAds: 0.006, spreadMove: 0.025,
     pellets: 1, auto: false, adsFov: 60, recoil: 0.7, kick: 0.012, sfxRate: 1.15, sfxVol: 0.5,
   },
   smg2: {
     key: 'smg2', name: 'SMG', model: 'smg2', price: 18000, viewLen: 0.5,
     fireInterval: 0.07, magSize: 35, reserveMax: 105, reloadTime: 1.9,
-    damageBody: 22, damageHead: 55, range: 120, velocity: 400, // 탄속 m/s (#301)
+    damageBody: 22, damageHead: 55, range: 120, velocity: 400, kg: 2.8, // 탄속 m/s (#301)
     spreadHip: 0.03, spreadAds: 0.012, spreadMove: 0.018,
     pellets: 1, auto: true, adsFov: 62, recoil: 0.22, kick: 0.004, sfxRate: 1.3, sfxVol: 0.38,
   },
   shotgun: {
     key: 'shotgun', name: '펌프 샷건', model: 'shotgun', price: 34000, viewLen: 0.60,
     fireInterval: 0.85, magSize: 6, reserveMax: 30, reloadTime: 2.6,
-    damageBody: 13, damageHead: 24, range: 46, velocity: 400, // 탄속 m/s (#301)
+    damageBody: 13, damageHead: 24, range: 46, velocity: 400, kg: 3.4, // 탄속 m/s (#301)
     spreadHip: 0.055, spreadAds: 0.038, spreadMove: 0.02,
     pellets: 8, auto: false, adsFov: 62, recoil: 0.9, kick: 0.02, sfxRate: 0.7, sfxVol: 0.55,
   },
   bullpup: {
     key: 'bullpup', name: '불펍 소총', model: 'bullpup', price: 55000, viewLen: 0.62,
     fireInterval: 0.09, magSize: 36, reserveMax: 108, reloadTime: 2.0,
-    damageBody: 38, damageHead: 105, range: 220, velocity: 900, // 탄속 m/s (#301)
+    damageBody: 38, damageHead: 105, range: 220, velocity: 900, kg: 3.5, // 탄속 m/s (#301)
     spreadHip: 0.02, spreadAds: 0.004, spreadMove: 0.018,
     pellets: 1, auto: true, adsFov: 52, recoil: 0.32, kick: 0.005, sfxRate: 1.08, sfxVol: 0.45,
   },
   sniper: {
     key: 'sniper', name: '볼트액션 저격총', model: 'sniper', price: 90000, viewLen: 0.78, tpsScale: 1.2,
     fireInterval: 1.5, magSize: 5, reserveMax: 20, reloadTime: 2.9,
-    damageBody: 110, damageHead: 260, range: 400, velocity: 830, // 탄속 m/s (#301)
+    damageBody: 110, damageHead: 260, range: 400, velocity: 830, kg: 4.8, // 탄속 m/s (#301)
     spreadHip: 0.05, spreadAds: 0.0012, spreadMove: 0.035,
     pellets: 1, auto: false, adsFov: 18, recoil: 1.1, kick: 0.016, sfxRate: 0.82, sfxVol: 0.55,
   },
@@ -161,17 +161,17 @@ function muzzleDeviceMesh(size) {
 }
 
 const ITEM_TABLE = [
-  { name: '볼트',            value: 1500,  w: 18 },
-  { name: '붕대',            value: 3000,  w: 16, heal: 25, type: 'consumable' },
-  { name: '군용 MRE',        value: 8000,  w: 12 },
-  { name: '구급킷',          value: 14000, w: 7,  heal: 60, type: 'consumable' },
-  { name: '진통제',          value: 6000,  w: 9,  use: 'painkiller', type: 'consumable' }, // 60s 부상 효과 억제 (#307)
-  { name: '부목',            value: 5000,  w: 8,  use: 'splint', type: 'consumable' },     // 부상 부위(팔/다리) 30% 복구 (#307)
-  { name: '손목시계',        value: 15000, w: 10 },
-  { name: '위스키',          value: 22000, w: 8 },
-  { name: '금목걸이',        value: 28000, w: 6 },
-  { name: '그래픽카드',      value: 95000, w: 2 },
-  { name: '5.56 탄약 30발',  value: 0,     w: 14, ammo: 30 },
+  { name: '볼트',            value: 1500,  w: 18, kg: 0.2 },
+  { name: '붕대',            value: 3000,  w: 16, kg: 0.1, heal: 25, type: 'consumable' },
+  { name: '군용 MRE',        value: 8000,  w: 12, kg: 0.6 },
+  { name: '구급킷',          value: 14000, w: 7, kg: 0.8,  heal: 60, type: 'consumable' },
+  { name: '진통제',          value: 6000,  w: 9, kg: 0.1,  use: 'painkiller', type: 'consumable' }, // 60s 부상 효과 억제 (#307)
+  { name: '부목',            value: 5000,  w: 8, kg: 0.3,  use: 'splint', type: 'consumable' },     // 부상 부위(팔/다리) 30% 복구 (#307)
+  { name: '손목시계',        value: 15000, w: 10, kg: 0.1 },
+  { name: '위스키',          value: 22000, w: 8, kg: 1.2 },
+  { name: '금목걸이',        value: 28000, w: 6, kg: 0.1 },
+  { name: '그래픽카드',      value: 95000, w: 2, kg: 1.5 },
+  { name: '5.56 탄약 30발',  value: 0,     w: 14, kg: 0.4, ammo: 30 },
 ];
 
 // 총기 부품 (#186) — 지금은 루팅·구매로 획득해 인벤토리에 쌓이는 아이템. 슬롯 장착(커스텀)은 차후.
@@ -180,13 +180,13 @@ const SLOT_LABEL = { barrel: '총열', muzzle: '총구', handguard: '핸드가�
 const SLOT_ORDER = ['barrel', 'muzzle', 'handguard', 'stock', 'magazine', 'trigger', 'bolt'];
 // mods: 무기 스탯에 곱(mul)·합(add) 적용. desc 는 UI 표기.
 const PART_TABLE = [
-  { name: '강선 총열',     value: 12000, w: 5, type: 'part', slot: 'barrel',    desc: '명중률·사거리 향상', mods: { spreadHip: { mul: 0.85 }, spreadAds: { mul: 0.8 }, range: { mul: 1.12 } } },
-  { name: '소염기',        value: 7000,  w: 6, type: 'part', slot: 'muzzle',    desc: '반동 감소',          mods: { recoil: { mul: 0.82 } } },
-  { name: '경량 핸드가드', value: 8000,  w: 6, type: 'part', slot: 'handguard', desc: '이동 중 탄퍼짐 감소', mods: { spreadMove: { mul: 0.75 } } },
-  { name: '전술 개머리판', value: 9000,  w: 6, type: 'part', slot: 'stock',     desc: '반동·총열 튐 감소',  mods: { recoil: { mul: 0.85 }, kick: { mul: 0.85 } } },
-  { name: '확장 탄창',     value: 6000,  w: 7, type: 'part', slot: 'magazine',  desc: '탄창 +10',           mods: { magSize: { add: 10 } } },
-  { name: '경기용 방아쇠', value: 15000, w: 3, type: 'part', slot: 'trigger',   desc: '연사 속도 향상',     mods: { fireInterval: { mul: 0.9 } } },
-  { name: '강화 노리쇠',   value: 11000, w: 4, type: 'part', slot: 'bolt',      desc: '재장전 속도 향상',   mods: { reloadTime: { mul: 0.85 } } },
+  { name: '강선 총열',     value: 12000, w: 5, type: 'part', slot: 'barrel', kg: 1.2,    desc: '명중률·사거리 향상', mods: { spreadHip: { mul: 0.85 }, spreadAds: { mul: 0.8 }, range: { mul: 1.12 } } },
+  { name: '소염기',        value: 7000,  w: 6, type: 'part', slot: 'muzzle', kg: 0.3,    desc: '반동 감소',          mods: { recoil: { mul: 0.82 } } },
+  { name: '경량 핸드가드', value: 8000,  w: 6, type: 'part', slot: 'handguard', kg: 0.5, desc: '이동 중 탄퍼짐 감소', mods: { spreadMove: { mul: 0.75 } } },
+  { name: '전술 개머리판', value: 9000,  w: 6, type: 'part', slot: 'stock', kg: 0.7,     desc: '반동·총열 튐 감소',  mods: { recoil: { mul: 0.85 }, kick: { mul: 0.85 } } },
+  { name: '확장 탄창',     value: 6000,  w: 7, type: 'part', slot: 'magazine', kg: 0.4,  desc: '탄창 +10',           mods: { magSize: { add: 10 } } },
+  { name: '경기용 방아쇠', value: 15000, w: 3, type: 'part', slot: 'trigger', kg: 0.2,   desc: '연사 속도 향상',     mods: { fireInterval: { mul: 0.9 } } },
+  { name: '강화 노리쇠',   value: 11000, w: 4, type: 'part', slot: 'bolt', kg: 0.6,      desc: '재장전 속도 향상',   mods: { reloadTime: { mul: 0.85 } } },
 ];
 const PART_BY_NAME = Object.fromEntries(PART_TABLE.map((p) => [p.name, p]));
 // 무기별 지원 슬롯 (부품 slot 이 여기 포함되면 장착 가능)
@@ -217,11 +217,24 @@ function effectiveWeapon(key) {
 }
 // 열쇠 (#195) — 잠긴 금고를 여는 아이템. 반입해야 해당 금고 개방. 루팅(희귀)·상점 획득.
 const KEY_TABLE = [
-  { name: '창고 열쇠',     keyId: 'warehouse', value: 25000, w: 1.2, price: 40000, type: 'key' },
-  { name: '사무실 금고 키', keyId: 'office',    value: 35000, w: 0.8, price: 55000, type: 'key' },
+  { name: '창고 열쇠',     keyId: 'warehouse', value: 25000, w: 1.2, price: 40000, type: 'key', kg: 0.05 },
+  { name: '사무실 금고 키', keyId: 'office',    value: 35000, w: 0.8, price: 55000, type: 'key', kg: 0.05 },
 ];
 const KEY_BY_ID = Object.fromEntries(KEY_TABLE.map((k) => [k.keyId, k]));
 const LOOT_POOL = [...ITEM_TABLE, ...PART_TABLE, ...KEY_TABLE]; // 루팅 롤 대상(일반+부품+열쇠)
+// ── 무게·휴대 한계 (#310): 반입 무기 + 착용 방어구 + 레이드 인벤토리(kg). ok 이하 정상 / ok~over 이동 ×0.85·질주 지구력 ×1.4 / over 초과 이동 ×0.65·질주 불가 / max 초과 픽업 불가
+const CARRY = { ok: 18, over: 28, max: 36 };
+const ARMOR_KG = 6.0, HELMET_KG = 1.2;
+const ITEM_KG = {}; for (const t of [ITEM_TABLE, PART_TABLE, KEY_TABLE]) for (const i of t) ITEM_KG[i.name] = i.kg != null ? i.kg : 0.5;
+function itemKg(i) { return i.kg != null ? i.kg : (ITEM_KG[i.name] != null ? ITEM_KG[i.name] : 0.5); }
+function carryWeight() {
+  let w = 0;
+  for (const k of carry) w += (WEAPONS[k] && WEAPONS[k].kg) || 3;
+  if (player.armorDur > 0) w += ARMOR_KG; if (player.helmet) w += HELMET_KG;
+  for (const i of inventory) w += itemKg(i);
+  return w;
+}
+function weightTier(w) { return w > CARRY.over ? 2 : w > CARRY.ok ? 1 : 0; }
 const CONSUMABLE_SHOP = ITEM_TABLE.filter((i) => i.type === 'consumable'); // 소모품 상점 목록(붕대·구급킷)
 
 // ---------- DOM ----------
@@ -245,6 +258,7 @@ const dom = {
   rhTitle: $('rh-title'), rhDrill: $('rh-drill'), rhBest: $('rh-best'), recoilTrace: $('recoil-trace'), // 무기별 통계·드릴·반동 궤적 (#295)
   rhHist: $('rh-hist'), rhPat: $('rh-pat'), rhDist: $('rh-dist'), // 최근 기록·반동 패턴·거리계 (#298)
   bodyHud: $('body-hud'), painHint: $('pain-hint'), // 신체 HUD (#304), 부상 처치 힌트 (#307)
+  weight: $('weight'), // 무게계 (#310)
 };
 
 // ---------- 모바일 감지 ----------
@@ -1136,6 +1150,12 @@ function renderInventoryScreen() {
   if (hasArmor && brArmor) lArmorRows.push(invRowHTML(`방탄복 (내구도 ${Math.round(st.armorDur)}/${ARMOR_MAX})`, '', '', moveBtn('← 보관', 'data-armld="0"')));
   if (hasHelmet && brHelmet) lArmorRows.push(invRowHTML('헬멧', '', '', moveBtn('← 보관', 'data-helld="0"')));
   const lKeys = keys.filter((k) => lk.includes(k.keyId));
+  { // 반입 무게 (#310): 총 + 방어구 + 열쇠 + 소모품(개수)
+    let lw = 0; for (const k of lGuns) lw += (WEAPONS[k] && WEAPONS[k].kg) || 3;
+    if (hasArmor && brArmor) lw += ARMOR_KG; if (hasHelmet && brHelmet) lw += HELMET_KG;
+    lw += lKeys.length * 0.05; for (const [n, x] of Object.entries(cg)) lw += Math.min(lc[n] || 0, x.n) * (ITEM_KG[n] != null ? ITEM_KG[n] : 0.5);
+    const el = document.getElementById('inv-load-w'); if (el) { el.textContent = `⚖ ${lw.toFixed(1)} kg${lw > CARRY.over ? ' · 질주 불가' : lw > CARRY.ok ? ' · 과중량' : ''}`; el.style.color = lw > CARRY.over ? '#ff6a55' : lw > CARRY.ok ? '#d9b23c' : '#7f8f7f'; }
+  }
   document.getElementById('inv-load').innerHTML = [
     invCatHTML('총', lGuns.length, lGuns.map((k) => invRowHTML(WEAPONS[k].name, gunTag(k), '', moveBtn('← 보관', `data-bringw="${k}"`))), '반입할 총을 스태시에서 →'),
     invCatHTML('방어구', lArmorRows.length, lArmorRows, ''),
@@ -3335,16 +3355,18 @@ function updatePlayer(dt) {
 
   // --- 지구력 / 달리기 ---
   // 사격 중엔 질주 불가 — 발사 버튼을 누르면 질주가 풀리고 총을 들어올림(raiseT 지연) (#180)
-  const wantSprint = ((keys['ShiftLeft'] && keys['KeyW']) || touch.sprint) && hasInput && !player.aiming && !gun.triggerDown;
+  const cw = carryWeight(), wt = weightTier(cw); // 무게 (#310)
+  if (wt !== player.wTier) { if (player.wTier !== undefined) addFeed(wt === 2 ? `심한 과중량 ${cw.toFixed(1)} kg — 질주 불가·크게 감속` : wt === 1 ? `과중량 ${cw.toFixed(1)} kg — 감속·지구력 소모↑` : '무게 정상'); player.wTier = wt; }
+  const wantSprint = ((keys['ShiftLeft'] && keys['KeyW']) || touch.sprint) && hasInput && !player.aiming && !gun.triggerDown && wt < 2;
   if (wantSprint && player.stamina > 1 && (partFrac('legs') > 0 || painFree())) { // 다리 부상 시 질주 불가 (#304), 진통제 중엔 가능 (#307)
     player.sprinting = true;
-    player.stamina = Math.max(0, player.stamina - 17 * dt);
+    player.stamina = Math.max(0, player.stamina - 17 * dt * (wt >= 1 ? 1.4 : 1)); // 과중량 지구력 소모↑ (#310)
     if (player.stamina <= 0) player.sprinting = false;
   } else {
     player.sprinting = false;
     player.stamina = Math.min(100, player.stamina + 13 * dt * (partFrac('stomach') <= 0 && !painFree() ? 0.4 : 1)); // 복부 부상 시 회복 저하
   }
-  const speed = PLAYER.walkSpeed * (player.sprinting ? PLAYER.sprintMult : 1) * (player.aiming ? 0.55 : 1) * legsK(); // 다리 부상 감속 (#304)
+  const speed = PLAYER.walkSpeed * (player.sprinting ? PLAYER.sprintMult : 1) * (player.aiming ? 0.55 : 1) * legsK() * (wt === 2 ? 0.65 : wt === 1 ? 0.85 : 1); // 다리 부상 (#304)·과중량 (#310) 감속
 
   // --- 수평 가속 ---
   const targetVx = wish.x * speed, targetVz = wish.z * speed;
@@ -4548,17 +4570,21 @@ function lootInteractable(it) {
       addFeed(`${WEAPONS[k].name} 발견!`);
     }
   }
+  const left = []; // 무게 초과로 못 챙긴 아이템 (#310)
   for (const item of it.items) {
     if (item.ammo) {
       gun.reserve += item.ammo;
       addFeed(`+${item.ammo} 탄약`);
     } else {
-      inventory.push({ name: item.name, value: item.value, heal: item.heal, use: item.use, type: item.type, slot: item.slot, keyId: item.keyId });
+      const kg = itemKg(item), cw = carryWeight();
+      if (cw + kg > CARRY.max) { left.push(item); addFeed(`무게 초과 — ${item.name} 못 챙김 (${cw.toFixed(1)}/${CARRY.max} kg)`); sfx.dryFire(); continue; } // (#310) 상자에 남김
+      inventory.push({ name: item.name, value: item.value, heal: item.heal, use: item.use, type: item.type, slot: item.slot, keyId: item.keyId, kg });
       addFeed(item.type === 'part' ? `${item.name} 획득 (총기 부품)`
         : item.type === 'key' ? `${item.name} 획득 (열쇠)`
         : `${item.name} 획득 (₽${item.value.toLocaleString('ko-KR')})`);
     }
   }
+  it.items = left; if (left.length) it.opened = false; // 남은 아이템은 다시 열 수 있음 (#310)
   refreshInventoryUI();
 }
 
@@ -4616,7 +4642,7 @@ function refreshInventoryUI() {
   dom.invList.innerHTML = Object.entries(groups).map(([name, g]) =>
     `<div class="item"><span>${name}${g.n > 1 ? ` ×${g.n}` : ''}</span><span class="val">₽ ${g.v.toLocaleString('ko-KR')}</span></div>`
   ).join('') || '<div style="opacity:0.5">비어 있음</div>';
-  dom.invTotal.textContent = `₽ ${inventoryValue().toLocaleString('ko-KR')}`;
+  dom.invTotal.textContent = `₽ ${inventoryValue().toLocaleString('ko-KR')} · ⚖ ${carryWeight().toFixed(1)} kg`; // (#310)
 }
 
 function addFeed(text) {
@@ -5759,6 +5785,7 @@ function startRaid(mapKey) {
   player.hp = PLAYER.maxHp;
   player.stamina = 100;
   resetBodyParts(); // 부위별 체력 (#304)
+  player.wTier = undefined; // 무게 단계 피드 리셋 (#310)
 
   const stash0 = loadStash();
   const owned0 = (stash0.weapons || ['rifle']).filter((k) => WEAPONS[k]);
@@ -6331,6 +6358,7 @@ function updateHUD() {
   }
   dom.hpFill.style.width = `${player.hp}%`;
   dom.stamFill.style.width = `${player.stamina}%`;
+  if (dom.weight && state.phase === 'raid') { const cw = carryWeight(), t = weightTier(cw); const txt = `⚖ ${cw.toFixed(1)} / ${CARRY.over} kg`; if (dom.weight.textContent !== txt) dom.weight.textContent = txt; dom.weight.className = t === 2 ? 'w-max' : t === 1 ? 'w-over' : ''; } // (#310)
   if (dom.bodyHud && player.parts && (bodyDirty || (bodyTick = (bodyTick + 1) % 4) === 0)) { bodyDirty = false; drawBodyHud(); } // 신체 HUD (#304)
   const hasArmor = player.armorDur > 0 || player.helmet;
   $('armor-label').style.display = hasArmor ? 'block' : 'none';
@@ -6442,7 +6470,7 @@ window.__ex = {
   lootInteractable,
   WEAPONS,
   kill(i) { const e = enemies[i]; if (e && !e.dead) killEnemy(e); },
-  hurt(n, hs = false, part = null) { damagePlayer(n, hs, part); }, get parts() { return player.parts; }, get bleeds() { return player.bleeds; }, get inventory() { return inventory; }, _stepPlayer(dt) { updatePlayer(dt); }, _hud() { updateHUD(); }, _useMed() { useMed(); }, // (#304/#307) QA
+  hurt(n, hs = false, part = null) { damagePlayer(n, hs, part); }, get parts() { return player.parts; }, get bleeds() { return player.bleeds; }, get inventory() { return inventory; }, carryWeight, CARRY, _stepPlayer(dt) { updatePlayer(dt); }, _hud() { updateHUD(); }, _useMed() { useMed(); }, // (#304/#307) QA
   // 물리 디버그 (#119)
   get physReady() { return physReady; },
   get physProps() { return physProps.map((p) => { const t = p.body.translation(); return { x: t.x, y: t.y, z: t.z, explosive: p.explosive, exploded: p.exploded, sleeping: p.body.isSleeping() }; }); },

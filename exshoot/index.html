@@ -136,6 +136,8 @@
   body.mobile #minimap { width: 108px; height: 108px; }
   body.mobile #loot-value { top: 134px; }
   #kills { font-size: 12px; color: #b7c2b7; margin-top: 4px; }
+  #weight { font-size: 12px; color: #b7c2b7; margin-top: 4px; } /* 무게계 (#310) */
+  #weight.w-over { color: #d9b23c; } #weight.w-max { color: #ff6a55; font-weight: 700; }
 
   #prompt {
     position: absolute; left: 50%; top: 58%; transform: translateX(-50%);
@@ -475,6 +477,7 @@
     <div id="loot-value">
       <div>₽ <span id="loot-value-num">0</span></div>
       <div id="kills">사살 0</div>
+      <div id="weight">⚖ 0.0 / 28 kg</div>
     </div>
 
     <div id="range-hud">
@@ -607,7 +610,7 @@
         <div id="inv-stash" class="panel-list"></div>
       </div>
       <div class="inv-panel">
-        <div class="panel-h">반입 인벤토리 <span>레이드에 가져감</span></div>
+        <div class="panel-h">반입 인벤토리 <span id="inv-load-w">⚖ 0.0 kg</span></div>
         <div id="inv-load" class="panel-list"></div>
       </div>
     </div>
@@ -659,6 +662,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=a45c039"></script>
+  <script type="module" src="./src/main.js?v=daa785f"></script>
 </body>
 </html>
