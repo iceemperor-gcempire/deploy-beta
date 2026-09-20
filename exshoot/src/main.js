@@ -2682,6 +2682,7 @@ function spawnEnemyAt(p, waypoint) {
     lostTimer: 0, fireTimer: 1 + Math.random(), burstLeft: 0, mag: ENEMY.magSize,
     reloadT: 0, stance: 'stand', rollT: 0, rollDir: null, stuckTimer: 0, lastPos: p.clone(), dead: false,
   };
+  initEnemyParts(e); // 부위 풀 (#313)
   m.body.userData = { enemy: e, part: 'body' };
   m.head.userData = { enemy: e, part: 'head' };
   // 원샷 종료 훅 — spread 복사 후의 최종 enemy 객체(e)에 바인딩 (makeEnemyMesh 내부에서 하면 유실)
@@ -2744,6 +2745,7 @@ function spawnBoss(avoidPos) {
     dead: false,
     boss: true,
   };
+  initEnemyParts(e); // 부위 풀 ×3 (#313)
   m.body.userData = { enemy: e, part: 'body' };
   m.head.userData = { enemy: e, part: 'head' };
   m.mixer.addEventListener('finished', (ev) => {
@@ -2808,6 +2810,10 @@ function updateEnemy(e, dt) {
       e.group.position.y = 0.32 * k;
     }
     return;
+  }
+  if (e.bleed > 0 && state.phase === 'raid') { // 복부 파괴 출혈 (#313) — 치료 없이 계속 새어 나간다
+    e.hp -= e.bleed * dt;
+    if (e.hp <= 0) { killEnemy(e); return; }
   }
   const eyeH = e.crouched ? 1.05 : 1.6;
   const eyePos = new THREE.Vector3(e.pos.x, e.pos.y + eyeH, e.pos.z);
@@ -2897,7 +2903,7 @@ function updateEnemy(e, dt) {
           if (e.mag <= 0) {
             // 탄창 소진 → 재장전 (모션 시간만큼 사격 불가)
             e.burstLeft = 0;
-            e.reloadT = e.actReload ? e.actReload.getClip().duration : 1.7;
+            e.reloadT = (e.actReload ? e.actReload.getClip().duration : 1.7) * (enemyArmsOut(e) ? 1.4 : 1); // 팔 파괴 (#313)
             playEnemyOneShot(e, e.actReload, 0.1);
           }
         } else if (dist < ENEMY.fireRange && hasLineOfSight(eyePos, playerEyePos())) {
@@ -2919,7 +2925,7 @@ function updateEnemy(e, dt) {
       while (dy < -Math.PI) dy += Math.PI * 2;
       e.group.rotation.y += THREE.MathUtils.clamp(dy, -dt * 5, dt * 5);
     }
-    if (e.actLimp && e.hp < (e.maxHp || ENEMY.hp) * 0.35 && e.rollT <= 0) speed = Math.min(speed, 0.62);
+    if (e.actLimp && (e.hp < (e.maxHp || ENEMY.hp) * 0.35 || enemyLegsOut(e)) && e.rollT <= 0) speed = Math.min(speed, 0.62); // 다리 파괴도 절뚝임 (#313)
     const preX = e.pos.x, preZ = e.pos.z;
     e.pos.x += moveDir.x * speed * dt;
     e.pos.z += moveDir.z * speed * dt;
@@ -2955,7 +2961,7 @@ function updateEnemy(e, dt) {
   // --- 애니메이션 (전환 디바운스: 매 프레임 reset 반복 → 바인드포즈 고정 방지) ---
   if (e.actIdle && e.actRun && !e.oneShot) {
     const wantRun = !!moveDir;
-    const wounded = e.actLimp && e.hp < (e.maxHp || ENEMY.hp) * 0.35 && e.rollT <= 0;
+    const wounded = e.actLimp && (e.hp < (e.maxHp || ENEMY.hp) * 0.35 || enemyLegsOut(e)) && e.rollT <= 0;
     const wantWalk = wantRun && e.actWalk && speed <= ENEMY.walkSpeed + 0.01; // 순찰·후퇴 보행
     const wantCrouch = !wantRun && e.state === 'combat' && e.stance === 'crouch' && !!e.actCrouch;
     const desired = wantRun
@@ -3022,6 +3028,59 @@ function updateEnemy(e, dt) {
   }
 }
 
+// ── 적 부위 체력 (#313): 플레이어 부위 시스템(#304)의 대칭. 총 HP(e.hp) 사망 모델은 유지하고 부위 풀을 따로 깎는다.
+// 머리/흉부 풀 0 = 즉사(총 HP 와 무관). 다리 0 = 절뚝임(질주·회피 불가), 팔 0 = 명중률 ×0.5·재장전 ×1.4, 복부 0 = 출혈 1.5 HP/s.
+// 팔·다리 피격은 총 HP 를 0.65 배만 깎아 "무력화는 되지만 처치는 안 되는" 타르코프식 사격 선택을 만든다.
+const ENEMY_PARTS = {
+  head: { max: 35, mul: 1.0, name: '머리' }, thorax: { max: 80, mul: 1.0, name: '흉부' }, stomach: { max: 55, mul: 0.9, name: '복부' },
+  arms: { max: 40, mul: 0.65, name: '팔' }, legs: { max: 45, mul: 0.65, name: '다리' },
+};
+const ENEMY_BLEED = 1.5; // 복부 파괴 출혈 HP/s
+function initEnemyParts(e) {
+  const k = (e.maxHp || ENEMY.hp) / ENEMY.hp; // 보스(300)는 풀 ×3
+  e.parts = {}; for (const key of Object.keys(ENEMY_PARTS)) e.parts[key] = ENEMY_PARTS[key].max * k;
+  e.bleed = 0; e.lastHitPart = null;
+}
+function enemyLegsOut(e) { return !!(e.parts && e.parts.legs <= 0); }
+function enemyArmsOut(e) { return !!(e.parts && e.parts.arms <= 0); }
+// 피격점 → 부위. 머리 히트박스는 그대로 머리, 몸통 캡슐은 발 기준 높이(앉아쏴는 서 있는 자세로 정규화)와 측면 오프셋으로 판정.
+// 서 있을 때 캡슐 y 0.13~1.57: 다리 <0.80 · 복부 0.80~1.05 · 흉부 >1.05, 팔 = 0.95~1.45 높이에서 |x| > 0.14(캡슐 반지름 0.22 의 바깥 테).
+const _ehp = new THREE.Vector3();
+function enemyHitPart(e, hitboxPart, point) {
+  if (hitboxPart === 'head') return 'head';
+  if (!point) return 'thorax';
+  const lp = e.group.worldToLocal(_ehp.copy(point));
+  const y = e.crouched ? (lp.y - 0.60) / 0.68 + 0.85 : lp.y;
+  e.lastHitLocal = [+lp.x.toFixed(3), +y.toFixed(3)]; // QA
+  if (y < 0.80) return 'legs';
+  if (Math.abs(lp.x) > 0.14 && y >= 0.95 && y <= 1.45) return 'arms';
+  return y < 1.05 ? 'stomach' : 'thorax';
+}
+// 부위 피해 적용 — 반환: 이번 피격으로 새로 파괴된 부위(없으면 null). 사망 처리는 호출측(e.hp <= 0 검사).
+function damageEnemyPart(e, part, dmg) {
+  if (!e.parts) initEnemyParts(e);
+  const P = ENEMY_PARTS[part] || ENEMY_PARTS.thorax;
+  const before = e.parts[part];
+  e.parts[part] = Math.max(0, before - dmg);
+  e.hp -= dmg * P.mul;
+  e.lastHitPart = part;
+  const blacked = before > 0 && e.parts[part] <= 0;
+  if (blacked) {
+    if (part === 'head' || part === 'thorax') e.hp = Math.min(e.hp, 0); // 치명 부위 파괴 = 즉사
+    else if (part === 'stomach') { e.bleed = ENEMY_BLEED; addFeed('적 복부 관통 — 출혈'); }
+    else if (part === 'legs') addFeed('적 다리 부상 — 절뚝임');
+    else if (part === 'arms') addFeed('적 팔 부상 — 조준 흔들림');
+  }
+  return blacked ? part : null;
+}
+function enemyAccuracy(e, dist) {
+  const moving = player.vel.lengthSq() > 4;
+  let acc = 0.62 - dist * 0.011 - (moving ? 0.14 : 0) - (player.sprinting ? 0.08 : 0) + (e.crouched ? 0.06 : 0) + (e.boss ? 0.1 : 0);
+  acc = THREE.MathUtils.clamp(acc, 0.06, 0.8);
+  if (enemyArmsOut(e)) acc *= 0.5; // 팔 파괴 (#313)
+  return acc;
+}
+
 function enemyShoot(e, dist) {
   e.flash.intensity = 50;
   sfx.enemyShoot(dist);
@@ -3031,10 +3090,8 @@ function enemyShoot(e, dist) {
   const muzzle = new THREE.Vector3(0.28, muzzleH, 0.95).applyEuler(new THREE.Euler(0, e.group.rotation.y, 0)).add(e.pos);
   const targetPos = playerEyePos();
 
-  // 명중 판정 (거리/이동 기반 확률, 앉아쏴는 안정 보너스)
-  const moving = player.vel.lengthSq() > 4;
-  let acc = 0.62 - dist * 0.011 - (moving ? 0.14 : 0) - (player.sprinting ? 0.08 : 0) + (e.crouched ? 0.06 : 0) + (e.boss ? 0.1 : 0);
-  acc = THREE.MathUtils.clamp(acc, 0.06, 0.8);
+  // 명중 판정 (거리/이동 기반 확률, 앉아쏴는 안정 보너스, 팔 파괴 시 절반 #313)
+  const acc = enemyAccuracy(e, dist);
   const hit = Math.random() < acc && hasLineOfSight(new THREE.Vector3(e.pos.x, e.pos.y + (e.crouched ? 1.05 : 1.6), e.pos.z), targetPos);
 
   const endPoint = targetPos.clone();
@@ -3120,7 +3177,7 @@ function playEnemyOneShot(e, act, fade = 0.06) {
 // 피격 반응: 서서 교전 중이면 가끔 측면 회피 구르기, 아니면 부위별 Hit 원샷,
 // 이동/앉은 상태면 절차 flinch
 function enemyHitReact(e, headshot) {
-  if (e.state === 'combat' && e.rollT <= 0 && Math.random() < 0.3 &&
+  if (e.state === 'combat' && e.rollT <= 0 && !enemyLegsOut(e) && Math.random() < 0.3 && // 다리 파괴 시 회피 불가 (#313)
       playEnemyOneShot(e, e.actRoll, 0.08)) {
     const toP = player.pos.clone().sub(e.pos); toP.y = 0; toP.normalize();
     const side = Math.random() < 0.5 ? 1 : -1;
@@ -4228,9 +4285,10 @@ function updateProjectiles(dt) {
 function resolveBulletHit(h, dir, pr) {
   const ud = h.object.userData;
   if (ud && ud.enemy && !ud.enemy.dead) {
-    const dmg = ud.part === 'head' ? pr.dmgHead : pr.dmgBody;
-    ud.enemy.hp -= dmg;
-    if (ud.enemy.hp > 0) enemyHitReact(ud.enemy, ud.part === 'head');
+    const part = enemyHitPart(ud.enemy, ud.part, h.point); // 피격점 → 부위 (#313)
+    const dmg = part === 'head' ? pr.dmgHead : pr.dmgBody;
+    damageEnemyPart(ud.enemy, part, dmg);
+    if (ud.enemy.hp > 0) enemyHitReact(ud.enemy, part === 'head');
     ud.enemy.lastKnown.copy(player.pos); // 피격당한 적은 즉시 교전 상태
     if (ud.enemy.hp <= 0) killEnemy(ud.enemy);
     else ud.enemy.state = 'combat';
@@ -6470,6 +6528,10 @@ window.__ex = {
   lootInteractable,
   WEAPONS,
   kill(i) { const e = enemies[i]; if (e && !e.dead) killEnemy(e); },
+  // 적 부위 (#313) QA: 부위 판정 / 부위 피해 / 명중률 / 적 1기 수동 스텝
+  ENEMY_PARTS, _enemyPart(i, x, y, z) { const e = enemies[i]; return enemyHitPart(e, 'body', new THREE.Vector3(x, y, z)); },
+  _hitEnemy(i, part, dmg) { const e = enemies[i]; if (!e || e.dead) return null; const b = damageEnemyPart(e, part, dmg); if (e.hp <= 0) killEnemy(e); else e.state = 'combat'; return b; },
+  _enemyAcc(i, dist) { return enemyAccuracy(enemies[i], dist); }, _stepEnemy(i, dt) { updateEnemy(enemies[i], dt); },
   hurt(n, hs = false, part = null) { damagePlayer(n, hs, part); }, get parts() { return player.parts; }, get bleeds() { return player.bleeds; }, get inventory() { return inventory; }, carryWeight, CARRY, _stepPlayer(dt) { updatePlayer(dt); }, _hud() { updateHUD(); }, _useMed() { useMed(); }, // (#304/#307) QA
   // 물리 디버그 (#119)
   get physReady() { return physReady; },
