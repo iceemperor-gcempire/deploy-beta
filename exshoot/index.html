@@ -83,6 +83,10 @@
   #range-hud .rh-big { font-size: 20px; font-weight: 700; color: #e8eee6; }
   #range-hud .rh-last { color: #d9b23c; }
   #range-hud .rh-hint { margin-top: 6px; font-size: 10.5px; color: #7f8f7f; }
+  #recoil-trace { position: absolute; left: 50%; top: 50%; width: 240px; height: 240px; margin: -120px 0 0 -120px; display: none; pointer-events: none; } /* 반동 궤적 (#295) */
+  #tb-reset, #tb-drill { display: none; left: 14px; width: 48px; height: 48px; font-size: 11px; }
+  #tb-reset { top: 214px; } #tb-drill { top: 270px; }
+  body.mobile #hud.range #tb-reset, body.mobile #hud.range #tb-drill { display: flex; }
   body.mobile #range-hud { left: 12px; top: 74px; min-width: 150px; font-size: 11px; padding: 6px 8px; }
   body.mobile #range-hud .rh-hint { display: none; }
 
@@ -453,6 +457,7 @@
     </div>
     <div id="scope-overlay"></div>
     <div id="hitmarker"></div>
+    <canvas id="recoil-trace" width="240" height="240"></canvas>
 
     <div id="topbar">
       <div id="raid-timer">12:00</div>
@@ -467,13 +472,15 @@
     </div>
 
     <div id="range-hud">
-      <div class="rh-title">🎯 사격 연습장</div>
+      <div class="rh-title" id="rh-title">🎯 사격 연습장</div>
       <div class="rh-row"><span>발사</span><span class="rh-big" id="rh-shots">0</span></div>
       <div class="rh-row"><span>명중</span><span class="rh-big" id="rh-hits">0</span></div>
       <div class="rh-row"><span>명중률</span><span id="rh-acc">—</span></div>
       <div class="rh-row"><span>마지막</span><span class="rh-last" id="rh-last">—</span></div>
       <div class="rh-row"><span>5발 그룹</span><span id="rh-group">—</span></div>
-      <div class="rh-hint"><b>T</b> 표적·탄흔 리셋 · 스틸 공은 거리만큼 늦게 울립니다</div>
+      <div class="rh-row"><span>드릴</span><span class="rh-last" id="rh-drill">Y 시작</span></div>
+      <div class="rh-row"><span>베스트</span><span id="rh-best">—</span></div>
+      <div class="rh-hint"><b>T</b> 리셋 · <b>Y</b> 드릴(팝업 5기) · 무기별 통계 · 이동 표적은 맞힐수록 빨라짐</div>
     </div>
 
     <div id="vitals">
@@ -519,6 +526,8 @@
       <div class="tbtn" id="tb-heal">치료</div>
       <div class="tbtn" id="tb-inv">가방</div>
       <div class="tbtn" id="tb-interact">열기</div>
+      <div class="tbtn" id="tb-reset">리셋</div>
+      <div class="tbtn" id="tb-drill">드릴</div>
     </div>
   </div>
 
@@ -637,6 +646,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=6b95ec3"></script>
+  <script type="module" src="./src/main.js?v=bf24f12"></script>
 </body>
 </html>

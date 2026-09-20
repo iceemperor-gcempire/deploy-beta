@@ -240,6 +240,7 @@ const dom = {
   extractStats: $('extract-stats'), extractLoot: $('extract-loot'),
   scopeOverlay: $('scope-overlay'), healHint: $('heal-hint'),
   rangeHud: $('range-hud'), rhShots: $('rh-shots'), rhHits: $('rh-hits'), rhAcc: $('rh-acc'), rhLast: $('rh-last'), rhGroup: $('rh-group'), // 사격 연습장 스코어 (#292)
+  rhTitle: $('rh-title'), rhDrill: $('rh-drill'), rhBest: $('rh-best'), recoilTrace: $('recoil-trace'), // 무기별 통계·드릴·반동 궤적 (#295)
 };
 
 // ---------- 모바일 감지 ----------
@@ -3947,6 +3948,7 @@ function equipWeapon(key, announce = true) {
   gun.reloading = 0;
   gun.cooldown = 0;
   if (announce) { addFeed(`${w.name} 장착`); sfx.reload2(); }
+  if (state.range) updateRangeHud(); // 무기별 통계 패널 전환 (#295)
 }
 
 // 무기 순환 교체 (모바일 버튼)
@@ -4104,7 +4106,7 @@ function fireShot() {
   // 탄퍼짐: updateGun 에서 매 프레임 계산한 유효 탄퍼짐(기본+이동+bloom) = 크로스헤어와 동일 소스 (#207)
   const spread = gun.spread || (player.aiming ? GUN.spreadAds : GUN.spreadHip);
 
-  if (state.range) { rangeScore.shots++; updateRangeHud(); } // 연습장 발사 카운트(산탄은 1발) — 빗나가도 즉시 갱신 (#292)
+  if (state.range) { rs().shots++; updateRangeHud(); recoilTrace.push({ yaw: player.recoilYaw, pitch: player.recoilPitch, t: performance.now() }); if (recoilTrace.length > 40) recoilTrace.shift(); } // 연습장 발사 카운트(산탄은 1발) — 빗나가도 즉시 갱신 (#292) + 반동 궤적 (#295)
   let anyHit = false;
   for (let p = 0; p < GUN.pellets; p++) {
     const dir = aimPoint.clone().sub(muzzle).normalize();
@@ -5335,7 +5337,13 @@ function rangeLabelTexture(text) {
 // ── 사격 연습장 보완 (#292): 리얼 사격장(자갈·흙 버름 백스톱·골강판 셸터·레인 4) + 반응 표적(종이 링 점수 / 실루엣 HEAD·BODY 존 /
 // 스틸 공 진자 흔들림 + 거리 지연 딩) + 스코어 HUD(발사·명중·명중률·마지막·5발 그룹). T 로 리셋. 표적은 obstacleMeshes 에 들어가 탄 레이에 맞는다.
 let rangeTargets = [];
-const rangeScore = { shots: 0, hits: 0, last: '—', groups: new Map(), groupText: '—' };
+// 무기별 통계 (#295): GUN.key 별 { shots, hits, last, groups, groupText }. rs() = 현재 무기 통계. T 는 전부 리셋.
+const rangeStats = new Map();
+function rs() { const k = (typeof GUN !== 'undefined' && GUN && GUN.key) || 'rifle'; let v = rangeStats.get(k); if (!v) { v = { shots: 0, hits: 0, last: '—', groups: new Map(), groupText: '—' }; rangeStats.set(k, v); } return v; }
+// 드릴 (#295): 팝업 실루엣 5기가 무작위 순서로 하나씩 서고, 맞히면 눕고 다음이 선다. 총 시간·정확도 → 무기별 베스트(localStorage exshoot_range_best)
+const drill = { active: false, order: [], idx: 0, t: 0, wait: 0, shots0: 0, result: '', best: {} };
+try { drill.best = JSON.parse(localStorage.getItem('exshoot_range_best')) || {}; } catch { drill.best = {}; }
+const recoilTrace = []; // 최근 사격의 반동 오프셋 [{yaw, pitch, t}] → 크로스헤어 위 궤적 (#295)
 function rangeSilhouetteTexture() { // 실루엣 표적: 판지 + 회색 인체 + 머리(빨강)/몸통 중심(노랑) 존
   const c = document.createElement('canvas'); c.width = 128; c.height = 256; const g = c.getContext('2d');
   g.fillStyle = '#c9b48e'; g.fillRect(0, 0, 128, 256);
@@ -5372,6 +5380,47 @@ function addGong(x, z, dist, r) { // 스틸 공: 녹슨 프레임 크로스바�
   plate.userData.rangeTarget = { kind: 'gong', dist, mesh: plate, id: rangeTargets.length, pivot, L: L + r, ang: 0, vel: 0 };
   rangeTargets.push(plate.userData.rangeTarget); addRangeLabel(x, z + 0.3, dist);
 }
+function addPopupSilhouette(x, z, dist) { // 드릴 팝업 표적 (#295): 바닥 힌지 그룹 — 눕힘(rotation.x −90°, 사수 반대쪽으로) ↔ 세움(0)
+  const hinge = new THREE.Group(); hinge.position.set(x, 0, z); hinge.rotation.x = -Math.PI / 2; scene.add(hinge);
+  addBox(x, 0.06, z + 0.15, 0.6, 0.12, 0.5, MAT.rust, { collide: false }); // 힌지 베이스
+  const board = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 1.8), new THREE.MeshLambertMaterial({ map: rangeSilhouetteTexture(), side: THREE.DoubleSide }));
+  board.position.set(0, 0.92, 0); board.castShadow = true; hinge.add(board); obstacleMeshes.push(board);
+  board.userData.rangeTarget = { kind: 'silhouette', dist, mesh: board, id: rangeTargets.length, popup: true, up: false, hinge };
+  rangeTargets.push(board.userData.rangeTarget);
+  return board.userData.rangeTarget;
+}
+function addMover(z, dist, x0, x1) { // 이동 표적 (#295): 지면 레일 위 실루엣 왕복. 맞히면 속도 단계 상승(3단계 순환)
+  const cx = (x0 + x1) / 2, len = x1 - x0 + 1.2;
+  addBox(cx, 0.06, z, len, 0.12, 0.16, MAT.steel, { collide: false });                      // 레일
+  for (const x of [x0 - 0.5, x1 + 0.5]) addBox(x, 0.3, z, 0.25, 0.6, 0.25, MAT.rust, { collide: false }); // 엔드 포스트
+  const car = new THREE.Group(); car.position.set(x0, 0, z); scene.add(car);
+  const base = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.16, 0.45), MAT.rust); base.position.y = 0.2; car.add(base);
+  const board = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 1.8), new THREE.MeshLambertMaterial({ map: rangeSilhouetteTexture(), side: THREE.DoubleSide }));
+  board.position.set(0, 1.2, 0); board.castShadow = true; car.add(board); obstacleMeshes.push(board);
+  board.userData.rangeTarget = { kind: 'silhouette', dist, mesh: board, id: rangeTargets.length, mover: { car, x0, x1, dir: 1, level: 1 } };
+  rangeTargets.push(board.userData.rangeTarget);
+  const l = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 0.58), new THREE.MeshBasicMaterial({ map: rangeLabelTexture(dist + ' m 이동'), transparent: true })); l.position.set(cx, 3.05, z); scene.add(l);
+  return board.userData.rangeTarget;
+}
+const MOVER_SPEEDS = [1.6, 2.6, 3.8];
+function drillTargets() { return rangeTargets.filter((t) => t.popup); }
+function startDrill() { // Y: 드릴 시작(진행 중이면 재시작)
+  const ps = drillTargets(); if (!state.range || !ps.length) return;
+  for (const t of ps) t.up = false;
+  const order = ps.map((_, i) => i); for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  Object.assign(drill, { active: true, order, idx: 0, t: 0, wait: 0.8, shots0: rs().shots, result: '' });
+  addFeed('드릴 시작 — 표적이 서면 쏘세요 (5기)'); tone({ freq: 880, dur: 0.12, gain: 0.12 });
+  updateRangeHud();
+}
+function finishDrill() {
+  const ps = drillTargets(), n = ps.length, shots = Math.max(n, rs().shots - drill.shots0), acc = Math.round(100 * n / shots), time = +drill.t.toFixed(1), key = GUN.key;
+  drill.active = false;
+  const prev = drill.best[key], isBest = !prev || time < prev.time;
+  if (isBest) { drill.best[key] = { time, acc }; try { localStorage.setItem('exshoot_range_best', JSON.stringify(drill.best)); } catch {} }
+  drill.result = `${time}s · ${acc}%${isBest ? ' ★NEW' : ''}`;
+  addFeed(`드릴 완료 ${time}s · 정확도 ${acc}%${isBest ? ' — 베스트 갱신!' : ''}`); tone({ freq: isBest ? 1320 : 660, dur: 0.25, gain: 0.14 });
+  updateRangeHud();
+}
 function gongRing(dist) { // 금속 딩: 배음 3개 사인 감쇠, 거리만큼 늦게(340 m/s)·작게 — 소리로 명중 확인
   const ctx = audio(), t0 = ctx.currentTime + dist / 340, vol = 0.35 / (1 + dist / 45);
   for (const [f, g, d] of [[2350, 1.0, 0.7], [3560, 0.5, 0.45], [1180, 0.35, 0.9]]) {
@@ -5381,7 +5430,8 @@ function gongRing(dist) { // 금속 딩: 배음 3개 사인 감쇠, 거리만큼
   }
 }
 function rangeHit(t, h) {
-  rangeScore.hits++;
+  if (t.popup && !t.up) return; // 눕힌 팝업 표적은 무효
+  const st = rs(); st.hits++;
   const local = t.mesh.worldToLocal(h.point.clone());
   let label;
   if (t.kind === 'paper') {
@@ -5389,33 +5439,52 @@ function rangeHit(t, h) {
     label = `${t.dist}m ${score}점${score === 10 ? ' ★' : ''}`;
   } else if (t.kind === 'silhouette') {
     const head = Math.hypot(local.x, local.y - 0.63) < 0.17, body = Math.abs(local.x) < 0.3 && local.y > -0.35 && local.y < 0.42;
-    label = `${t.dist}m ${head ? 'HEAD ★' : body ? 'BODY' : '가장자리'}`;
+    label = `${t.dist}m ${t.mover ? '이동 ' : t.popup ? '드릴 ' : ''}${head ? 'HEAD ★' : body ? 'BODY' : '가장자리'}`;
+    if (t.mover && (head || body)) { t.mover.level = t.mover.level % MOVER_SPEEDS.length + 1; label += ` → Lv${t.mover.level}`; tone({ freq: 520 + t.mover.level * 120, dur: 0.08, gain: 0.1 }); }
+    if (t.popup && drill.active && (head || body)) { t.up = false; drill.idx++; drill.wait = 0.7; tone({ freq: 740, dur: 0.06, gain: 0.1 }); } // 드릴 진행
   } else { t.vel += 2.2 + Math.random() * 0.6; gongRing(t.dist); label = `${t.dist}m 공 ♪`; } // 사수는 항상 +z 쪽 → 뒤로 ~40° 흔들림(6 이면 한 바퀴 넘어감)
-  rangeScore.last = label;
-  if (t.kind !== 'gong') { // 같은 표적 최근 5발 그룹 크기(최대 쌍 거리, cm)
-    const arr = rangeScore.groups.get(t.id) || []; arr.push([local.x, local.y]); while (arr.length > 5) arr.shift(); rangeScore.groups.set(t.id, arr);
+  st.last = label;
+  if (t.kind !== 'gong' && !t.mover && !t.popup) { // 고정 표적만: 같은 표적 최근 5발 그룹 크기(최대 쌍 거리, cm)
+    const arr = st.groups.get(t.id) || []; arr.push([local.x, local.y]); while (arr.length > 5) arr.shift(); st.groups.set(t.id, arr);
     let mx = 0; for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) mx = Math.max(mx, Math.hypot(arr[i][0] - arr[j][0], arr[i][1] - arr[j][1]));
-    rangeScore.groupText = arr.length >= 2 ? `${Math.round(mx * 100)} cm (${arr.length}발 @${t.dist}m)` : '—';
+    st.groupText = arr.length >= 2 ? `${Math.round(mx * 100)} cm (${arr.length}발 @${t.dist}m)` : '—';
   }
   updateRangeHud();
 }
-function updateRangeTargets(dt) { // 스틸 공 진자: θ'' = −(g/L)·sin θ − c·θ'
-  for (const t of rangeTargets) if (t.kind === 'gong' && (t.vel || t.ang)) {
-    t.vel += (-(9.8 / t.L) * Math.sin(t.ang) - 1.4 * t.vel) * dt; t.ang += t.vel * dt; t.pivot.rotation.x = t.ang;
-    if (Math.abs(t.ang) < 0.002 && Math.abs(t.vel) < 0.01) { t.ang = 0; t.vel = 0; t.pivot.rotation.x = 0; }
+function updateRangeTargets(dt) { // 스틸 공 진자(θ'' = −(g/L)·sin θ − c·θ') · 팝업 힌지 · 이동 표적 · 드릴 타이머
+  for (const t of rangeTargets) {
+    if (t.kind === 'gong' && (t.vel || t.ang)) {
+      t.vel += (-(9.8 / t.L) * Math.sin(t.ang) - 1.4 * t.vel) * dt; t.ang += t.vel * dt; t.pivot.rotation.x = t.ang;
+      if (Math.abs(t.ang) < 0.002 && Math.abs(t.vel) < 0.01) { t.ang = 0; t.vel = 0; t.pivot.rotation.x = 0; }
+    } else if (t.popup) {
+      const goal = t.up ? 0 : -Math.PI / 2; t.hinge.rotation.x += (goal - t.hinge.rotation.x) * Math.min(1, dt * (t.up ? 9 : 6));
+    } else if (t.mover) {
+      const m = t.mover, v = MOVER_SPEEDS[m.level - 1]; m.car.position.x += m.dir * v * dt;
+      if (m.car.position.x > m.x1) { m.car.position.x = m.x1; m.dir = -1; } else if (m.car.position.x < m.x0) { m.car.position.x = m.x0; m.dir = 1; }
+    }
+  }
+  if (drill.active) {
+    drill.t += dt;
+    if (drill.wait > 0) { drill.wait -= dt; if (drill.wait <= 0) { const ps = drillTargets(); if (drill.idx >= ps.length) finishDrill(); else ps[drill.order[drill.idx]].up = true; } }
+    if ((drill.t * 10 | 0) !== drill._shown) { drill._shown = drill.t * 10 | 0; updateRangeHud(); } // 0.1s 단위 갱신
   }
 }
-function resetRange() { // T: 카운트·그룹·공·탄흔 리셋
-  rangeScore.shots = 0; rangeScore.hits = 0; rangeScore.last = '—'; rangeScore.groups.clear(); rangeScore.groupText = '—';
-  for (const t of rangeTargets) if (t.kind === 'gong') { t.ang = 0; t.vel = 0; t.pivot.rotation.x = 0; }
+function resetRange() { // T: 전 무기 통계·그룹·공·드릴·이동 단계·반동 궤적·탄흔 리셋
+  rangeStats.clear(); recoilTrace.length = 0;
+  Object.assign(drill, { active: false, order: [], idx: 0, t: 0, wait: 0, result: '' });
+  for (const t of rangeTargets) { if (t.kind === 'gong') { t.ang = 0; t.vel = 0; t.pivot.rotation.x = 0; } if (t.popup) t.up = false; if (t.mover) t.mover.level = 1; }
   for (const d of decals) scene.remove(d); decals = [];
   updateRangeHud();
 }
 function updateRangeHud() {
   if (!dom.rangeHud) return;
-  dom.rhShots.textContent = rangeScore.shots; dom.rhHits.textContent = rangeScore.hits;
-  dom.rhAcc.textContent = rangeScore.shots ? Math.round(100 * rangeScore.hits / rangeScore.shots) + '%' : '—';
-  dom.rhLast.textContent = rangeScore.last; dom.rhGroup.textContent = rangeScore.groupText || '—';
+  const st = rs();
+  if (dom.rhTitle) dom.rhTitle.textContent = `🎯 ${GUN && GUN.name ? GUN.name : '사격 연습장'}`;
+  dom.rhShots.textContent = st.shots; dom.rhHits.textContent = st.hits;
+  dom.rhAcc.textContent = st.shots ? Math.round(100 * st.hits / st.shots) + '%' : '—';
+  dom.rhLast.textContent = st.last; dom.rhGroup.textContent = st.groupText || '—';
+  if (dom.rhDrill) dom.rhDrill.textContent = drill.active ? `${Math.min(drill.idx, drillTargets().length)}/${drillTargets().length} · ${drill.t.toFixed(1)}s` : (drill.result || 'Y 시작');
+  if (dom.rhBest) { const b = drill.best[GUN && GUN.key]; dom.rhBest.textContent = b ? `${b.time}s · ${b.acc}%` : '—'; }
 }
 const RANGE_FIRE_Z = 58, RANGE_EXIT_Z = 68; // 사격선(스폰) / 퇴장 지점(스폰 10m 뒤, 반경5 밖)
 function buildRangeMap() {
@@ -5451,6 +5520,8 @@ function buildRangeMap() {
   addPaperTarget(-2.3, RANGE_FIRE_Z - 25, 25); addGong(3.5, RANGE_FIRE_Z - 25, 25, 0.25); addSilhouette(9, RANGE_FIRE_Z - 25, 25);
   addPaperTarget(-7, RANGE_FIRE_Z - 50, 50); addGong(-1.5, RANGE_FIRE_Z - 50, 50, 0.3); addSilhouette(7, RANGE_FIRE_Z - 50, 50);
   addPaperTarget(2.3, RANGE_FIRE_Z - 100, 100); addGong(8, RANGE_FIRE_Z - 100, 100, 0.4);
+  for (const [x, d] of [[-11, 14], [11, 20], [-10.5, 28], [11.5, 36], [-11.5, 44]]) addPopupSilhouette(x, RANGE_FIRE_Z - d, d); // 드릴 팝업 5기 (#295) — 버름 안쪽 가장자리, 눕히면 시야 방해 없음
+  addMover(RANGE_FIRE_Z - 35, 35, -6.5, 6.5); // 이동 표적 레일 (#295)
   { const fb = forestBatch(); // 버름 뒤·옆 카드 트리(실루엣)
     for (let i = 0; i < 14; i++) { const x = -34 + i * 5.2 + (rr() - 0.5) * 3, z = backZ - 9 - rr() * 12; placeCardTree(fb, rr() < 0.55 ? 'pine' : rr() < 0.8 ? 'canopy_broad_b' : 'canopy_broad_a', x, z, 8 + rr() * 6, 0.35, 900 + i); }
     for (let i = 0; i < 10; i++) { const s = i < 5 ? -1 : 1, x = s * (hx + 8 + rr() * 8), z = backZ + 10 + rr() * 100; placeCardTree(fb, rr() < 0.6 ? 'pine' : 'canopy_broad_a', x, z, 7 + rr() * 5, 0.35, 950 + i); }
@@ -5539,7 +5610,7 @@ function startRaid(mapKey) {
   applyMap(mapKey || currentMapKey); // 선택 맵 구성 (전환 시 이전 맵 teardown)
   const isRange = !!(MAPS[currentMapKey] && MAPS[currentMapKey].range); // 사격 연습장 모드 (#209)
   state.range = isRange;
-  dom.rangeHud.style.display = isRange ? 'block' : 'none'; if (isRange) resetRange(); // 스코어 HUD (#292)
+  dom.rangeHud.style.display = isRange ? 'block' : 'none'; dom.hud.classList.toggle('range', isRange); if (isRange) resetRange(); // 스코어 HUD (#292) + 터치 버튼 (#295)
 
   const spawn = SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)];
   player.pos.copy(spawn);
@@ -5841,6 +5912,8 @@ if (IS_MOBILE) {
   onHold('tb-reload', () => { if (inRaid()) startReload(); });
   onHold('tb-weapon', () => { if (inRaid()) cycleWeapon(); });
   onHold('tb-heal', () => { if (inRaid()) useHeal(); });
+  onHold('tb-reset', () => { if (inRaid() && state.range) resetRange(); }); // 연습장 (#295)
+  onHold('tb-drill', () => { if (inRaid() && state.range) startDrill(); });
   onHold('tb-inv', () => {
     if (state.phase !== 'raid') return;
     dom.inventory.style.display = dom.inventory.style.display === 'block' ? 'none' : 'block';
@@ -6049,6 +6122,7 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.code === 'KeyR') startReload();
   if (e.code === 'KeyT' && state.range) resetRange(); // 연습장 표적·탄흔 리셋 (#292)
+  if (e.code === 'KeyY' && state.range) startDrill(); // 연습장 드릴 시작 (#295)
   if (e.code === 'KeyQ') useHeal();
   if (e.code === 'KeyV') toggleViewMode();
   if (e.code === 'KeyE') {
@@ -6072,6 +6146,23 @@ function updateHUD() {
     const show = !scopeShown && state.phase === 'raid';
     ch.style.display = show ? 'block' : 'none';
     if (show) ch.style.setProperty('--gap', (3 + (gun.spread || 0) * 620).toFixed(1) + 'px');
+  }
+  // 반동 궤적 (#295, 연습장): 최근 사격 시점의 반동 오프셋(yaw/pitch)을 화면 픽셀로 — 위로 올라가는 점열 = 반동 패턴. 3초 뒤 사라짐
+  if (dom.recoilTrace) {
+    const now = performance.now(); while (recoilTrace.length && now - recoilTrace[0].t > 3000) recoilTrace.shift();
+    const showT = state.range && recoilTrace.length > 0 && !scopeShown;
+    dom.recoilTrace.style.display = showT ? 'block' : 'none';
+    if (showT) {
+      const c = dom.recoilTrace, g = c.getContext('2d'), W = c.width, H = c.height, ppr = (innerHeight / 2) / Math.tan(camera.fov * Math.PI / 360);
+      g.clearRect(0, 0, W, H); g.lineWidth = 1;
+      let px = null, py = null;
+      for (const r of recoilTrace) {
+        const a = Math.max(0.15, 1 - (now - r.t) / 3000), x = Math.max(3, Math.min(W - 3, W / 2 - r.yaw * ppr)), y = Math.max(3, Math.min(H - 3, H / 2 - r.pitch * ppr));
+        if (px !== null) { g.strokeStyle = `rgba(255,214,90,${a * 0.5})`; g.beginPath(); g.moveTo(px, py); g.lineTo(x, y); g.stroke(); }
+        g.fillStyle = `rgba(255,214,90,${a})`; g.beginPath(); g.arc(x, y, 2.2, 0, Math.PI * 2); g.fill();
+        px = x; py = y;
+      }
+    }
   }
   // 저체력 치료 힌트 (#110): useHeal 과 같은 우선순위(붕대 먼저)로 다음 사용 아이템 안내
   {
@@ -6208,7 +6299,8 @@ window.__ex = {
     return { muzzle: m.toArray().map((v) => +v.toFixed(2)), gunPivot: pc ? pc.gunPivot.position.toArray().map((v) => +v.toFixed(2)) : null, gunLen: pc && pc.gunLen, handR: !!(pc && pc.handR), handL: !!(pc && pc.handL), curGun: !!(pc && pc.curGun) };
   },
   _startRaid(k) { startRaid(k); },
-  _fire() { if (state.phase === 'raid') fireShot(); }, // QA: 트리거 게이트(포인터락·raiseT 등) 우회 1발 (#292)
+  _fire() { if (state.phase !== 'raid') return; if (gun.mag <= 0) gun.mag = GUN.magSize; fireShot(); }, // QA: 트리거 게이트(포인터락·raiseT 등) 우회 1발, 탄창 자동 보충 (#292)
+  get rangeTargets() { return rangeTargets; }, get drill() { return drill; }, _startDrill() { startDrill(); }, _rangeTick(dt) { updateRangeTargets(dt); }, // QA (#295) — 자동화 탭은 rAF 가 느려 드릴/이동 표적 시간을 수동 진행
   // 성능 QA (#280): _perfBegin() … (프레임 진행) … _perfEnd() → 그 사이 누적 draw call/삼각형의 프레임당 평균. renderer.info 는 프레임마다
   // 리셋되므로 autoReset 을 잠시 끈다. 두 호출로 나눈 이유: 자동화 탭에서는 JS 실행 중 rAF 가 멈춰 한 호출 안의 await 로는 프레임이 안 흐른다.
   _perfBegin() { const info = renderer.info; info.autoReset = false; info.reset(); this._pf0 = info.render.frame; return this._pf0; },
