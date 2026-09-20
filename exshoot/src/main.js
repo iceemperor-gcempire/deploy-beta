@@ -242,6 +242,7 @@ const dom = {
   rangeHud: $('range-hud'), rhShots: $('rh-shots'), rhHits: $('rh-hits'), rhAcc: $('rh-acc'), rhLast: $('rh-last'), rhGroup: $('rh-group'), // 사격 연습장 스코어 (#292)
   rhTitle: $('rh-title'), rhDrill: $('rh-drill'), rhBest: $('rh-best'), recoilTrace: $('recoil-trace'), // 무기별 통계·드릴·반동 궤적 (#295)
   rhHist: $('rh-hist'), rhPat: $('rh-pat'), rhDist: $('rh-dist'), // 최근 기록·반동 패턴·거리계 (#298)
+  bodyHud: $('body-hud'), // 신체 HUD (#304)
 };
 
 // ---------- 모바일 감지 ----------
@@ -3029,7 +3030,21 @@ function enemyShoot(e, dist) {
 }
 
 const ARMOR_MAX = 80;
-function damagePlayer(dmg, headshot = false) {
+// ── 부위별 체력·부상 (#304): 머리/흉부/복부/팔/다리. 총 체력(player.hp) 모델은 유지하되 부위 상태가 따로 깎인다(팔·다리는 취약 ×2).
+// 머리·흉부 0 = 사망. 팔·다리·복부 0 = 부상 효과(이동/조준/재장전/지구력). 출혈은 붕대, 부상 부위 회복은 구급킷.
+const BODY_PARTS = {
+  head: { max: 35, mul: 1.0, name: '머리' }, thorax: { max: 80, mul: 1.0, name: '흉부' }, stomach: { max: 55, mul: 1.6, name: '복부' },
+  arms: { max: 45, mul: 2.0, name: '팔' }, legs: { max: 50, mul: 2.0, name: '다리' },
+};
+const PART_WEIGHTS = [['thorax', 0.33], ['stomach', 0.17], ['arms', 0.25], ['legs', 0.25]]; // 비헤드샷 피격 부위 가중치
+function resetBodyParts() { player.parts = {}; for (const k of Object.keys(BODY_PARTS)) player.parts[k] = BODY_PARTS[k].max; player.bleeds = []; bodyDirty = true; }
+function randomPart() { let r = Math.random(); for (const [k, w] of PART_WEIGHTS) { if ((r -= w) <= 0) return k; } return 'thorax'; }
+function partFrac(k) { return player.parts ? player.parts[k] / BODY_PARTS[k].max : 1; }
+function legsK() { const f = partFrac('legs'); return f <= 0 ? 0.55 : f < 0.5 ? 0.85 : 1; }         // 이동 속도 배수
+function armsSpread() { const f = partFrac('arms'); return f <= 0 ? 0.012 : f < 0.5 ? 0.005 : 0; }  // 탄퍼짐 가산
+function limbBlacked() { return !!player.parts && ['stomach', 'arms', 'legs'].some((k) => player.parts[k] <= 0); }
+const PART_EFFECT = { legs: '이동 저하·질주/점프 불가', arms: '조준 흔들림·재장전 지연', stomach: '지구력 회복 저하' };
+function damagePlayer(dmg, headshot = false, part = null) {
   if (headshot) {
     if (player.helmet) {
       player.helmet = false;
@@ -3043,13 +3058,24 @@ function damagePlayer(dmg, headshot = false) {
     dmg *= 0.55; // 45% 경감
     if (player.armorDur <= 0) addFeed('방탄복 파손');
   }
+  let cause = '스캐브에게 사살당했습니다.';
+  bodyDirty = true;
+  if (player.parts) { // 부위 배정·부상·출혈 (#304)
+    const k = headshot ? 'head' : (part || randomPart()), was = player.parts[k];
+    player.parts[k] = Math.max(0, was - dmg * BODY_PARTS[k].mul);
+    if (was > 0 && player.parts[k] <= 0) {
+      if (k === 'head' || k === 'thorax') { player.hp = 0; cause = k === 'head' ? '헤드샷으로 사망했습니다.' : '흉부 치명상으로 사망했습니다.'; }
+      else addFeed(`${BODY_PARTS[k].name} 부상 — ${PART_EFFECT[k]}`);
+    }
+    if (dmg >= 9 && player.hp > 0 && !player.bleeds.includes(k) && player.bleeds.length < 2 && Math.random() < 0.4) { player.bleeds.push(k); addFeed(`출혈(${BODY_PARTS[k].name}) — 붕대로 지혈하세요`); }
+  }
   player.hp -= dmg;
   sfx.playerHit();
   dom.damageVignette.style.opacity = '1';
   setTimeout(() => { dom.damageVignette.style.opacity = '0'; }, 120);
   if (player.hp <= 0) {
     player.hp = 0;
-    endRaid('death', '스캐브에게 사살당했습니다.');
+    endRaid('death', cause);
   }
 }
 
@@ -3282,6 +3308,10 @@ function resolveHorizontal(pos, radius, yBottom, yTop) {
 }
 
 function updatePlayer(dt) {
+  if (player.bleeds && player.bleeds.length) { // 출혈 (#304): 부위당 0.8 HP/s
+    player.hp -= 0.8 * player.bleeds.length * dt;
+    if (player.hp <= 0) { player.hp = 0; endRaid('death', '출혈로 사망했습니다.'); return; }
+  }
   const prevPX = player.pos.x, prevPZ = player.pos.z; // 실제 변위 계측용
   // --- 방향 입력 (키보드 + 터치 조이스틱) ---
   const fwd = new THREE.Vector3(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
@@ -3301,15 +3331,15 @@ function updatePlayer(dt) {
   // --- 지구력 / 달리기 ---
   // 사격 중엔 질주 불가 — 발사 버튼을 누르면 질주가 풀리고 총을 들어올림(raiseT 지연) (#180)
   const wantSprint = ((keys['ShiftLeft'] && keys['KeyW']) || touch.sprint) && hasInput && !player.aiming && !gun.triggerDown;
-  if (wantSprint && player.stamina > 1) {
+  if (wantSprint && player.stamina > 1 && partFrac('legs') > 0) { // 다리 부상 시 질주 불가 (#304)
     player.sprinting = true;
     player.stamina = Math.max(0, player.stamina - 17 * dt);
     if (player.stamina <= 0) player.sprinting = false;
   } else {
     player.sprinting = false;
-    player.stamina = Math.min(100, player.stamina + 13 * dt);
+    player.stamina = Math.min(100, player.stamina + 13 * dt * (partFrac('stomach') <= 0 ? 0.4 : 1)); // 복부 부상 시 회복 저하
   }
-  const speed = PLAYER.walkSpeed * (player.sprinting ? PLAYER.sprintMult : 1) * (player.aiming ? 0.55 : 1);
+  const speed = PLAYER.walkSpeed * (player.sprinting ? PLAYER.sprintMult : 1) * (player.aiming ? 0.55 : 1) * legsK(); // 다리 부상 감속 (#304)
 
   // --- 수평 가속 ---
   const targetVx = wish.x * speed, targetVz = wish.z * speed;
@@ -3319,7 +3349,7 @@ function updatePlayer(dt) {
 
   // --- 중력 / 점프 ---
   player.vel.y -= PLAYER.gravity * dt;
-  if ((keys['Space'] || touch.jump) && player.grounded && player.stamina > 10) {
+  if ((keys['Space'] || touch.jump) && player.grounded && player.stamina > 10 && partFrac('legs') > 0) { // 다리 부상 시 점프 불가 (#304)
     player.vel.y = PLAYER.jumpVel;
     player.stamina -= 8;
     player.grounded = false;
@@ -3985,7 +4015,7 @@ function updateGun(dt) {
     const hSpeed = Math.hypot(player.vel.x, player.vel.z);
     const base = player.aiming ? GUN.spreadAds : GUN.spreadHip;
     const moveS = Math.min(1, hSpeed / 8) * GUN.spreadMove * (currentAtt.includes('grip') ? 0.5 : 1);
-    gun.spread = base + moveS + gun.bloom * 0.02;
+    gun.spread = base + moveS + gun.bloom * 0.02 + armsSpread(); // 팔 부상 가산 (#304)
     gun.bloom = Math.max(0, gun.bloom - dt * 2.4); // 연사 멈추면 탄퍼짐 회복
     if (state.range) gun.reserve = Math.max(gun.reserve, 900); // 연습장 무한 탄약 유지 (#209)
     // 반동 시점 회복: 사격 중엔 느리게(누적/상승), 정지 시 빠르게 원위치
@@ -4053,7 +4083,7 @@ function toggleViewMode() {
 
 function startReload() {
   if (gun.reloading > 0 || gun.mag >= GUN.magSize || gun.reserve <= 0) return;
-  gun.reloading = GUN.reloadTime;
+  gun.reloading = GUN.reloadTime * (partFrac('arms') <= 0 ? 1.4 : 1); // 팔 부상 시 지연 (#304)
   sfx.reload1();
   playPcReload(0.1); // 3인칭 재장전 모션 (상체 전용 + 하체 idle)
 }
@@ -4362,7 +4392,7 @@ function explodeAt(pos, { radius = 6.5, damage = 95, force = 30 } = {}) {
     }
   }
   const pd = player.pos.distanceTo(pos);
-  if (pd < radius && state.phase === 'raid') damagePlayer(damage * (1 - pd / radius) * 0.85);
+  if (pd < radius && state.phase === 'raid') damagePlayer(damage * (1 - pd / radius) * 0.85, false, Math.random() < 0.55 ? 'legs' : Math.random() < 0.5 ? 'stomach' : 'thorax'); // 폭발은 다리/복부 위주 (#304)
 }
 
 // 폭발로 사살된 적 → 물리 바디로 날려버림 (스티프 래그돌)
@@ -4528,16 +4558,23 @@ function lootInteractable(it) {
 }
 
 function useHeal() {
-  if (player.healCooldown > 0 || player.hp >= PLAYER.maxHp) return;
-  // 붕대 우선, 없으면 구급킷
-  let idx = inventory.findIndex(i => i.heal && i.heal <= 30);
+  const bleeding = !!(player.bleeds && player.bleeds.length), blacked = limbBlacked();
+  if (player.healCooldown > 0 || (player.hp >= PLAYER.maxHp && !bleeding && !blacked)) return;
+  // 출혈·저체력은 붕대 우선, 부상 부위만 있으면 구급킷 우선 (#304)
+  let idx = (blacked && !bleeding) ? inventory.findIndex(i => i.heal > 30) : inventory.findIndex(i => i.heal && i.heal <= 30);
   if (idx === -1) idx = inventory.findIndex(i => i.heal);
   if (idx === -1) { addFeed('치료 아이템 없음'); return; }
   const item = inventory.splice(idx, 1)[0];
   player.hp = Math.min(PLAYER.maxHp, player.hp + item.heal);
-  player.healCooldown = 1.2;
+  const cured = player.bleeds ? player.bleeds.length : 0; player.bleeds = []; // 어느 치료든 지혈
+  let fixed = 0;
+  if (item.heal > 30 && player.parts) for (const k of Object.keys(BODY_PARTS)) { // 구급킷: 부상 부위 50% 복구 + 전 부위 +20
+    if (player.parts[k] <= 0 && k !== 'head' && k !== 'thorax') fixed++;
+    player.parts[k] = Math.min(BODY_PARTS[k].max, Math.max(player.parts[k], BODY_PARTS[k].max * 0.5) + 20);
+  }
+  player.healCooldown = 1.2; bodyDirty = true;
   sfx.heal();
-  addFeed(`${item.name} 사용 (+${item.heal} HP)`);
+  addFeed(`${item.name} 사용 (+${item.heal} HP${cured ? ' · 지혈' : ''}${fixed ? ' · 부상 처치' : ''})`);
   refreshInventoryUI();
 }
 
@@ -5386,6 +5423,18 @@ const recoilTrace = []; // 최근 사격의 반동 오프셋 [{yaw, pitch, t}] �
 const recoilPat = { store: {}, burst: [], lastT: 0, saved: true };
 try { recoilPat.store = JSON.parse(localStorage.getItem('exshoot_recoil_pat')) || {}; } catch { recoilPat.store = {}; }
 let rfTick = 0; const _rfDir = new THREE.Vector3(); // 거리계 (#298): 4프레임마다 조준 레이 거리
+let bodyTick = 0, bodyDirty = true; // 신체 HUD 갱신 주기 (#304) — 피격/치료 시 즉시
+function drawBodyHud() { // 부위 색: 초록>60% · 노랑>30% · 빨강>0 · 검정(부상). 출혈 부위엔 붉은 점
+  const c = dom.bodyHud, g = c.getContext('2d'), W = c.width, H = c.height; g.clearRect(0, 0, W, H);
+  const col = (k) => { const f = partFrac(k); return f <= 0 ? '#151515' : f < 0.3 ? '#d94f3d' : f < 0.6 ? '#d9b23c' : '#6fb85f'; };
+  const box = (k, x, y, w, h) => { g.fillStyle = col(k); g.fillRect(x, y, w, h); g.strokeStyle = partFrac(k) <= 0 ? '#d94f3d' : 'rgba(0,0,0,0.6)'; g.lineWidth = 1; g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1); };
+  g.fillStyle = col('head'); g.beginPath(); g.arc(W / 2, 11, 8, 0, Math.PI * 2); g.fill(); g.strokeStyle = partFrac('head') <= 0 ? '#d94f3d' : 'rgba(0,0,0,0.6)'; g.stroke();
+  box('thorax', 17, 22, 22, 22); box('stomach', 17, 45, 22, 14);
+  box('arms', 6, 22, 9, 34); box('arms', 41, 22, 9, 34);
+  box('legs', 18, 60, 9, 34); box('legs', 29, 60, 9, 34);
+  const at = { head: [W / 2 + 9, 6], thorax: [40, 26], stomach: [40, 50], arms: [14, 26], legs: [28, 64] };
+  for (const k of player.bleeds || []) { const [x, y] = at[k]; g.fillStyle = '#ff3b2f'; g.beginPath(); g.arc(x, y, 3, 0, Math.PI * 2); g.fill(); }
+}
 function rangeSilhouetteTexture() { // 실루엣 표적: 판지 + 회색 인체 + 머리(빨강)/몸통 중심(노랑) 존
   const c = document.createElement('canvas'); c.width = 128; c.height = 256; const g = c.getContext('2d');
   g.fillStyle = '#c9b48e'; g.fillRect(0, 0, 128, 256);
@@ -5684,6 +5733,7 @@ function startRaid(mapKey) {
   }
   player.hp = PLAYER.maxHp;
   player.stamina = 100;
+  resetBodyParts(); // 부위별 체력 (#304)
 
   const stash0 = loadStash();
   const owned0 = (stash0.weapons || ['rifle']).filter((k) => WEAPONS[k]);
@@ -6242,9 +6292,10 @@ function updateHUD() {
   }
   // 저체력 치료 힌트 (#110): useHeal 과 같은 우선순위(붕대 먼저)로 다음 사용 아이템 안내
   {
-    const low = player.hp < 45 && player.hp > 0 && state.phase === 'raid';
-    const item = low ? (inventory.find((i) => i.heal && i.heal <= 30) || inventory.find((i) => i.heal)) : null;
-    const txt = item ? `Q — ${item.name} 사용 (+${item.heal} HP)` : '';
+    const bleeding = !!(player.bleeds && player.bleeds.length), blacked = limbBlacked();
+    const low = (player.hp < 45 || bleeding || blacked) && player.hp > 0 && state.phase === 'raid';
+    const item = !low ? null : (blacked && !bleeding) ? (inventory.find((i) => i.heal > 30) || inventory.find((i) => i.heal)) : (inventory.find((i) => i.heal && i.heal <= 30) || inventory.find((i) => i.heal));
+    const txt = item ? `Q — ${item.name}${bleeding ? ' (지혈)' : blacked ? ' (부상 처치)' : ` 사용 (+${item.heal} HP)`}` : '';
     if (dom.healHint.textContent !== txt) dom.healHint.textContent = txt;
     dom.healHint.style.display = item ? 'block' : 'none';
     const tb = document.getElementById('tb-heal');
@@ -6252,6 +6303,7 @@ function updateHUD() {
   }
   dom.hpFill.style.width = `${player.hp}%`;
   dom.stamFill.style.width = `${player.stamina}%`;
+  if (dom.bodyHud && player.parts && (bodyDirty || (bodyTick = (bodyTick + 1) % 4) === 0)) { bodyDirty = false; drawBodyHud(); } // 신체 HUD (#304)
   const hasArmor = player.armorDur > 0 || player.helmet;
   $('armor-label').style.display = hasArmor ? 'block' : 'none';
   $('armor-bar').style.display = player.armorDur > 0 ? 'block' : 'none';
@@ -6362,7 +6414,7 @@ window.__ex = {
   lootInteractable,
   WEAPONS,
   kill(i) { const e = enemies[i]; if (e && !e.dead) killEnemy(e); },
-  hurt(n, hs = false) { damagePlayer(n, hs); },
+  hurt(n, hs = false, part = null) { damagePlayer(n, hs, part); }, get parts() { return player.parts; }, get bleeds() { return player.bleeds; }, get inventory() { return inventory; }, _stepPlayer(dt) { updatePlayer(dt); }, _hud() { updateHUD(); }, // (#304) QA: 프레임 없이 플레이어/HUD 1스텝
   // 물리 디버그 (#119)
   get physReady() { return physReady; },
   get physProps() { return physProps.map((p) => { const t = p.body.translation(); return { x: t.x, y: t.y, z: t.z, explosive: p.explosive, exploded: p.exploded, sleeping: p.body.isSleeping() }; }); },
