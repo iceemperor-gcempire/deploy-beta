@@ -165,6 +165,8 @@ const ITEM_TABLE = [
   { name: '붕대',            value: 3000,  w: 16, heal: 25, type: 'consumable' },
   { name: '군용 MRE',        value: 8000,  w: 12 },
   { name: '구급킷',          value: 14000, w: 7,  heal: 60, type: 'consumable' },
+  { name: '진통제',          value: 6000,  w: 9,  use: 'painkiller', type: 'consumable' }, // 60s 부상 효과 억제 (#307)
+  { name: '부목',            value: 5000,  w: 8,  use: 'splint', type: 'consumable' },     // 부상 부위(팔/다리) 30% 복구 (#307)
   { name: '손목시계',        value: 15000, w: 10 },
   { name: '위스키',          value: 22000, w: 8 },
   { name: '금목걸이',        value: 28000, w: 6 },
@@ -242,7 +244,7 @@ const dom = {
   rangeHud: $('range-hud'), rhShots: $('rh-shots'), rhHits: $('rh-hits'), rhAcc: $('rh-acc'), rhLast: $('rh-last'), rhGroup: $('rh-group'), // 사격 연습장 스코어 (#292)
   rhTitle: $('rh-title'), rhDrill: $('rh-drill'), rhBest: $('rh-best'), recoilTrace: $('recoil-trace'), // 무기별 통계·드릴·반동 궤적 (#295)
   rhHist: $('rh-hist'), rhPat: $('rh-pat'), rhDist: $('rh-dist'), // 최근 기록·반동 패턴·거리계 (#298)
-  bodyHud: $('body-hud'), // 신체 HUD (#304)
+  bodyHud: $('body-hud'), painHint: $('pain-hint'), // 신체 HUD (#304), 부상 처치 힌트 (#307)
 };
 
 // ---------- 모바일 감지 ----------
@@ -1096,14 +1098,14 @@ function renderInventoryScreen() {
   const equipped = st.equipped || 'rifle';
   const lw = st.loadoutW || [], lc = st.loadoutC || {};
   const guns = (st.weapons || ['rifle']).filter((k) => WEAPONS[k]);
-  const cg = {}; for (const c of (st.consumables || [])) { cg[c.name] = cg[c.name] || { n: 0, heal: c.heal }; cg[c.name].n++; }
+  const cg = {}; for (const c of (st.consumables || [])) { cg[c.name] = cg[c.name] || { n: 0, heal: c.heal, use: c.use }; cg[c.name].n++; }
   const parts = st.parts || []; const pg = {}; for (const p of parts) { pg[p.name] = pg[p.name] || { n: 0, slot: p.slot }; pg[p.name].n++; }
   const accs = (st.attOwned || []).filter((k) => ATTACHMENTS[k]);
   const keys = st.keys || []; const lk = st.loadoutKeys || [];
   const vals = st.valuables || []; const vgz = groupValuables(vals);
   const gunTag = (k) => k === equipped ? '장착 중' : '';
   const moveBtn = (label, attr) => `<button class="ld-btn" ${attr}>${label}</button>`;
-  const healTag = (h) => h ? `+${h} HP` : '';
+  const healTag = (x) => x.heal ? `+${x.heal} HP` : x.use === 'painkiller' ? '진통 60s' : x.use === 'splint' ? '부목' : ''; // (#307)
   // 방어구/헬멧 보유·반입 여부
   const hasArmor = (st.armorDur || 0) > 0, hasHelmet = !!st.helmet;
   const brArmor = st.loadoutArmor !== false, brHelmet = st.loadoutHelmet !== false;
@@ -1111,7 +1113,7 @@ function renderInventoryScreen() {
   // 스태시 패널(좌)
   const sGuns = guns.filter((k) => !lw.includes(k));
   const sConsRows = [];
-  for (const [n, x] of Object.entries(cg)) { const rem = x.n - (lc[n] || 0); if (rem > 0) sConsRows.push(invRowHTML(`${n} ×${rem}`, healTag(x.heal), '', moveBtn('반입 →', `data-consp="${encodeURIComponent(n)}"`))); }
+  for (const [n, x] of Object.entries(cg)) { const rem = x.n - (lc[n] || 0); if (rem > 0) sConsRows.push(invRowHTML(`${n} ×${rem}`, healTag(x), '', moveBtn('반입 →', `data-consp="${encodeURIComponent(n)}"`))); }
   const sArmorRows = [];
   if (hasArmor && !brArmor) sArmorRows.push(invRowHTML(`방탄복 (내구도 ${Math.round(st.armorDur)}/${ARMOR_MAX})`, '', '', moveBtn('반입 →', 'data-armld="1"')));
   if (hasHelmet && !brHelmet) sArmorRows.push(invRowHTML('헬멧', '', '', moveBtn('반입 →', 'data-helld="1"')));
@@ -1129,7 +1131,7 @@ function renderInventoryScreen() {
   // 반입 패널(우)
   const lGuns = guns.filter((k) => lw.includes(k));
   const lConsRows = [];
-  for (const [n, x] of Object.entries(cg)) { const p = Math.min(lc[n] || 0, x.n); if (p > 0) lConsRows.push(invRowHTML(`${n} ×${p}`, healTag(x.heal), '', moveBtn('← 보관', `data-conss="${encodeURIComponent(n)}"`))); }
+  for (const [n, x] of Object.entries(cg)) { const p = Math.min(lc[n] || 0, x.n); if (p > 0) lConsRows.push(invRowHTML(`${n} ×${p}`, healTag(x), '', moveBtn('← 보관', `data-conss="${encodeURIComponent(n)}"`))); }
   const lArmorRows = [];
   if (hasArmor && brArmor) lArmorRows.push(invRowHTML(`방탄복 (내구도 ${Math.round(st.armorDur)}/${ARMOR_MAX})`, '', '', moveBtn('← 보관', 'data-armld="0"')));
   if (hasHelmet && brHelmet) lArmorRows.push(invRowHTML('헬멧', '', '', moveBtn('← 보관', 'data-helld="0"')));
@@ -1202,7 +1204,7 @@ function renderShop() {
   const consN = (s.consumables || []).length;
   html += `<h3 style="margin-top:14px">소모품 <span style="color:#6f8f6f;font-weight:normal">(보유 ${consN})</span></h3>`;
   for (const c of CONSUMABLE_SHOP) {
-    html += `<div class="shop-row"><div><div class="w-name">${c.name}</div><div class="w-desc">+${c.heal} HP · 레이드 반입</div></div>`
+    html += `<div class="shop-row"><div><div class="w-name">${c.name}</div><div class="w-desc">${c.heal ? `+${c.heal} HP` : c.use === 'painkiller' ? '부상 효과 60초 억제 (X)' : '부상 부위 복구 — 팔/다리 30% (X)'} · 레이드 반입</div></div>`
       + `<button data-buycons="${encodeURIComponent(c.name)}" ${roubles < c.value ? 'disabled' : ''}>구매 ₽${c.value.toLocaleString('ko-KR')}</button></div>`;
   }
   // 총기 부품 (#186) — 구매 시 인벤토리(총기 부품)에 쌓임. 차후 총기 커스텀에 사용.
@@ -1282,7 +1284,7 @@ function renderShop() {
     const c = CONSUMABLE_SHOP.find((x) => x.name === decodeURIComponent(b.dataset.buycons));
     if (!c || (st.roubles || 0) < c.value) return;
     st.roubles -= c.value;
-    st.consumables = [...(st.consumables || []), { name: c.name, value: c.value, heal: c.heal }];
+    st.consumables = [...(st.consumables || []), { name: c.name, value: c.value, heal: c.heal, use: c.use }];
     saveStash(st);
     sfx.pickup();
     renderShop();       // 보유 수 갱신
@@ -3037,14 +3039,16 @@ const BODY_PARTS = {
   arms: { max: 45, mul: 2.0, name: '팔' }, legs: { max: 50, mul: 2.0, name: '다리' },
 };
 const PART_WEIGHTS = [['thorax', 0.33], ['stomach', 0.17], ['arms', 0.25], ['legs', 0.25]]; // 비헤드샷 피격 부위 가중치
-function resetBodyParts() { player.parts = {}; for (const k of Object.keys(BODY_PARTS)) player.parts[k] = BODY_PARTS[k].max; player.bleeds = []; bodyDirty = true; }
+function resetBodyParts() { player.parts = {}; for (const k of Object.keys(BODY_PARTS)) player.parts[k] = BODY_PARTS[k].max; player.bleeds = []; player.painkiller = 0; bodyDirty = true; }
 function randomPart() { let r = Math.random(); for (const [k, w] of PART_WEIGHTS) { if ((r -= w) <= 0) return k; } return 'thorax'; }
 function partFrac(k) { return player.parts ? player.parts[k] / BODY_PARTS[k].max : 1; }
-function legsK() { const f = partFrac('legs'); return f <= 0 ? 0.55 : f < 0.5 ? 0.85 : 1; }         // 이동 속도 배수
-function armsSpread() { const f = partFrac('arms'); return f <= 0 ? 0.012 : f < 0.5 ? 0.005 : 0; }  // 탄퍼짐 가산
+function painFree() { return (player.painkiller || 0) > 0; } // 진통제 효과 중 (#307)
+function legsK() { if (painFree()) return 1; const f = partFrac('legs'); return f <= 0 ? 0.55 : f < 0.5 ? 0.85 : 1; }         // 이동 속도 배수
+function armsSpread() { if (painFree()) return 0; const f = partFrac('arms'); return f <= 0 ? 0.012 : f < 0.5 ? 0.005 : 0; }  // 탄퍼짐 가산
 function limbBlacked() { return !!player.parts && ['stomach', 'arms', 'legs'].some((k) => player.parts[k] <= 0); }
 const PART_EFFECT = { legs: '이동 저하·질주/점프 불가', arms: '조준 흔들림·재장전 지연', stomach: '지구력 회복 저하' };
 function damagePlayer(dmg, headshot = false, part = null) {
+  const k = headshot ? 'head' : (part || randomPart()); // 부위 먼저 — 방어구는 부위별 (#307)
   if (headshot) {
     if (player.helmet) {
       player.helmet = false;
@@ -3053,7 +3057,7 @@ function damagePlayer(dmg, headshot = false, part = null) {
       return;
     }
     dmg *= 1.8;
-  } else if (player.armorDur > 0) {
+  } else if (player.armorDur > 0 && (k === 'thorax' || k === 'stomach')) { // 방탄복은 흉부/복부만 경감, 팔·다리는 그대로 (#307)
     player.armorDur = Math.max(0, player.armorDur - dmg);
     dmg *= 0.55; // 45% 경감
     if (player.armorDur <= 0) addFeed('방탄복 파손');
@@ -3061,7 +3065,7 @@ function damagePlayer(dmg, headshot = false, part = null) {
   let cause = '스캐브에게 사살당했습니다.';
   bodyDirty = true;
   if (player.parts) { // 부위 배정·부상·출혈 (#304)
-    const k = headshot ? 'head' : (part || randomPart()), was = player.parts[k];
+    const was = player.parts[k];
     player.parts[k] = Math.max(0, was - dmg * BODY_PARTS[k].mul);
     if (was > 0 && player.parts[k] <= 0) {
       if (k === 'head' || k === 'thorax') { player.hp = 0; cause = k === 'head' ? '헤드샷으로 사망했습니다.' : '흉부 치명상으로 사망했습니다.'; }
@@ -3308,6 +3312,7 @@ function resolveHorizontal(pos, radius, yBottom, yTop) {
 }
 
 function updatePlayer(dt) {
+  if (player.painkiller > 0) { player.painkiller -= dt; if (player.painkiller <= 0) { player.painkiller = 0; bodyDirty = true; addFeed('진통제 효과 종료'); } } // (#307)
   if (player.bleeds && player.bleeds.length) { // 출혈 (#304): 부위당 0.8 HP/s
     player.hp -= 0.8 * player.bleeds.length * dt;
     if (player.hp <= 0) { player.hp = 0; endRaid('death', '출혈로 사망했습니다.'); return; }
@@ -3331,13 +3336,13 @@ function updatePlayer(dt) {
   // --- 지구력 / 달리기 ---
   // 사격 중엔 질주 불가 — 발사 버튼을 누르면 질주가 풀리고 총을 들어올림(raiseT 지연) (#180)
   const wantSprint = ((keys['ShiftLeft'] && keys['KeyW']) || touch.sprint) && hasInput && !player.aiming && !gun.triggerDown;
-  if (wantSprint && player.stamina > 1 && partFrac('legs') > 0) { // 다리 부상 시 질주 불가 (#304)
+  if (wantSprint && player.stamina > 1 && (partFrac('legs') > 0 || painFree())) { // 다리 부상 시 질주 불가 (#304), 진통제 중엔 가능 (#307)
     player.sprinting = true;
     player.stamina = Math.max(0, player.stamina - 17 * dt);
     if (player.stamina <= 0) player.sprinting = false;
   } else {
     player.sprinting = false;
-    player.stamina = Math.min(100, player.stamina + 13 * dt * (partFrac('stomach') <= 0 ? 0.4 : 1)); // 복부 부상 시 회복 저하
+    player.stamina = Math.min(100, player.stamina + 13 * dt * (partFrac('stomach') <= 0 && !painFree() ? 0.4 : 1)); // 복부 부상 시 회복 저하
   }
   const speed = PLAYER.walkSpeed * (player.sprinting ? PLAYER.sprintMult : 1) * (player.aiming ? 0.55 : 1) * legsK(); // 다리 부상 감속 (#304)
 
@@ -3349,7 +3354,7 @@ function updatePlayer(dt) {
 
   // --- 중력 / 점프 ---
   player.vel.y -= PLAYER.gravity * dt;
-  if ((keys['Space'] || touch.jump) && player.grounded && player.stamina > 10 && partFrac('legs') > 0) { // 다리 부상 시 점프 불가 (#304)
+  if ((keys['Space'] || touch.jump) && player.grounded && player.stamina > 10 && (partFrac('legs') > 0 || painFree())) { // 다리 부상 시 점프 불가 (#304)
     player.vel.y = PLAYER.jumpVel;
     player.stamina -= 8;
     player.grounded = false;
@@ -4083,7 +4088,7 @@ function toggleViewMode() {
 
 function startReload() {
   if (gun.reloading > 0 || gun.mag >= GUN.magSize || gun.reserve <= 0) return;
-  gun.reloading = GUN.reloadTime * (partFrac('arms') <= 0 ? 1.4 : 1); // 팔 부상 시 지연 (#304)
+  gun.reloading = GUN.reloadTime * (partFrac('arms') <= 0 && !painFree() ? 1.4 : 1); // 팔 부상 시 지연 (#304)
   sfx.reload1();
   playPcReload(0.1); // 3인칭 재장전 모션 (상체 전용 + 하체 idle)
 }
@@ -4548,7 +4553,7 @@ function lootInteractable(it) {
       gun.reserve += item.ammo;
       addFeed(`+${item.ammo} 탄약`);
     } else {
-      inventory.push({ name: item.name, value: item.value, heal: item.heal, type: item.type, slot: item.slot, keyId: item.keyId });
+      inventory.push({ name: item.name, value: item.value, heal: item.heal, use: item.use, type: item.type, slot: item.slot, keyId: item.keyId });
       addFeed(item.type === 'part' ? `${item.name} 획득 (총기 부품)`
         : item.type === 'key' ? `${item.name} 획득 (열쇠)`
         : `${item.name} 획득 (₽${item.value.toLocaleString('ko-KR')})`);
@@ -4575,6 +4580,25 @@ function useHeal() {
   player.healCooldown = 1.2; bodyDirty = true;
   sfx.heal();
   addFeed(`${item.name} 사용 (+${item.heal} HP${cured ? ' · 지혈' : ''}${fixed ? ' · 부상 처치' : ''})`);
+  refreshInventoryUI();
+}
+
+// 부상 처치 (#307, X): 부목(부상 부위 0 인 팔/다리 → 30% 복구) 우선, 없으면 진통제(60s 부상 효과 억제). HP 는 회복하지 않는다.
+function useMed() {
+  if (player.healCooldown > 0 || !player.parts) return;
+  const limb = ['legs', 'arms'].find((k) => player.parts[k] <= 0);
+  let idx = -1, what = '';
+  if (limb) { idx = inventory.findIndex((i) => i.use === 'splint'); what = 'splint'; }
+  if (idx === -1) {
+    const injured = limbBlacked() || partFrac('legs') < 0.5 || partFrac('arms') < 0.5;
+    if (injured && !painFree()) { idx = inventory.findIndex((i) => i.use === 'painkiller'); what = 'painkiller'; }
+  }
+  if (idx === -1) { addFeed(limb ? '부목이 없습니다 (진통제로 임시 억제 가능)' : painFree() ? '진통제 효과 중' : '처치할 부상이 없거나 진통제가 없습니다'); return; }
+  const item = inventory.splice(idx, 1)[0];
+  if (what === 'splint') { player.parts[limb] = BODY_PARTS[limb].max * 0.3; addFeed(`${item.name} — ${BODY_PARTS[limb].name} 고정 (30% 복구)`); }
+  else { player.painkiller = 60; addFeed(`${item.name} — 60초간 부상 효과 억제`); }
+  player.healCooldown = 1.2; bodyDirty = true;
+  sfx.heal();
   refreshInventoryUI();
 }
 
@@ -5434,6 +5458,7 @@ function drawBodyHud() { // 부위 색: 초록>60% · 노랑>30% · 빨강>0 · 
   box('legs', 18, 60, 9, 34); box('legs', 29, 60, 9, 34);
   const at = { head: [W / 2 + 9, 6], thorax: [40, 26], stomach: [40, 50], arms: [14, 26], legs: [28, 64] };
   for (const k of player.bleeds || []) { const [x, y] = at[k]; g.fillStyle = '#ff3b2f'; g.beginPath(); g.arc(x, y, 3, 0, Math.PI * 2); g.fill(); }
+  if (painFree()) { g.font = '11px sans-serif'; g.textAlign = 'right'; g.fillText('💊', W - 1, 12); } // 진통제 중 (#307)
 }
 function rangeSilhouetteTexture() { // 실루엣 표적: 판지 + 회색 인체 + 머리(빨강)/몸통 중심(노랑) 존
   const c = document.createElement('canvas'); c.width = 128; c.height = 256; const g = c.getContext('2d');
@@ -5768,7 +5793,7 @@ function startRaid(mapKey) {
     }
   }
   if (broughtCons.length) {
-    for (const c of broughtCons) inventory.push({ name: c.name, value: c.value, heal: c.heal, type: 'consumable' });
+    for (const c of broughtCons) inventory.push({ name: c.name, value: c.value, heal: c.heal, use: c.use, type: 'consumable' });
     stash0.consumables = remainCons;
     saveStash(stash0);
     addFeed(`소모품 ${broughtCons.length}개 반입`);
@@ -5848,7 +5873,7 @@ function endRaid(result, cause) {
     stash.extracts = (stash.extracts || 0) + 1;
     // 반입 분류 (#185/#186/#187): 부품 → stash.parts, 소모품 → stash.consumables, 그 외 가치품 → stash.valuables
     const bankedParts = inventory.filter((i) => i.type === 'part').map((i) => ({ name: i.name, value: i.value, slot: i.slot }));
-    const bankedCons = inventory.filter((i) => i.type === 'consumable').map((i) => ({ name: i.name, value: i.value, heal: i.heal }));
+    const bankedCons = inventory.filter((i) => i.type === 'consumable').map((i) => ({ name: i.name, value: i.value, heal: i.heal, use: i.use }));
     const banked = inventory.filter((i) => i.type !== 'part' && i.type !== 'consumable' && i.type !== 'key' && (i.value || 0) > 0).map((i) => ({ name: i.name, value: i.value }));
     stash.parts = [...(stash.parts || []), ...bankedParts];
     stash.consumables = [...(stash.consumables || []), ...bankedCons];
@@ -6013,6 +6038,7 @@ if (IS_MOBILE) {
   onHold('tb-reload', () => { if (inRaid()) startReload(); });
   onHold('tb-weapon', () => { if (inRaid()) cycleWeapon(); });
   onHold('tb-heal', () => { if (inRaid()) useHeal(); });
+  onHold('tb-med', () => { if (inRaid()) useMed(); }); // 부상 처치 (#307)
   onHold('tb-reset', () => { if (inRaid() && state.range) resetRange(); }); // 연습장 (#295)
   onHold('tb-drill', () => { if (inRaid() && state.range) startDrill(); });
   onHold('tb-mode', () => { if (inRaid() && state.range) cycleDrillMode(); }); // (#298)
@@ -6227,6 +6253,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'KeyY' && state.range) startDrill(); // 연습장 드릴 시작 (#295)
   if (e.code === 'KeyU' && state.range) cycleDrillMode(); // 드릴 모드 전환 (#298)
   if (e.code === 'KeyQ') useHeal();
+  if (e.code === 'KeyX') useMed(); // 부상 처치 (#307)
   if (e.code === 'KeyV') toggleViewMode();
   if (e.code === 'KeyE') {
     const it = nearestInteractable();
@@ -6297,6 +6324,7 @@ function updateHUD() {
     const item = !low ? null : (blacked && !bleeding) ? (inventory.find((i) => i.heal > 30) || inventory.find((i) => i.heal)) : (inventory.find((i) => i.heal && i.heal <= 30) || inventory.find((i) => i.heal));
     const txt = item ? `Q — ${item.name}${bleeding ? ' (지혈)' : blacked ? ' (부상 처치)' : ` 사용 (+${item.heal} HP)`}` : '';
     if (dom.healHint.textContent !== txt) dom.healHint.textContent = txt;
+    if (dom.painHint) { const limb = player.parts && ['legs', 'arms'].find((k) => player.parts[k] <= 0); const pt = painFree() ? `💊 진통제 ${Math.ceil(player.painkiller)}s` : (limb && state.phase === 'raid') ? (inventory.some((i) => i.use === 'splint') ? 'X — 부목 (부상 고정)' : inventory.some((i) => i.use === 'painkiller') ? 'X — 진통제 (임시 억제)' : '') : ''; if (dom.painHint.textContent !== pt) dom.painHint.textContent = pt; dom.painHint.style.display = pt ? 'block' : 'none'; } // (#307)
     dom.healHint.style.display = item ? 'block' : 'none';
     const tb = document.getElementById('tb-heal');
     if (tb) tb.classList.toggle('urgent', !!item);
@@ -6414,7 +6442,7 @@ window.__ex = {
   lootInteractable,
   WEAPONS,
   kill(i) { const e = enemies[i]; if (e && !e.dead) killEnemy(e); },
-  hurt(n, hs = false, part = null) { damagePlayer(n, hs, part); }, get parts() { return player.parts; }, get bleeds() { return player.bleeds; }, get inventory() { return inventory; }, _stepPlayer(dt) { updatePlayer(dt); }, _hud() { updateHUD(); }, // (#304) QA: 프레임 없이 플레이어/HUD 1스텝
+  hurt(n, hs = false, part = null) { damagePlayer(n, hs, part); }, get parts() { return player.parts; }, get bleeds() { return player.bleeds; }, get inventory() { return inventory; }, _stepPlayer(dt) { updatePlayer(dt); }, _hud() { updateHUD(); }, _useMed() { useMed(); }, // (#304/#307) QA
   // 물리 디버그 (#119)
   get physReady() { return physReady; },
   get physProps() { return physProps.map((p) => { const t = p.body.translation(); return { x: t.x, y: t.y, z: t.z, explosive: p.explosive, exploded: p.exploded, sleeping: p.body.isSleeping() }; }); },
