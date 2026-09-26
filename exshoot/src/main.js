@@ -296,6 +296,9 @@ const SUN_DIR = new THREE.Vector3(-60, 55, -30).normalize();
 const skyUniforms = {
   uSunDir: { value: SUN_DIR },
   uTime: { value: 0 },
+  // 맵별 하늘 팔레트 (#319 렌더 개편) — applyLook 이 교체. 기본값 = 기존 청회색 하늘
+  uTop: { value: new THREE.Color(0.30, 0.41, 0.56) }, uMid: { value: new THREE.Color(0.60, 0.69, 0.78) }, uHor: { value: new THREE.Color(0.84, 0.85, 0.83) },
+  uCloud: { value: 0.55 }, uCloudCol: { value: new THREE.Color(0.97, 0.96, 0.94) },
 };
 const skyMat = new THREE.ShaderMaterial({
   side: THREE.BackSide,
@@ -311,6 +314,8 @@ const skyMat = new THREE.ShaderMaterial({
     varying vec3 vDir;
     uniform vec3 uSunDir;
     uniform float uTime;
+    uniform vec3 uTop, uMid, uHor, uCloudCol;
+    uniform float uCloud;
     float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     float noise(vec2 p) {
       vec2 i = floor(p), f = fract(p);
@@ -323,9 +328,7 @@ const skyMat = new THREE.ShaderMaterial({
       vec3 d = normalize(vDir);
       float h = clamp(d.y, -0.05, 1.0);
       // 상공 짙은 청회색 → 수평선 밝은 헤이즈
-      vec3 top = vec3(0.30, 0.41, 0.56);
-      vec3 mid = vec3(0.60, 0.69, 0.78);
-      vec3 hor = vec3(0.84, 0.85, 0.83);
+      vec3 top = uTop, mid = uMid, hor = uHor;
       vec3 col = mix(mid, top, smoothstep(0.08, 0.6, h));
       col = mix(hor, col, smoothstep(0.0, 0.12, h));
       // 태양 디스크 + 웜톤 할로 — 디스크는 또렷하게, 넓은 글로우는 억제해 과다 번짐 방지 (#179)
@@ -338,8 +341,8 @@ const skyMat = new THREE.ShaderMaterial({
         vec2 uv = d.xz / (d.y + 0.18) * 0.9 + vec2(uTime * 0.004, uTime * 0.0016);
         float c = fbm(uv);
         float cov = smoothstep(0.52, 0.78, c) * smoothstep(0.02, 0.2, d.y);
-        vec3 cloudCol = vec3(0.97, 0.96, 0.94) * (0.8 + 0.2 * s);
-        col = mix(col, cloudCol, cov * 0.55);
+        vec3 cloudCol = uCloudCol * (0.8 + 0.2 * s);
+        col = mix(col, cloudCol, cov * uCloud);
       }
       gl_FragColor = vec4(col, 1.0);
       // 톤매핑/색공간은 포스트프로세싱 OutputPass 가 일괄 처리 (#139) — 여기서 이중 적용 금지
@@ -350,15 +353,18 @@ skyMesh.frustumCulled = false;
 scene.add(skyMesh);
 
 // 하늘 기반 환경맵(IBL) — 금속/표면에 은은한 반사·주변광
-{
+// 맵별 하늘이 바뀌면(#319) 다시 구워 반사·주변광 색이 하늘과 맞게 한다
+let _envRT = null;
+function rebuildEnv(intensity = 0.22) {
   const pmrem = new THREE.PMREMGenerator(renderer);
   const envScene = new THREE.Scene();
-  const envSky = new THREE.Mesh(new THREE.SphereGeometry(10, 24, 12), skyMat);
-  envScene.add(envSky);
-  scene.environment = pmrem.fromScene(envScene, 0.04).texture;
-  scene.environmentIntensity = 0.22;
+  envScene.add(new THREE.Mesh(new THREE.SphereGeometry(10, 24, 12), skyMat));
+  const rt = pmrem.fromScene(envScene, 0.04);
+  if (_envRT) _envRT.dispose();
+  _envRT = rt; scene.environment = rt.texture; scene.environmentIntensity = intensity;
   pmrem.dispose();
 }
+rebuildEnv();
 
 const hemi = new THREE.HemisphereLight(0xb8cbdc, 0x54483a, 0.55);
 scene.add(hemi);
@@ -366,22 +372,41 @@ const sun = new THREE.DirectionalLight(0xffe0b0, 2.35);
 sun.position.set(-60, 55, -30);
 sun.castShadow = true;
 sun.shadow.mapSize.set(IS_MOBILE ? 2048 : 4096, IS_MOBILE ? 2048 : 4096);
-sun.shadow.camera.left = -110; sun.shadow.camera.right = 110;
-sun.shadow.camera.top = 110; sun.shadow.camera.bottom = -110;
-sun.shadow.camera.far = 250;
-sun.shadow.bias = -0.0005;
+// 그림자 (#319 렌더 개편): 맵 전체(±110) 대신 플레이어 주변 ±SHADOW_HALF 를 추종 + 광원 공간 텍셀 스냅(이동 시 떨림 방지)
+// → 4096 맵 기준 텍셀 5.4cm → 3.2cm. 광원 방향 깊이(far 260)는 그대로라 범위 밖 건물의 그림자도 범위 안으로 드리운다.
+const SHADOW_HALF = IS_MOBILE ? 55 : 65;
+sun.shadow.camera.left = -SHADOW_HALF; sun.shadow.camera.right = SHADOW_HALF;
+sun.shadow.camera.top = SHADOW_HALF; sun.shadow.camera.bottom = -SHADOW_HALF;
+sun.shadow.camera.near = 1; sun.shadow.camera.far = 260;
+sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.025;
 sun.shadow.radius = 3; // PCFSoft 소프트닝
 sun.shadow.camera.updateProjectionMatrix();
-scene.add(sun);
+scene.add(sun); scene.add(sun.target);
 // 역광 필 — 음영면이 새까맣게 죽지 않게 반대편에서 차가운 약광 (그림자 없음)
 const fill = new THREE.DirectionalLight(0x9fb6cc, 0.32);
 fill.position.set(55, 28, 40);
 scene.add(fill);
 // 맵별 태양 방향 (#277): MAP.sun=[x,y,z] 이면 그 방향, 없으면 기본(북서광). 필은 항상 반대편. 그림자 카메라(±110, far 250)는 방향 무관.
 const SUN_DEFAULT = [-60, 55, -30], FILL_DEFAULT = [55, 28, 40];
+const SUN_OFF = new THREE.Vector3(...SUN_DEFAULT).normalize().multiplyScalar(130);
 function setMapSun(s) {
-  if (s) { sun.position.set(s[0], s[1], s[2]); fill.position.set(-s[0] * 0.92, 28, -s[2] * 0.67); }
-  else { sun.position.set(...SUN_DEFAULT); fill.position.set(...FILL_DEFAULT); }
+  if (s) { SUN_OFF.set(s[0], s[1], s[2]); fill.position.set(-s[0] * 0.92, 28, -s[2] * 0.67); }
+  else { SUN_OFF.set(...SUN_DEFAULT); fill.position.set(...FILL_DEFAULT); }
+  skyUniforms.uSunDir.value.copy(SUN_OFF).normalize(); // 하늘 태양 디스크 = 실제 광원 방향 (#319 — 전엔 기본 방향에 고정돼 맵별 태양과 어긋남)
+  SUN_OFF.normalize().multiplyScalar(130);
+  updateSunShadow(true);
+}
+const _shF = new THREE.Vector3(), _shR = new THREE.Vector3(), _shU = new THREE.Vector3(), _shC = new THREE.Vector3();
+function updateSunShadow(force = false) {
+  const c = (state && state.phase === 'raid') ? player.pos : camera.position;
+  _shF.copy(SUN_OFF).normalize().negate();
+  _shR.crossVectors(_shF, Math.abs(_shF.y) > 0.99 ? new THREE.Vector3(1, 0, 0) : _up).normalize(); _shU.crossVectors(_shR, _shF);
+  const texel = (2 * SHADOW_HALF) / sun.shadow.mapSize.x;
+  const a = Math.round(c.dot(_shR) / texel) * texel, b = Math.round(c.dot(_shU) / texel) * texel, d = c.dot(_shF);
+  _shC.copy(_shR).multiplyScalar(a).addScaledVector(_shU, b).addScaledVector(_shF, d);
+  if (!force && _shC.distanceToSquared(sun.target.position) < 1e-8) return;
+  sun.target.position.copy(_shC); sun.position.copy(_shC).add(SUN_OFF);
+  sun.target.updateMatrixWorld();
 }
 
 addEventListener('resize', () => {
@@ -393,7 +418,7 @@ addEventListener('resize', () => {
 
 // 포스트프로세싱 파이프라인 (#139) — RenderPass → GTAO(AO) → Bloom → OutputPass(톤매핑/sRGB)
 // scene 은 이 시점에 아직 비어 있어도 무방(패스는 참조만 보유). 조명/환경 설정 후 호출.
-let gtaoPass = null, bloomPass = null;
+let gtaoPass = null, bloomPass = null, gradePass = null;
 function setupPostFX() {
   const size = renderer.getDrawingBufferSize(new THREE.Vector2());
   const rt = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: IS_MOBILE ? 0 : 4 });
@@ -407,6 +432,10 @@ function setupPostFX() {
       gtaoPass.output = GTAOPass.OUTPUT.Default;
       gtaoPass.blendIntensity = 0.9;
       try { gtaoPass.updateGtaoMaterial({ radius: 0.5, scale: 1.1, samples: 16 }); } catch {}
+      // 알파 컷아웃·반투명(카드 나무·벚꽃·체인 펜스·유리·꽃잎)은 AO 법선/깊이 패스에서 제외 (#319): 오버라이드 재질이 alphaTest 를 무시해
+      // 카드 사각형 전체가 깊이에 찍혀 수관에 검은 사각 AO 가 생기던 문제. 가시성은 GTAOPass 의 캐시가 복원한다.
+      const ov = gtaoPass.overrideVisibility.bind(gtaoPass);
+      gtaoPass.overrideVisibility = function () { ov(); this.scene.traverse((o) => { const m = o.material; if (o.isMesh && m && !Array.isArray(m) && (m.alphaTest > 0 || m.transparent)) o.visible = false; }); };
       composer.addPass(gtaoPass);
     } catch (e) { console.warn('GTAO 생략:', e && e.message); }
   }
@@ -415,23 +444,63 @@ function setupPostFX() {
   composer.addPass(bloomPass);
   composer.addPass(new OutputPass()); // 톤매핑/sRGB (항상 유지 — 효과 OFF 여도 색 일관)
   // 컬러 그레이딩 + 비네트 (톤매핑 후, 시네마틱 톤) — 한 패스, 저비용 (#148)
-  composer.addPass(new ShaderPass({
-    uniforms: { tDiffuse: { value: null }, uContrast: { value: 1.07 }, uSat: { value: 1.12 }, uVig: { value: 1.0 } },
+  gradePass = new ShaderPass({
+    uniforms: { tDiffuse: { value: null }, uContrast: { value: 1.07 }, uSat: { value: 1.12 }, uVig: { value: 1.0 },
+      uShadow: { value: new THREE.Vector3(1, 1, 1) }, uHigh: { value: new THREE.Vector3(1, 1, 1) }, uGrain: { value: 0.0 }, uTime: { value: 0 } },
     vertexShader: 'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
     fragmentShader: `
-      uniform sampler2D tDiffuse; uniform float uContrast, uSat, uVig; varying vec2 vUv;
+      uniform sampler2D tDiffuse; uniform float uContrast, uSat, uVig, uGrain, uTime; uniform vec3 uShadow, uHigh; varying vec2 vUv;
+      float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
       void main(){
         vec4 c = texture2D(tDiffuse, vUv);
+        float l0 = dot(c.rgb, vec3(0.299,0.587,0.114));
+        c.rgb *= mix(uShadow, uHigh, smoothstep(0.04, 0.8, l0));  // 스플릿 토닝: 그늘 ↔ 하이라이트 색온도 (#319)
         c.rgb = (c.rgb - 0.5) * uContrast + 0.5;                 // 대비
         float l = dot(c.rgb, vec3(0.299,0.587,0.114));
         c.rgb = mix(vec3(l), c.rgb, uSat);                       // 채도
         vec2 p = (vUv - 0.5) * uVig;                             // 비네트
-        c.rgb *= mix(0.68, 1.0, smoothstep(0.85, 0.28, length(p)));
+        c.rgb *= mix(0.72, 1.0, smoothstep(0.85, 0.28, length(p)));
+        c.rgb += (hash(vUv * 1024.0 + fract(uTime) * 91.7) - 0.5) * uGrain * (1.0 - l); // 필름 그레인(어두운 곳 위주, 밴딩 완화)
         gl_FragColor = c;
       }`,
-  }));
+  });
+  composer.addPass(gradePass);
 }
 setupPostFX();
+
+// ── 맵별 룩 (#319 렌더 개편): 하늘 팔레트·반구광·태양·필·노출·IBL·그레이딩을 한 벌로. applyMap 이 m.look 으로 적용 ──
+const LOOKS = {
+  default: { top: [0.30, 0.41, 0.56], mid: [0.60, 0.69, 0.78], hor: [0.84, 0.85, 0.83], cloud: 0.55, cloudCol: [0.97, 0.96, 0.94],
+    hemi: [0xb8cbdc, 0x54483a, 0.55], sun: [0xffe0b0, 2.35], fill: [0x9fb6cc, 0.32], exposure: 0.95, env: 0.22, tone: 'aces',
+    grade: { contrast: 1.07, sat: 1.1, vig: 1.0, shadow: [0.975, 0.995, 1.035], high: [1.025, 1.0, 0.97], grain: 0.014 } },
+  // 봄 오전: 옅은 파랑 하늘 + 분홍빛 도는 수평 헤이즈, 밝은 반구광(벚꽃 그늘이 새까매지지 않게), 따뜻한 하이라이트·푸른 그늘
+  spring: { top: [0.34, 0.52, 0.80], mid: [0.64, 0.76, 0.90], hor: [0.92, 0.89, 0.91], cloud: 0.42, cloudCol: [1.0, 0.98, 0.98],
+    hemi: [0xd6e4f4, 0x8c7a68, 0.72], sun: [0xfff0d8, 2.55], fill: [0xc8d4ea, 0.38], exposure: 0.95, env: 0.32, tone: 'neutral', // Khronos PBR Neutral: 벚꽃 분홍·하늘 파랑 채도 보존(ACES 는 탁한 헤이즈, AgX 는 회색으로 바램 — 3종 비교)
+    grade: { contrast: 1.04, sat: 1.07, vig: 0.85, shadow: [0.965, 0.985, 1.05], high: [1.03, 1.0, 0.975], grain: 0.012 } },
+  // 숲(학교): 수평선을 안개(녹회색)에 맞추고 반구광을 올려 수관 그늘 바닥이 새까매지지 않게
+  forest: { top: [0.32, 0.44, 0.56], mid: [0.58, 0.66, 0.70], hor: [0.66, 0.72, 0.66], cloud: 0.5, cloudCol: [0.95, 0.96, 0.94],
+    hemi: [0xc4d6c8, 0x6a5a44, 0.72], sun: [0xffe6c0, 2.4], fill: [0xa9bfb0, 0.36], exposure: 1.0, env: 0.26, tone: 'aces',
+    grade: { contrast: 1.06, sat: 1.08, vig: 1.0, shadow: [0.97, 1.0, 1.02], high: [1.03, 1.0, 0.96], grain: 0.014 } },
+  // 도심 폐허: 회색 스모그 하늘(안개색과 이음), 낮은 채도·약간 차가운 그늘
+  smog: { top: [0.40, 0.44, 0.50], mid: [0.58, 0.60, 0.63], hor: [0.66, 0.67, 0.68], cloud: 0.62, cloudCol: [0.86, 0.86, 0.86],
+    hemi: [0xb5bec8, 0x5a5550, 0.62], sun: [0xffe2c0, 2.2], fill: [0xa0adba, 0.36], exposure: 0.97, env: 0.22, tone: 'aces',
+    grade: { contrast: 1.08, sat: 0.94, vig: 1.05, shadow: [0.96, 0.99, 1.04], high: [1.02, 1.0, 0.98], grain: 0.018 } },
+};
+let currentLook = null;
+function applyLook(key) {
+  const L = LOOKS[key] || LOOKS.default;
+  if (currentLook === L) return;
+  currentLook = L;
+  skyUniforms.uTop.value.setRGB(...L.top); skyUniforms.uMid.value.setRGB(...L.mid); skyUniforms.uHor.value.setRGB(...L.hor);
+  skyUniforms.uCloud.value = L.cloud; skyUniforms.uCloudCol.value.setRGB(...L.cloudCol);
+  hemi.color.setHex(L.hemi[0]); hemi.groundColor.setHex(L.hemi[1]); hemi.intensity = L.hemi[2];
+  sun.color.setHex(L.sun[0]); sun.intensity = L.sun[1]; fill.color.setHex(L.fill[0]); fill.intensity = L.fill[1];
+  renderer.toneMappingExposure = L.exposure;
+  renderer.toneMapping = L.tone === 'neutral' ? THREE.NeutralToneMapping : L.tone === 'agx' ? THREE.AgXToneMapping : THREE.ACESFilmicToneMapping;
+  if (gradePass) { const g = gradePass.uniforms, G = L.grade; g.uContrast.value = G.contrast; g.uSat.value = G.sat; g.uVig.value = G.vig; g.uShadow.value.set(...G.shadow); g.uHigh.value.set(...G.high); g.uGrain.value = G.grain; }
+  rebuildEnv(L.env);
+}
+applyLook('default');
 
 // ============================================================
 // 에셋 (Kenney / Quaternius CC0 — CREDITS.md 참조)
@@ -616,12 +685,12 @@ async function loadAssets() {
   });
   // 지면 PBR 컬러맵 (ambientCG CC0) — 실패해도 절차 생성 텍스처로 폴백
   // 카드 트리/풀 카드 텍스처 (#280) — RGBA PNG(알파 컷아웃). 실패 시 canopyMat 단색 폴백
-  for (const key of ['canopy_broad_a', 'canopy_broad_b', 'canopy_autumn', 'canopy_pine', 'grass_card', 'ivy_card']) { // ivy_card: 폐교 덩굴 (#286)
+  for (const key of ['canopy_broad_a', 'canopy_broad_b', 'canopy_autumn', 'canopy_pine', 'grass_card', 'ivy_card', 'canopy_sakura', 'canopy_sakura_b', 'sakura_ground', 'sakura_raft', 'petal', 'chainlink']) { // sakura*/petal/chainlink: 벚꽃 동네 (#319) // ivy_card: 폐교 덩굴 (#286)
     jobs.push((async () => {
       try { const t = await loadTex(`assets/textures/${key}.png`); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy()); CANOPY_TEX[key] = t; } catch { /* 폴백 */ }
     })());
   }
-  jobs.push(...[['ground', 'assets/textures/ground.jpg'], ['gravel', 'assets/textures/gravel.jpg'], ['rubble', 'assets/textures/rubble.jpg'], ['forest', 'assets/textures/forest.jpg']].map(async ([key, path]) => { // rubble = ambientCG Ground107 도심 공터 (#268), forest = Ground076 숲 바닥 (#280)
+  jobs.push(...[['ground', 'assets/textures/ground.jpg'], ['gravel', 'assets/textures/gravel.jpg'], ['rubble', 'assets/textures/rubble.jpg'], ['forest', 'assets/textures/forest.jpg'], ['water_nrm', 'assets/textures/water_nrm.jpg']].map(async ([key, path]) => { // water_nrm: 개천 물결 (#319, 로드 뒤 colorSpace 는 사용처에서 NoColorSpace) // rubble = ambientCG Ground107 도심 공터 (#268), forest = Ground076 숲 바닥 (#280)
     try {
       const t = await loadTex(path);
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
@@ -640,7 +709,7 @@ async function loadAssets() {
     } catch (e) { console.warn('Rapier init 실패 — 물리 비활성:', e && e.message); }
   })());
   // 건축 PBR 텍스처 (#107) — 실패 시 해당 재질만 단색 폴백
-  for (const key of ['brick', 'plaster', 'rooftile', 'corrugated', 'woodfloor', 'concrete', 'asphalt', 'paving', 'plasterbroken', 'brickdirty', 'barkoak', 'barkfir', 'barkdark']) { // asphalt/paving: 도심 거리 (#268), plasterbroken/brickdirty: 파사드 변주 (#277), bark*: 카드 트리 껍질 (#280)
+  for (const key of ['brick', 'plaster', 'rooftile', 'corrugated', 'woodfloor', 'concrete', 'asphalt', 'paving', 'plasterbroken', 'brickdirty', 'barkoak', 'barkfir', 'barkdark', 'kawara', 'siding', 'blockwall', 'hedge']) { // kawara/siding/blockwall/hedge: 벚꽃 동네 (#319) // asphalt/paving: 도심 거리 (#268), plasterbroken/brickdirty: 파사드 변주 (#277), bark*: 카드 트리 껍질 (#280)
     jobs.push((async () => {
       try {
         const [col, nrm] = await Promise.all([
@@ -753,7 +822,9 @@ let FLATTENS = [
   ].map(([x, z, r]) => ({ x, z, r })),
 ];
 const FLAT_BLEND = 9;
+let TERRAIN_FN = null; // 맵별 지형 훅 (#319 벚꽃 동네: 개천 트렌치·계단·다리) — applyMap 이 설정
 function terrainH(x, z) {
+  if (TERRAIN_FN) return TERRAIN_FN(x, z);
   let base = vnoise(x * 0.021, z * 0.021) * 4.0 + vnoise(x * 0.055 + 31, z * 0.055 + 17) * 0.9;
   let h = Math.max(0, base - 1.15); // 저지대는 0, 구릉 최대 ~3.4m
   // 플래튼 존
@@ -865,7 +936,7 @@ function weatherModel(m, mul = 0.66, rough = 0.92) {
 // 숲 ~490그루가 ~100 draw call. 이동 콜라이더는 줄기만(서서 엄폐, 옛 placeTree 규약), 병합 메시는 obstacleMeshes(탄착/LOS). vertexColors 로 명도 변주.
 const CANOPY_MAT = {};
 function canopyMat(key) {
-  if (!CANOPY_MAT[key]) CANOPY_MAT[key] = new THREE.MeshStandardMaterial({ map: CANOPY_TEX[key] || null, color: CANOPY_TEX[key] ? 0xffffff : 0x4a6a35, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.95, metalness: 0, vertexColors: true });
+  if (!CANOPY_MAT[key]) CANOPY_MAT[key] = foliageNoFlip(new THREE.MeshStandardMaterial({ map: CANOPY_TEX[key] || null, color: CANOPY_TEX[key] ? 0xffffff : 0x4a6a35, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.95, metalness: 0, vertexColors: true }));
   return CANOPY_MAT[key];
 }
 const FOREST_CHUNK = 44;
@@ -932,8 +1003,8 @@ function placeCardTree(fb, kind, x, z, h, trunkR = 0.35, seed = 1) {
     for (const [ox, oy, oz] of cs) {
       put(barkSeg(b0, V(ox * 0.85, oy - h * 0.06, oz * 0.85), 0.09, 0.03, 5));
       const s = h * (0.36 + 0.14 * rnd()), hf = Math.min(1, Math.max(0, (oy - cy + ry) / (2 * ry))), c = tone * (0.62 + 0.38 * hf), yaw0 = rnd() * Math.PI;
-      for (let k = 0; k < 3; k++) fb.put(x, z, kind, cm, cardGeo(V(ox, oy, oz), s, s, yaw0 + k * Math.PI / 3, (rnd() - 0.5) * 0.7, [c, c * (0.97 + 0.06 * rnd()), c * 0.9], rnd() < 0.5));
-      fb.put(x, z, kind, cm, cardGeo(V(ox, oy + s * 0.1, oz), s * 0.9, s * 0.9, rnd() * Math.PI, Math.PI / 2 - 0.25, [c * 1.05, c * 1.03, c * 0.92], false));
+      for (let k = 0; k < 3; k++) { const g = cardGeo(V(ox, oy, oz), s, s, yaw0 + k * Math.PI / 3, (rnd() - 0.5) * 0.7, [c, c * (0.97 + 0.06 * rnd()), c * 0.9], rnd() < 0.5); sphereNormals(g, x, gy + cy, z); fb.put(x, z, kind, cm, g); }
+      { const g = cardGeo(V(ox, oy + s * 0.1, oz), s * 0.9, s * 0.9, rnd() * Math.PI, Math.PI / 2 - 0.25, [c * 1.05, c * 1.03, c * 0.92], false); sphereNormals(g, x, gy + cy, z); fb.put(x, z, kind, cm, g); } // 폴리지 노멀 (#319 렌더 개편)
     }
   }
   const top = gy + Math.min(4, Math.max(3, h * 0.35)); // 줄기 콜라이더(서서 엄폐)
@@ -1762,6 +1833,10 @@ const TEXMAT_DEF = {
   barkoak: [0xbfae96, 1.0, 1.1, 'trunk'],           // ambientCG Bark012 참나무 껍질 — 활엽 줄기 (#280)
   barkfir: [0xb5a28c, 1.0, 1.0, 'trunk'],           // Bark014 전나무 껍질 — 침엽 줄기
   barkdark: [0xa39886, 1.0, 1.0, 'trunk'],          // Bark006 어두운 껍질 — 고사목
+  kawara: [0xc4c8ce, 0.72, 2.2, 'roof'],             // ambientCG RoofingTiles013A 흑회색 기와 (#319)
+  siding: [0xffffff, 0.82, 1.6, 'concrete'],         // WoodSiding009 크림 사이딩 → 틴트 변주
+  blockwall: [0xf4f2ee, 0.95, 1.6, 'concrete'],      // 절차 합성 콘크리트 블록 담 (0.4×0.2m)
+  hedge: [0xffffff, 1.0, 1.2, 'leaf'],               // 절차 합성 생울타리
 };
 const TEXMAT = {};
 function buildTexMats() {
@@ -1789,10 +1864,21 @@ function buildTexMats() {
   TEXMAT.concreteStain = variant('concrete', 0x8d887b, 0.97);    // 얼룩진 콘크리트
   TEXMAT.brickCity = variant('brick', 0x9c7e6e, 0.93);           // 도심 적벽돌(짙은 톤) (#265)
   TEXMAT.plasterDirty = variant('plaster', 0xa9a395, 0.97);      // 때 탄 플라스터 (#265)
+  // 벚꽃 동네 외벽·지붕 변주 (#319)
+  TEXMAT.sidingCream = variant('siding', 0xf4ecdc, 0.8); TEXMAT.sidingGray = variant('siding', 0xbdbcb6, 0.8); TEXMAT.sidingBlue = variant('siding', 0xaec0ce, 0.8);
+  TEXMAT.sidingPink = variant('siding', 0xeacdc6, 0.8); TEXMAT.sidingMint = variant('siding', 0xc6d9c8, 0.8); TEXMAT.sidingBrown = variant('siding', 0x9e8672, 0.82);
+  TEXMAT.plasterWhite = variant('plaster', 0xf2eee6, 0.92); TEXMAT.plasterBeige = variant('plaster', 0xe0d3ba, 0.93);
+  TEXMAT.kawaraBlue = variant('kawara', 0x98a8bf, 0.7); TEXMAT.kawaraBrown = variant('kawara', 0xb39c88, 0.74);
+  TEXMAT.asphaltTown = variant('asphalt', 0xc9c6bf, 0.93); TEXMAT.canalStone = variant('concrete', 0x9d998d, 0.97); TEXMAT.barkSakura = variant('barkdark', 0x8a7470, 1.0);
   if (GROUND_TEX.ground) { // 흙 박스 재질(사격장 버름 #292) — 지면 컬러맵을 worldUV 박스에 4m 타일로
     const t = GROUND_TEX.ground.clone(); t.needsUpdate = true; t.repeat.set(1 / 4, 1 / 4);
     TEXMAT.dirt = new THREE.MeshStandardMaterial({ map: t, color: 0xb8a88c, roughness: 1.0 }); TEXMAT.dirt.userData = { worldUV: true };
+    const t2 = GROUND_TEX.ground.clone(); t2.needsUpdate = true; t2.repeat.set(1 / 3, 1 / 3); // 정원 흙·공원 마당 (#319)
+    TEXMAT.gardenSoil = new THREE.MeshStandardMaterial({ map: t2, color: 0x9c8e76, roughness: 1.0 }); TEXMAT.gardenSoil.userData = { worldUV: true };
   }
+  if (GROUND_TEX.gravel) { const t = GROUND_TEX.gravel.clone(); t.needsUpdate = true; t.repeat.set(1 / 2.5, 1 / 2.5); // 개천 바닥·신사 자갈 (#319)
+    TEXMAT.gravelWet = new THREE.MeshStandardMaterial({ map: t, color: 0x86827a, roughness: 0.85 }); TEXMAT.gravelWet.userData = { worldUV: true }; }
+  for (const k of ['gardenSoil', 'gravelWet']) if (!TEXMAT[k]) TEXMAT[k] = MAT.concreteDark;
 }
 function matOf(mat) { return typeof mat === 'string' ? (TEXMAT[mat] || MAT.concrete) : mat; }
 
@@ -2666,7 +2752,7 @@ function randomOpenPoint(margin = 6) {
   for (let tries = 0; tries < 60; tries++) {
     const x = (Math.random() * 2 - 1) * (WORLD_HALF - margin);
     const z = (Math.random() * 2 - 1) * (WORLD_HALF - margin);
-    if (isPointOpen(x, z, 0.8)) return new THREE.Vector3(x, 0, z);
+    if (isPointOpen(x, z, 0.8) && terrainH(x, z) > -0.3) return new THREE.Vector3(x, 0, z); // 개천 바닥 제외 (#319)
   }
   return new THREE.Vector3(0, 0, 0);
 }
@@ -3285,7 +3371,7 @@ function makeExtractBeacon(pos, color) {
   const ring = new THREE.Mesh(
     new THREE.RingGeometry(EXTRACT_RADIUS - 0.4, EXTRACT_RADIUS, 40),
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5, side: THREE.DoubleSide }));
-  ring.rotation.x = -Math.PI / 2; ring.position.set(pos.x, 0.05, pos.z); scene.add(ring);
+  ring.rotation.x = -Math.PI / 2; ring.position.set(pos.x, terrainH(pos.x, pos.z) + 0.05, pos.z); scene.add(ring);
   const light = new THREE.PointLight(color, 30, 18, 2);
   light.position.set(pos.x, 3, pos.z); scene.add(light);
   return { beam, ring, light };
@@ -5128,6 +5214,7 @@ const SCHOOL_FLATTENS = [
 const MAP_SCHOOL = {
   key: 'school', name: '숲속 고등학교', desc: '숲으로 둘러싸인 폐교 — 실내 교전',
   build: buildSchoolMap,
+  look: 'forest', // (#319)
   sun: [30, 55, 60], // 남동광 — 교사 정면(+z)·현관 채광 (#286)
   flattens: SCHOOL_FLATTENS,
   lootSpots: [
@@ -5494,6 +5581,7 @@ const URBAN_FLATTENS = [
 const MAP_URBAN = {
   key: 'urban', name: '도심 폐허', desc: '무너진 도심 — 아파트 블록·거리 시가전',
   build: buildUrbanMap,
+  look: 'smog', // (#319)
   sun: [40, 55, 60], // 남동광 — 정면(+z)·상가 파사드 채광 (#277)
   flattens: URBAN_FLATTENS,
   lootSpots: [
@@ -5518,6 +5606,1050 @@ const MAP_URBAN = {
     [40, 0, true], [-24, 24, false], [24, -24, false], [0, -30, true],
   ],
 };
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 벚꽃 동네 (#319 비주얼 개편 1단계): 개천(수로)+양안 벚꽃길 + 좁은 주택가 + 2층 단독주택 kit + 공원·신사·편의점 + 전신주·전선 ──
+// 좌표: 개천 z∈[1,7] (바닥 −2.0, 수면 −1.72) 동서 관통. 도로 E-W z=−7(개천 북안)·14.5(남안)·−40·48, N-S x=0(6m)·±44(5m), 골목 z=−64·69.
+// 블록 x: A[−85,−46.5] B[−41.5,−3] C[3,41.5] D[46.5,85]. 특수 블록: 공원 B×북2열, 신사 D×북2열, 편의점 C×남1열, 코인주차 B×남2열.
+// 배치는 chunk 병합(townBatch, 40m 청크·재질별) → 전 맵 ~200 draw call. 지형은 맵별 terrain 훅(개천 트렌치·계단 램프·다리).
+// ══════════════════════════════════════════════════════════════════════════════
+const TOWN = {
+  canal: { z0: 1, z1: 7, bed: -2.0, water: -1.72 },
+  roadBridges: [[-46.9, -41.1], [-3.4, 3.4], [41.1, 46.9]],
+  footBridges: [[-23.2, -20.8], [20.8, 23.2]],
+  ramps: [{ x0: -66, side: -1 }, { x0: 58, side: -1 }, { x0: 12, side: 1 }, { x0: -32, side: 1 }], // side −1 = 북안, +1 = 남안. x0 = 램프 상단(여기서 +x 로 내려감)
+  rampLen: 7, rampW: 1.4, landing: 1.6,
+  roadsEW: [[-9.5, -4.5], [12, 17], [-42.5, -37.5], [45.5, 50.5]], // z 구간
+  roadsNS: [[-46.5, -41.5], [-3, 3], [41.5, 46.5]],                 // x 구간
+  alleys: [[-65.5, -62.5], [67.5, 70.5]],
+  blocksX: [[-85, -46.5], [-41.5, -3], [3, 41.5], [46.5, 85]],
+};
+TOWN.bridges = [...TOWN.roadBridges, ...TOWN.footBridges];
+const TOWN_LOOT = [];     // 빌드 시 채움 (MAP_TOWN.lootSpots 와 같은 배열)
+const SAKURA_TREES = [];  // 낙화 파티클 스폰원 {x,y,z,r}
+let townFx = null;        // 매 프레임 갱신(낙화·수면) — buildTownMap 이 설정
+
+function townTerrain(x, z) {
+  const C = TOWN.canal;
+  if (z <= C.z0 || z >= C.z1) return 0;
+  for (const [a, b] of TOWN.bridges) if (x >= a && x <= b) return 0; // 다리 위 (다리 밑은 수문 격자 콜라이더가 막음)
+  for (const r of TOWN.ramps) {
+    const zin = r.side < 0 ? z < C.z0 + TOWN.rampW : z > C.z1 - TOWN.rampW;
+    if (!zin) continue;
+    if (x >= r.x0 - TOWN.landing && x <= r.x0) return 0;
+    if (x > r.x0 && x < r.x0 + TOWN.rampLen) return C.bed * (x - r.x0) / TOWN.rampLen;
+  }
+  return C.bed;
+}
+
+// 청크 병합 빌더: box/boxR/cyl/seg/geo 를 40m 청크·재질별로 모아 flush 에서 merge. 비인덱스 지오메트리는 인덱스 부여(병합 호환).
+function townBatch(chunk = 90) { // 90m 청크(맵 2×2 + 가장자리) — 40m 는 재질 수(~45) × 청크 수로 1000+ draw call
+  const by = new Map();
+  const put = (x, z, m, g) => {
+    if (!g.index) { const n = g.attributes.position.count, idx = new Uint32Array(n); for (let i = 0; i < n; i++) idx[i] = i; g.setIndex(new THREE.BufferAttribute(idx, 1)); }
+    for (const a of Object.keys(g.attributes)) if (!['position', 'normal', 'uv'].includes(a)) g.deleteAttribute(a);
+    if (!g.attributes.uv) g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
+    const k = `${Math.floor(x / chunk)},${Math.floor(z / chunk)}|${m.uuid}`;
+    let e = by.get(k); if (!e) by.set(k, (e = { m, gs: [] })); e.gs.push(g);
+  };
+  return {
+    put,
+    box(cx, cy, cz, w, h, d, mat, collide = false) {
+      const m = matOf(mat), g = new THREE.BoxGeometry(w, h, d);
+      if (m.userData && m.userData.worldUV) uvWorldBox(g, w, h, d, cx, cy, cz);
+      g.translate(cx, cy, cz); put(cx, cz, m, g);
+      if (collide) colliders.push(axisCollider(cx - w / 2, cx + w / 2, cy - h / 2, cy + h / 2, cz - d / 2, cz + d / 2));
+    },
+    boxR(cx, cy, cz, w, h, d, mat, rx = 0, ry = 0, rz = 0) {
+      const m = matOf(mat), g = new THREE.BoxGeometry(w, h, d);
+      if (m.userData && m.userData.worldUV) uvWorldBox(g, w, h, d);
+      if (rx) g.rotateX(rx); if (rz) g.rotateZ(rz); if (ry) g.rotateY(ry);
+      g.translate(cx, cy, cz); put(cx, cz, m, g);
+    },
+    cyl(cx, cy, cz, rt, rb, h, mat, seg = 10, collide = false) {
+      const g = new THREE.CylinderGeometry(rt, rb, h, seg); g.translate(cx, cy, cz); put(cx, cz, matOf(mat), g);
+      if (collide) { const r = Math.max(rt, rb); colliders.push(axisCollider(cx - r, cx + r, cy - h / 2, cy + h / 2, cz - r, cz + r)); }
+    },
+    seg(p0, p1, r, mat, radial = 6) { put((p0.x + p1.x) / 2, (p0.z + p1.z) / 2, matOf(mat), barkSeg(p0, p1, r, r, radial)); },
+    geo(x, z, mat, g) { put(x, z, matOf(mat), g); },
+    flush() {
+      let n = 0;
+      for (const { m, gs } of by.values()) {
+        const g = mergeGeometries(gs, false); for (const q of gs) q.dispose();
+        if (!g) continue;
+        const mesh = new THREE.Mesh(g, m); mesh.castShadow = !(m.userData && m.userData.noShadow); mesh.receiveShadow = true;
+        scene.add(mesh); if (!(m.userData && m.userData.noHit)) obstacleMeshes.push(mesh); n++;
+      }
+      by.clear(); return n;
+    },
+  };
+}
+const _tv = (x, y, z) => new THREE.Vector3(x, y, z);
+function metricPlane(w, h) { const g = new THREE.PlaneGeometry(w, h), uv = g.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * w, uv.getY(i) * h); return g; }
+
+// 90° 단위 로컬 프레임(대지 앞 = 로컬 +v). face 0:+z 1:+x 2:−z 3:−x. 축정렬 박스는 치수 스왑으로, 기운 박스는 rotateY(th).
+function lotFrame(cx, cz, face) {
+  const th = [0, Math.PI / 2, Math.PI, -Math.PI / 2][face], c = Math.round(Math.cos(th)), s = Math.round(Math.sin(th));
+  const W = (u, v) => [cx + u * c + v * s, cz - u * s + v * c];
+  return {
+    th, W,
+    box(B, u, y, v, lw, h, ld, mat, collide = false) { const [x, z] = W(u, v); if (c !== 0) B.box(x, y, z, lw, h, ld, mat, collide); else B.box(x, y, z, ld, h, lw, mat, collide); },
+    boxR(B, u, y, v, lw, h, ld, mat, rx = 0, rz = 0) { const [x, z] = W(u, v); B.boxR(x, y, z, lw, h, ld, mat, rx, th, rz); },
+    geo(B, g, u, y, v, mat) { g.rotateY(th); const [x, z] = W(u, v); g.translate(x, y, z); B.geo(x, z, mat, g); },
+    seg(B, u0, y0, v0, u1, y1, v1, r, mat) { const [x0, z0] = W(u0, v0), [x1, z1] = W(u1, v1); B.seg(_tv(x0, y0, z0), _tv(x1, y1, z1), r, mat); },
+    pos(u, v) { return W(u, v); },
+    yaw(ly = 0) { return th + ly; }, // 모델 +Z(로컬 앞) → 월드
+  };
+}
+function gableGeo(span, rise, thick) { // 삼각 박공벽: 로컬 x ∈[−span/2, span/2], y ∈[0, rise], 두께 z (가운데 정렬). 캡 UV = 미터
+  const sh = new THREE.Shape(); sh.moveTo(-span / 2, 0); sh.lineTo(span / 2, 0); sh.lineTo(0, rise); sh.lineTo(-span / 2, 0);
+  const g = new THREE.ExtrudeGeometry(sh, { depth: thick, bevelEnabled: false }); g.translate(0, 0, -thick / 2); return g;
+}
+function hipRoofGeo(A, Bz, pitch) { // 모임지붕: 처마 반치수 A(x)·Bz(z), 경사 pitch. 처마 y=0, 비인덱스 삼각형 + 경사면 미터 UV
+  const tp = Math.tan(pitch), rise = Math.min(A, Bz) * tp, P = [], U = [];
+  const r0 = A >= Bz ? [-(A - Bz), rise, 0] : [0, rise, -(Bz - A)], r1 = A >= Bz ? [A - Bz, rise, 0] : [0, rise, Bz - A];
+  const c = [[-A, 0, -Bz], [A, 0, -Bz], [A, 0, Bz], [-A, 0, Bz]];
+  const tri = (a, b, d, ax) => { for (const p of [a, b, d]) { P.push(...p); U.push(ax === 'x' ? p[0] : p[2], p[1] / Math.sin(pitch)); } };
+  tri(c[3], c[2], r1, 'x'); tri(c[3], r1, r0, 'x');   // 앞(+z)
+  tri(c[1], c[0], r0, 'x'); tri(c[1], r0, r1, 'x');   // 뒤(−z)
+  tri(c[2], c[1], r1, 'z');                           // 오른(+x)
+  tri(c[0], c[3], r0, 'z');                           // 왼(−x)
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2)); g.computeVertexNormals();
+  return { g, rise };
+}
+
+// ── 동네 전용 재질 (한 번 생성, 텍스처 재질은 buildTexMats 의 TEXMAT 사용) ──
+const TMAT = {};
+function buildTownMats() {
+  if (TMAT.ready) return;
+  const S = (color, o = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.8, ...o });
+  Object.assign(TMAT, {
+    alu: S(0x3d342c, { metalness: 0.45, roughness: 0.45 }), aluSilver: S(0xaeb3b6, { metalness: 0.6, roughness: 0.35 }),
+    trimWhite: S(0xe6e2d8), trimDark: S(0x34312d), ridge: S(0x3a3d42, { roughness: 0.7 }),
+    glass: S(0x8fa9b6, { roughness: 0.06, metalness: 0.15, transparent: true, opacity: 0.5, envMapIntensity: 1.6 }),
+    interior: S(0x2b2723, { roughness: 1 }), doorWood: S(0x5a3f2c), doorMetal: S(0x6d665c, { metalness: 0.3, roughness: 0.5 }),
+    curtain: [0xe9e2d0, 0xd9c9ae, 0xc6d4da, 0xe6cfd3, 0xd5dcc4].map((c) => S(c, { roughness: 1 })),
+    fabric: [0xf2f0ea, 0x8fb3d9, 0xe9b7c4, 0xf0d98a, 0x9cc49a, 0x6f7f96, 0xd9d3c7].map((c) => S(c, { roughness: 1, side: THREE.DoubleSide })),
+    pole: S(0xa29f98, { roughness: 0.9 }), poleYellow: S(0xd8b21c, { roughness: 0.7 }), poleBlack: S(0x1f1f1f, { roughness: 0.7 }),
+    insulator: S(0xe8e8e2, { roughness: 0.3 }), transformer: S(0x8d9296, { metalness: 0.4, roughness: 0.5 }),
+    rail: S(0x2e4438, { metalness: 0.4, roughness: 0.5 }), moss: S(0x3f4531, { roughness: 1 }),
+    vermilion: S(0xb8321f, { roughness: 0.6 }), shrineWood: S(0x6b4a32, { roughness: 0.9 }), stone: S(0x9b978d, { roughness: 0.95 }),
+    polycarb: S(0xd2dcdc, { roughness: 0.2, transparent: true, opacity: 0.42 }),
+    orange: S(0xe0762a, { roughness: 0.5 }), mirror: S(0xdfe6ea, { metalness: 1, roughness: 0.04 }),
+    red: S(0xc8392e, { roughness: 0.5 }), yellow: S(0xe0b52a, { roughness: 0.5 }), blue: S(0x2e6ab0, { roughness: 0.5 }), green: S(0x3a8a4a, { roughness: 0.5 }),
+    sand: S(0xcbb994, { roughness: 1 }), rubber: S(0x1a1a1a, { roughness: 0.9 }), terracotta: S(0xa95e3e, { roughness: 0.9 }),
+    lampGlow: S(0xfff1d6, { emissive: 0xffe2b0, emissiveIntensity: 0.6, roughness: 0.4 }),
+    white: S(0xf0efea, { roughness: 0.6 }), whiteLine: S(0xe8e6de, { roughness: 0.9 }),
+    ceiling: S(0xe8e4dc, { roughness: 1 }), fridgeGlow: S(0xdfe8f0, { emissive: 0xd8ecff, emissiveIntensity: 0.45 }),
+  });
+  for (const k of ['glass', 'polycarb']) TMAT[k].userData.noShadow = true;
+  // 알파 컷아웃 재질 (체인 링크 펜스 / 지면·수면 꽃잎)
+  const tex = (key, rep = 1) => { const t = CANOPY_TEX[key]; if (!t) return null; const c = t.clone(); c.needsUpdate = true; c.wrapS = c.wrapT = THREE.RepeatWrapping; c.repeat.set(rep, rep); return c; };
+  TMAT.chain = new THREE.MeshStandardMaterial({ map: tex('chainlink', 1 / 1.2), color: 0xbfc4c4, metalness: 0.5, roughness: 0.5, alphaTest: 0.45, side: THREE.DoubleSide });
+  TMAT.chain.userData = { noShadow: false };
+  TMAT.petalGround = new THREE.MeshStandardMaterial({ map: tex('sakura_ground', 1 / 2), transparent: true, alphaTest: 0.35, depthWrite: false, roughness: 0.9, polygonOffset: true, polygonOffsetFactor: -4 });
+  TMAT.petalGround.userData = { noShadow: true, noHit: true };
+  TMAT.ready = true;
+}
+function signCanvas(w, h, draw) { const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h); const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t; }
+function vendingTexture(seed) {
+  const rnd = mulberry32(seed);
+  return signCanvas(256, 512, (g, w, h) => {
+    const body = ['#f4f4f2', '#1f5fae', '#c8302c', '#f4f4f2'][Math.floor(rnd() * 4)];
+    g.fillStyle = body; g.fillRect(0, 0, w, h);
+    g.fillStyle = '#e9f2f7'; g.fillRect(14, 20, w - 28, 250);                          // 진열창
+    for (let r = 0; r < 4; r++) for (let i = 0; i < 7; i++) {                           // 캔·병 모형
+      const x = 22 + i * 31, y = 30 + r * 60, cols = ['#d23a2e', '#2e7bd0', '#f2c230', '#3aa35a', '#ffffff', '#8a4b2a', '#e86aa0'];
+      g.fillStyle = cols[Math.floor(rnd() * cols.length)]; g.fillRect(x, y, 22, 40);
+      g.fillStyle = 'rgba(255,255,255,0.45)'; g.fillRect(x + 3, y + 3, 5, 34);
+      g.fillStyle = '#e04030'; g.fillRect(x + 4, y + 46, 14, 6);                         // 버튼
+    }
+    g.fillStyle = '#20252a'; g.fillRect(40, 300, w - 80, 60);                            // 동전·지폐구
+    g.fillStyle = '#10151a'; g.fillRect(30, 420, w - 60, 60);                            // 배출구
+    g.fillStyle = 'rgba(255,255,255,0.12)'; g.fillRect(0, 0, 18, h);
+  });
+}
+
+// ── 2층 단독주택 kit (#319): 기초 밴드 + 벽(창·문 개구부) + 알루미늄 새시·유리·커튼·방범창살·창 차양·덧문 두껍닫이 + 층 띠 + 발코니(빨래·이불)
+// + 지붕(박공 u/v·모임·평지붕+태양광) + 처마 물받이·선홈통 + 현관 차양·계단 + 대지(블록 담·생울타리·대문 기둥·우편함·카포트·정원·화분·자전거).
+// enter=true 면 1층 실내(바닥·천장·칸막이·가구·조명) + 문 열림 + 루팅 스팟. 이동 콜라이더는 1층 벽·담·가구만(2층·지붕 도달 불가).
+const WALL_MATS = ['sidingCream', 'sidingGray', 'sidingBlue', 'sidingPink', 'sidingMint', 'plasterWhite', 'plasterBeige', 'sidingCream', 'plasterWhite', 'sidingBrown'];
+const ROOF_MATS = ['kawara', 'kawara', 'kawaraBlue', 'kawaraBrown', 'kawara'];
+let townLights = 0;
+const TOWN_PROPS = []; // flush 뒤 placeProp 할 GLB 부착물 [key, x, y, z, opts]
+
+function buildTownHouse(B, lot) {
+  const { cx, cz, W: LW, D: LD, face, seed } = lot;
+  const rnd = mulberry32(seed), F = lotFrame(cx, cz, face), pick = (a) => a[Math.floor(rnd() * a.length)];
+  const hw = Math.min(LW - 3.6, 7.4 + rnd() * 2.8), hd = Math.min(LD - 5.4, 6.6 + rnd() * 2.4);
+  const side = rnd() < 0.5 ? -1 : 1;                                     // 집을 붙이는 쪽(반대쪽 = 카포트)
+  const u0 = side * (LW / 2 - 0.9 - hw / 2), v0 = -LD / 2 + 1.2 + hd / 2;
+  const floors = rnd() < 0.88 ? 2 : 1, H1 = 2.8, H2 = 2.7, H = floors === 2 ? H1 + H2 : H1;
+  const wm = lot.wall || pick(WALL_MATS), rm = pick(ROOF_MATS), t = 0.2;
+  const frameM = rnd() < 0.6 ? TMAT.alu : TMAT.aluSilver, trim = rnd() < 0.5 ? TMAT.trimWhite : TMAT.trimDark;
+  const rr = rnd(), roof = floors === 1 ? 'gableU' : rr < 0.42 ? 'gableU' : rr < 0.6 ? 'gableV' : rr < 0.82 ? 'hip' : 'flat';
+  const enter = !!lot.enter;
+  notePlacement('house', ...F.pos(u0, v0), (face % 2 ? hd : hw) / 2 + 0.3, (face % 2 ? hw : hd) / 2 + 0.3, 0, H + 3);
+  const faces = [
+    { ax: 'u', c: v0 + hd / 2, n: 1, len: hw + t, mid: u0, key: 'front' },
+    { ax: 'u', c: v0 - hd / 2, n: -1, len: hw + t, mid: u0, key: 'back' },
+    { ax: 'v', c: u0 - hw / 2, n: -1, len: hd - t, mid: v0, key: 'left' },
+    { ax: 'v', c: u0 + hw / 2, n: 1, len: hd - t, mid: v0, key: 'right' },
+  ];
+  const fbox = (f, along, y, off, len, h, th, m, col = false) => {
+    if (f.ax === 'u') F.box(B, f.mid + along, y, f.c + f.n * off, len, h, th, m, col);
+    else F.box(B, f.c + f.n * off, y, f.mid + along, th, h, len, m, col);
+  };
+  const fpos = (f, along, off) => (f.ax === 'u' ? F.pos(f.mid + along, f.c + f.n * off) : F.pos(f.c + f.n * off, f.mid + along));
+  const fyaw = (f) => F.yaw(f.ax === 'u' ? (f.n > 0 ? 0 : Math.PI) : (f.n > 0 ? Math.PI / 2 : -Math.PI / 2));
+  // 벽 + 개구부: ops [{at,w,s,hh,kind}] (s=창턱, hh=상단, 층 바닥 기준)
+  const wall = (f, y0, h, ops, col) => {
+    let prev = -f.len / 2;
+    for (const o of [...ops].sort((a, b) => a.at - b.at)) {
+      const a = o.at - o.w / 2, b = o.at + o.w / 2;
+      if (a - prev > 0.02) fbox(f, (prev + a) / 2, y0 + h / 2, 0, a - prev, h, t, wm, col);
+      if (o.s > 0.01) fbox(f, o.at, y0 + o.s / 2, 0, o.w, o.s, t, wm, col);
+      if (o.hh < h - 0.01) fbox(f, o.at, y0 + (o.hh + h) / 2, 0, o.w, h - o.hh, t, wm, col);
+      prev = b;
+    }
+    if (f.len / 2 - prev > 0.02) fbox(f, (prev + f.len / 2) / 2, y0 + h / 2, 0, f.len / 2 - prev, h, t, wm, col);
+  };
+  const windowAt = (f, y0, o, inside) => { // 새시 + 유리 + (실내 없는 곳) 어두운 배킹·커튼 + 창턱 + 선택 디테일
+    const h = o.hh - o.s, yc = y0 + o.s + h / 2;
+    fbox(f, o.at, y0 + o.hh + 0.03, t / 2 - 0.02, o.w + 0.1, 0.06, 0.09, frameM);
+    fbox(f, o.at, y0 + o.s - 0.03, t / 2 - 0.02, o.w + 0.1, 0.06, 0.09, frameM);
+    for (const sx of [-1, 1]) fbox(f, o.at + sx * (o.w / 2 + 0.02), yc, t / 2 - 0.02, 0.06, h, 0.09, frameM);
+    if (o.w > 1.1) fbox(f, o.at, yc, -0.01, 0.05, h, 0.06, frameM);                     // 미서기 가운데 문선
+    fbox(f, o.at, yc, -0.02, o.w - 0.04, h - 0.04, 0.02, TMAT.glass);
+    if (!inside) {
+      fbox(f, o.at, yc, -t / 2 - 0.16, o.w + 0.1, h + 0.1, 0.03, TMAT.interior);
+      const cw = o.w * (0.28 + rnd() * 0.25), cs = rnd() < 0.5 ? -1 : 1;
+      if (rnd() < 0.8) fbox(f, o.at + cs * (o.w / 2 - cw / 2), yc, -t / 2 - 0.08, cw, h - 0.06, 0.02, pick(TMAT.curtain));
+    }
+    if (o.s > 0.3) fbox(f, o.at, y0 + o.s - 0.07, t / 2 + 0.05, o.w + 0.16, 0.04, 0.14, frameM);   // 창턱 물끊기
+    if (o.kind === 'small') for (let i = 0; i < 4; i++) fbox(f, o.at - o.w / 2 + o.w * (i + 0.5) / 4, yc, t / 2 + 0.07, 0.025, h + 0.04, 0.025, frameM); // 방범 창살
+    else if (rnd() < 0.55) fbox(f, o.at, y0 + o.hh + 0.16, t / 2 + 0.22, o.w + 0.34, 0.05, 0.44, trim);      // 창 차양
+    if (o.kind === 'big' && rnd() < 0.4) {                                                                   // 덧문 두껍닫이(戸袋)
+      const sd = rnd() < 0.5 ? -1 : 1; fbox(f, o.at + sd * (o.w / 2 + 0.47), yc + 0.05, t / 2 + 0.12, 0.86, h + 0.1, 0.24, wm);
+      fbox(f, o.at, y0 + o.hh + 0.07, t / 2 + 0.12, o.w + 0.1, 0.08, 0.24, frameM);                        // 레일
+    }
+  };
+  // ── 개구부 계획 ──
+  const doorAt = -side * (hw / 2 - 0.9);               // 현관은 카포트 쪽 끝
+  const bigAt = side * (hw / 2 - 1.3);
+  const ops1 = {
+    front: [{ at: doorAt, w: 0.95, s: 0, hh: 2.1, kind: 'door' }, { at: bigAt, w: 1.75, s: 0.35, hh: 2.05, kind: 'big' }],
+    back: [{ at: -hw * 0.22, w: 1.2, s: 0.9, hh: 2.0, kind: 'win' }, { at: hw * 0.28, w: 0.7, s: 1.2, hh: 1.9, kind: 'small' }],
+    left: [{ at: (rnd() - 0.5) * hd * 0.4, w: rnd() < 0.5 ? 0.7 : 1.2, s: 1.0, hh: 2.0, kind: rnd() < 0.5 ? 'small' : 'win' }],
+    right: [{ at: (rnd() - 0.5) * hd * 0.4, w: 0.7, s: 1.2, hh: 1.9, kind: 'small' }],
+  };
+  const balcony = floors === 2 && rnd() < 0.72, bw = Math.min(hw - 1.2, 3.6 + rnd() * 1.4), bAt = side * (hw / 2 - 0.6 - bw / 2) * 0.6;
+  const ops2 = {
+    front: balcony ? [{ at: bAt, w: 1.7, s: 0.05, hh: 2.0, kind: 'win' }, { at: bAt - side * (bw / 2 + 1.2), w: 1.1, s: 0.9, hh: 1.95, kind: 'win' }] : [{ at: -hw * 0.22, w: 1.5, s: 0.9, hh: 2.0, kind: 'win' }, { at: hw * 0.25, w: 1.2, s: 0.9, hh: 2.0, kind: 'win' }],
+    back: [{ at: -hw * 0.2, w: 1.5, s: 0.9, hh: 2.0, kind: 'win' }, { at: hw * 0.26, w: 0.9, s: 1.0, hh: 1.9, kind: 'win' }],
+    left: [{ at: 0, w: 1.1, s: 0.9, hh: 1.95, kind: 'win' }],
+    right: [{ at: (rnd() - 0.5) * 1.2, w: 0.8, s: 1.1, hh: 1.9, kind: 'small' }],
+  };
+  ops2.front = ops2.front.filter((o) => Math.abs(o.at) + o.w / 2 < hw / 2 - 0.3);
+  // ── 1층 ──
+  for (const f of faces) {
+    const ops = ops1[f.key].filter((o) => Math.abs(o.at) + o.w / 2 < f.len / 2 - 0.25);
+    wall(f, 0, H1, ops, true);
+    for (const o of ops) {
+      if (o.kind === 'door') {
+        fbox(f, o.at, o.hh + 0.04, t / 2 - 0.02, o.w + 0.14, 0.08, 0.1, frameM);
+        for (const sx of [-1, 1]) fbox(f, o.at + sx * (o.w / 2 + 0.03), o.hh / 2, t / 2 - 0.02, 0.07, o.hh, 0.1, frameM);
+        const dm = rnd() < 0.5 ? TMAT.doorWood : TMAT.doorMetal;
+        if (enter) fbox(f, o.at - o.w / 2 + 0.05, 1.03, -t / 2 - 0.45, 0.05, 2.04, 0.9, dm);   // 안으로 열린 문짝(벽에 수직) — fbox 는 len/th 가 벽 좌표라 len=두께
+        else { fbox(f, o.at, 1.03, 0, o.w - 0.04, 2.06, 0.06, dm, true); fbox(f, o.at + o.w * 0.34, 1.0, 0.06, 0.04, 0.25, 0.05, TMAT.aluSilver); }
+        fbox(f, o.at, 2.42, t / 2 + 0.46, 1.7, 0.08, 0.92, trim);                    // 현관 차양
+        fbox(f, o.at, 0.08, t / 2 + 0.55, 1.6, 0.16, 1.1, 'concrete', true);          // 현관 디딤
+        fbox(f, o.at + (o.w / 2 + 0.25), 2.05, t / 2 + 0.05, 0.12, 0.16, 0.08, TMAT.lampGlow); // 현관등
+      } else windowAt(f, 0, o, enter && o.kind !== 'small');
+    }
+    // 기초 밴드(문 구간 제외) + 층 띠
+    const door = ops.find((o) => o.kind === 'door');
+    const spans = door ? [[-f.len / 2, door.at - door.w / 2], [door.at + door.w / 2, f.len / 2]] : [[-f.len / 2, f.len / 2]];
+    for (const [a, b] of spans) if (b - a > 0.05) fbox(f, (a + b) / 2, 0.19, 0.03, b - a + (a === -f.len / 2 ? 0.06 : 0) + (b === f.len / 2 ? 0.06 : 0), 0.38, t, 'concreteDark');
+    if (floors === 2) fbox(f, 0, H1 + 0.02, t / 2 + 0.03, f.len + 0.06, 0.14, 0.06, trim);
+  }
+  // ── 2층 ──
+  if (floors === 2) for (const f of faces) {
+    const ops = ops2[f.key].filter((o) => Math.abs(o.at) + o.w / 2 < f.len / 2 - 0.25);
+    wall(f, H1, H2, ops, false);
+    for (const o of ops) windowAt(f, H1, o, false);
+  }
+  // 실내 없는 집: 1층 창 배킹이 없으면 속이 보이므로 1층 천장(=막음)만. 진입 집은 실내 구성
+  const [hx, hz] = F.pos(u0, v0);
+  if (enter) {
+    F.box(B, u0, 0.02, v0, hw - t, 0.04, hd - t, 'woodfloor');
+    F.box(B, u0, H1 - 0.04, v0, hw - t, 0.08, hd - t, TMAT.ceiling);
+    const pv = v0 - hd * 0.12;                                          // 칸막이(가운데 문 1.0)
+    for (const [a, b] of [[-hw / 2 + t / 2, -0.5], [0.5, hw / 2 - t / 2]]) F.box(B, u0 + (a + b) / 2, H1 / 2, pv, b - a, H1, 0.12, 'plasterWhite', true);
+    F.box(B, u0, H1 - 0.35, pv, 1.0, 0.7, 0.12, 'plasterWhite');
+    F.box(B, u0 - side * hw * 0.18, 0.37, v0 + hd * 0.2, 1.3, 0.05, 0.8, TMAT.doorWood, true);   // 탁자(상판·다리)
+    for (const [du, dv] of [[-0.55, -0.32], [0.55, -0.32], [-0.55, 0.32], [0.55, 0.32]]) F.box(B, u0 - side * hw * 0.18 + du, 0.18, v0 + hd * 0.2 + dv, 0.05, 0.36, 0.05, TMAT.doorWood);
+    F.box(B, u0 + side * hw * 0.2, 0.22, v0 + hd * 0.3, 1.9, 0.44, 0.8, pick(TMAT.curtain), true); // 소파
+    F.box(B, u0 + side * hw * 0.2, 0.62, v0 + hd * 0.3 - 0.32, 1.9, 0.46, 0.18, pick(TMAT.curtain));
+    F.box(B, u0 - hw / 2 + 0.45, 0.9, v0 - hd / 2 + 0.9, 0.55, 1.8, 1.4, TMAT.doorWood, true);    // 책장·찬장
+    F.box(B, u0 + hw * 0.1, 0.45, v0 - hd / 2 + 0.45, 2.2, 0.9, 0.6, TMAT.trimWhite, true);       // 싱크대
+    const [lx, lz] = F.pos(u0, v0 + hd * 0.15);
+    TOWN_LOOT.push([lx, lz]);
+    if (townLights < 8) { const L = new THREE.PointLight(0xffdcae, 5, Math.max(hw, hd) * 1.2, 2); L.position.set(lx, H1 - 0.4, lz); scene.add(L); townLights++; }
+  } else if (floors === 2) F.box(B, u0, H1, v0, hw - t, 0.1, hd - t, TMAT.interior);
+  // ── 발코니 ──
+  if (balcony) {
+    const fr = faces[0], by = H1, dep = 0.95, bal = rnd() < 0.55;          // bal: 벽형 난간(외벽재) / 알루 난간
+    fbox(fr, bAt, by - 0.06, t / 2 + dep / 2, bw, 0.14, dep, trim);
+    if (bal) { fbox(fr, bAt, by + 0.5, t / 2 + dep - 0.05, bw, 1.0, 0.1, wm); for (const sx of [-1, 1]) fbox(fr, bAt + sx * (bw / 2 - 0.05), by + 0.5, t / 2 + dep / 2, 0.1, 1.0, dep, wm); fbox(fr, bAt, by + 1.02, t / 2 + dep - 0.05, bw + 0.04, 0.05, 0.14, frameM); }
+    else { for (let i = 0; i <= Math.round(bw / 0.12); i++) fbox(fr, bAt - bw / 2 + i * bw / Math.round(bw / 0.12), by + 0.5, t / 2 + dep - 0.04, 0.025, 0.96, 0.025, frameM); fbox(fr, bAt, by + 0.99, t / 2 + dep - 0.04, bw, 0.05, 0.06, frameM); for (const sx of [-1, 1]) fbox(fr, bAt + sx * bw / 2, by + 0.5, t / 2 + dep / 2, 0.05, 1.0, dep, frameM); }
+    if (rnd() < 0.75) { // 빨래 건조대 + 빨래
+      fbox(fr, bAt, by + 1.62, t / 2 + dep * 0.55, bw - 0.3, 0.035, 0.035, TMAT.aluSilver);
+      for (const sx of [-1, 1]) fbox(fr, bAt + sx * (bw / 2 - 0.2), by + 1.7, t / 2 + dep * 0.28, 0.03, 0.03, dep * 0.55, TMAT.aluSilver);
+      let a = bAt - bw / 2 + 0.35; while (a < bAt + bw / 2 - 0.5) { const cw = 0.35 + rnd() * 0.3, ch = 0.45 + rnd() * 0.35; fbox(fr, a + cw / 2, by + 1.6 - ch / 2, t / 2 + dep * 0.55, cw, ch, 0.02, pick(TMAT.fabric)); a += cw + 0.08 + rnd() * 0.2; }
+    }
+    if (bal && rnd() < 0.35) { const fw = bw * 0.42, fc = pick(TMAT.fabric); fbox(fr, bAt + (rnd() - 0.5) * 0.6, by + 0.78, t / 2 + dep + 0.03, fw, 0.62, 0.05, fc); fbox(fr, bAt + (rnd() - 0.5) * 0.3, by + 0.9, t / 2 + dep - 0.14, fw, 0.4, 0.05, fc); } // 이불 널기
+    const [ax, az] = fpos(fr, bAt + side * (bw / 2 - 0.55), t / 2 + 0.35); TOWN_PROPS.push(['acUnit', ax, by + 0.02, az, { rotY: fyaw(fr), height: 0.62, keep: /^exterior_aircon_unit$/ }]);
+  }
+  // ── 지붕 ──
+  const e = 0.5, e2 = 0.36, p = 0.38 + rnd() * 0.14, tp = Math.tan(p), yT = H;
+  const gutter = (a0, a1, b, y, alongU) => { if (alongU) F.seg(B, a0, y, b, a1, y, b, 0.055, TMAT.trimDark); else F.seg(B, b, y, a0, b, y, a1, 0.055, TMAT.trimDark); };
+  const pipe = (u, v, y) => F.seg(B, u, y, v, u, 0.1, v, 0.04, TMAT.trimDark);
+  if (roof === 'gableU' || roof === 'gableV') {
+    const along = roof === 'gableU', A = along ? hw : hd, S = along ? hd : hw, rise = (S / 2) * tp;
+    const Ls = (S / 2 + e) / Math.cos(p), yc0 = yT + rise - ((S / 2 + e) / 2) * tp + 0.07 / Math.cos(p);
+    for (const s of [-1, 1]) {
+      const bOff = s * (S / 2 + e) / 2;
+      if (along) F.boxR(B, u0, yc0, v0 + bOff, A + 2 * e2, 0.14, Ls, rm, s > 0 ? p : -p, 0);
+      else F.boxR(B, u0 + bOff, yc0, v0, Ls, 0.14, A + 2 * e2, rm, 0, s > 0 ? -p : p);
+      for (const q of [-1, 1]) { // 박공 끝 판(破風)
+        if (along) F.boxR(B, u0 + q * (A / 2 + e2 + 0.02), yc0 - 0.03, v0 + bOff, 0.05, 0.26, Ls + 0.04, trim, s > 0 ? p : -p, 0);
+        else F.boxR(B, u0 + bOff, yc0 - 0.03, v0 + q * (A / 2 + e2 + 0.02), Ls + 0.04, 0.26, 0.05, trim, 0, s > 0 ? -p : p);
+      }
+      const ye = yT - e * tp - 0.04, bE = s * (S / 2 + e);                   // 처마 물받이
+      if (along) { gutter(u0 - A / 2 - e2, u0 + A / 2 + e2, v0 + bE, ye, true); pipe(u0 + side * (A / 2 - 0.2), v0 + s * (S / 2 + 0.12), ye); }
+      else { gutter(v0 - A / 2 - e2, v0 + A / 2 + e2, u0 + bE, ye, false); pipe(u0 + s * (S / 2 + 0.12), v0 + (A / 2 - 0.2), ye); }
+    }
+    for (const q of [-1, 1]) { // 박공벽(삼각)
+      const g = gableGeo(S, rise, t);
+      if (along) { g.rotateY(-Math.PI / 2); F.geo(B, g, u0 + q * hw / 2, yT, v0, wm); } else F.geo(B, g, u0, yT, v0 + q * hd / 2, wm);
+      if (rnd() < 0.5) { if (along) F.box(B, u0 + q * (hw / 2 + 0.11), yT + rise * 0.42, v0, 0.04, 0.34, 0.5, trim); else F.box(B, u0, yT + rise * 0.42, v0 + q * (hd / 2 + 0.11), 0.5, 0.34, 0.04, trim); } // 환기구
+    }
+    if (along) F.box(B, u0, yT + rise + 0.12, v0, A + 2 * e2 + 0.06, 0.16, 0.32, TMAT.ridge); else F.box(B, u0, yT + rise + 0.12, v0, 0.32, 0.16, A + 2 * e2 + 0.06, TMAT.ridge);
+    if (rnd() < 0.2) { // 태양광 패널(앞 경사면)
+      const pw = Math.min(A - 0.6, 4), pl = S / 2 * 0.7, pOff = (S / 2) * 0.45;
+      if (along) F.boxR(B, u0, yT + rise - pOff * tp + 0.2, v0 + pOff, pw, 0.05, pl / Math.cos(p), TMAT.blue, p, 0);
+    }
+  } else if (roof === 'hip') {
+    const { g, rise } = hipRoofGeo(hw / 2 + e, hd / 2 + e, p);
+    F.geo(B, g, u0, yT - e * tp + 0.05, v0, rm);
+    F.box(B, u0, yT - e * tp - 0.02, v0, hw + 2 * e, 0.06, hd + 2 * e, trim);              // 처마 반자
+    F.box(B, u0, yT + rise - e * tp + 0.12, v0, Math.max(0.3, hw - hd) + 0.2, 0.14, 0.3, TMAT.ridge);
+    const ye = yT - e * tp - 0.05;
+    for (const s of [-1, 1]) { gutter(u0 - hw / 2 - e, u0 + hw / 2 + e, v0 + s * (hd / 2 + e), ye, true); }
+    pipe(u0 + side * (hw / 2 + 0.12), v0 + hd / 2 + 0.12, ye);
+  } else { // 평지붕(모던): 슬래브 + 파라펫 + 코핑 + 옥상 물탱크/실외기
+    F.box(B, u0, yT + 0.1, v0, hw + 0.1, 0.2, hd + 0.1, 'concrete');
+    for (const f of faces) { fbox(f, 0, yT + 0.35, 0, f.len + (f.ax === 'u' ? 0 : 0), 0.5, t, wm); fbox(f, 0, yT + 0.62, 0.02, f.len + 0.08, 0.05, t + 0.08, TMAT.aluSilver); }
+    const [tx, tz] = F.pos(u0 - hw * 0.2, v0 - hd * 0.15); B.cyl(tx, yT + 0.75, tz, 0.45, 0.45, 1.1, TMAT.white, 12);
+    pipe(u0 + side * (hw / 2 + 0.1), v0 + hd / 2 + 0.1, yT + 0.3);
+  }
+  // ── 측면 설비: 실외기(지면) · 급탕기 · 계량기 ──
+  const sf = faces[side > 0 ? 3 : 2]; // 집이 붙은 쪽(담 쪽) 측벽 — 좁은 틈에 설비
+  {
+    const [ax, az] = fpos(sf, -hd * 0.1, t / 2 + 0.3); TOWN_PROPS.push(['acUnit', ax, 0, az, { rotY: fyaw(sf), height: 0.62, keep: /^exterior_aircon_unit$/ }]);
+    fbox(sf, hd * 0.25, 0.9, t / 2 + 0.3, 0.7, 1.8, 0.55, TMAT.white);           // 급탕기
+    fbox(sf, hd * 0.25, 1.83, t / 2 + 0.3, 0.72, 0.06, 0.57, TMAT.aluSilver);
+    fbox(sf, -hd * 0.32, 1.5, t / 2 + 0.07, 0.3, 0.4, 0.14, TMAT.aluSilver);       // 가스 계량기
+  }
+  return { u0, v0, hw, hd, side, doorAt, F };
+}
+
+// 대지(외구): 담·대문·카포트·정원. lot.walls: {front:'block'|'hedge'|'fence', left, right, back}
+function buildTownLot(B, lot) {
+  const { cx, cz, W: LW, D: LD, face, seed } = lot, rnd = mulberry32(seed * 3 + 7), F = lotFrame(cx, cz, face), pick = (a) => a[Math.floor(rnd() * a.length)];
+  if (lot.vacant) return buildVacantLot(B, lot, F, rnd);
+  const h = buildTownHouse(B, lot);
+  const style = lot.frontStyle || (rnd() < 0.55 ? 'block' : rnd() < 0.6 ? 'hedge' : 'fence');
+  const fv = LD / 2 - 0.1, gateU = h.u0 + h.doorAt, carSide = -h.side, carU = carSide * (LW / 2 - 1.8);
+  const gaps = [[gateU - 0.65, gateU + 0.65], [carU - 1.5, carU + 1.5]].sort((a, b) => a[0] - b[0]);
+  const wallRun = (a0, a1, v, alongU, kind, hgt = 1.2) => { // 담 한 줄 (로컬 u 또는 v 방향)
+    const len = a1 - a0; if (len < 0.1) return; const mid = (a0 + a1) / 2;
+    const put = (y, hh, th, m, col) => { if (alongU) F.box(B, mid, y, v, len, hh, th, m, col); else F.box(B, v, y, mid, th, hh, len, m, col); };
+    if (kind === 'hedge') { put(0.1, 0.2, 0.3, 'blockwall', true); put(0.2 + 0.6, 1.2, 0.62, 'hedge', true); }
+    else if (kind === 'fence') { put(0.3, 0.6, 0.15, 'blockwall', true); put(0.63, 0.06, 0.2, 'concrete'); put(1.0, 0.7, 0.05, TMAT.alu, true); for (let s = a0 + 0.1; s < a1; s += 0.14) { if (alongU) F.box(B, s, 1.0, v, 0.03, 0.66, 0.06, TMAT.alu); else F.box(B, v, 1.0, s, 0.06, 0.66, 0.03, TMAT.alu); } put(1.36, 0.04, 0.08, TMAT.alu); }
+    else { put(hgt / 2, hgt, 0.15, 'blockwall', true); put(hgt + 0.03, 0.06, 0.2, 'concrete'); }
+  };
+  // 앞담: 대문·카포트 개구부로 분절
+  let prev = -LW / 2;
+  for (const [a, b] of gaps) { wallRun(prev, Math.max(prev, a), fv, true, style); prev = Math.max(prev, b); }
+  wallRun(prev, LW / 2, fv, true, style);
+  for (const s of [gateU - 0.8, gateU + 0.8]) { F.box(B, s, 0.68, fv, 0.32, 1.36, 0.32, style === 'hedge' ? 'blockwall' : pick(['blockwall', 'brickCity', 'concrete']), true); F.box(B, s, 1.39, fv, 0.36, 0.06, 0.36, 'concrete'); } // 대문 기둥
+  F.box(B, gateU - 0.8, 1.05, fv + 0.17, 0.22, 0.08, 0.02, TMAT.trimDark);                      // 문패
+  F.box(B, gateU + 0.8, 0.95, fv + 0.19, 0.3, 0.32, 0.1, pick([TMAT.red, TMAT.aluSilver, TMAT.trimDark, TMAT.green])); // 우편함
+  F.box(B, gateU + 0.8, 1.2, fv + 0.17, 0.1, 0.16, 0.04, TMAT.aluSilver);                       // 인터폰
+  F.box(B, gateU - 0.45, 0.6, fv - 0.5, 0.04, 1.1, 0.6, TMAT.alu);                               // 열린 대문짝(안쪽으로 젖힘)
+  // 측·후면 담 (공유 경계는 한 번만)
+  if (lot.left) wallRun(-LD / 2, LD / 2 - 0.1, -LW / 2 + 0.08, false, 'block');
+  if (lot.right) wallRun(-LD / 2, LD / 2 - 0.1, LW / 2 - 0.08, false, 'block');
+  if (lot.back) wallRun(-LW / 2, LW / 2, -LD / 2 + 0.08, true, rnd() < 0.3 ? 'fence' : 'block', 1.5);
+  // 어프로치(현관까지 판석) + 카포트
+  const doorV = h.v0 + h.hd / 2;
+  for (let v = doorV + 1.15; v < fv - 0.2; v += 0.62) F.box(B, gateU + (rnd() - 0.5) * 0.08, 0.025, v, 0.55, 0.05, 0.48, 'paving');
+  const cpD = Math.min(5.4, LD - 1.4), cpV = fv - cpD / 2 - 0.1;
+  F.box(B, carU, 0.03, cpV, 2.9, 0.06, cpD, 'concrete');
+  if (rnd() < 0.55) { // 카포트 지붕(폴리카보네이트)
+    for (const dv of [-cpD / 2 + 0.3, cpD / 2 - 0.3]) F.box(B, carU - carSide * 1.4, 1.2, cpV + dv, 0.09, 2.4, 0.09, TMAT.aluSilver, true);
+    F.boxR(B, carU, 2.45, cpV, 3.1, 0.04, cpD + 0.2, TMAT.polycarb, 0, carSide * 0.05);
+    F.box(B, carU - carSide * 1.45, 2.42, cpV, 0.08, 0.1, cpD + 0.2, TMAT.aluSilver);
+  }
+  const [px, pz] = F.pos(carU, cpV);
+  if (rnd() < 0.35) TOWN_PROPS.push(['@car', px, 0, pz, { rotY: F.yaw(rnd() < 0.5 ? 0 : Math.PI) }]);
+  else if (rnd() < 0.7) townBike(B, ...F.pos(carU + carSide * 0.6, fv - 1.2), F.yaw(Math.PI / 2 + (rnd() - 0.5) * 0.3), seed);
+  // 정원: 흙 + 풀 카드 + 작은 나무/벚나무 + 화분
+  const gU = h.side * (LW / 2 - 1.6), gTop = doorV + 0.6;
+  if (fv - gTop > 1.4) {
+    const [gx, gz] = F.pos(h.u0 + h.side * 0.8, (gTop + fv) / 2);
+    const gw = Math.min(h.hw - 1, 4), gd = fv - gTop - 0.3;
+    F.box(B, h.u0 + h.side * 0.8, 0.02, (gTop + fv) / 2, gw, 0.04, gd, 'gardenSoil');
+    lot.garden = { x: gx, z: gz, w: gw, d: gd };
+  }
+  for (let i = 0; i < 3 + Math.floor(rnd() * 3); i++) { // 화분(현관 앞)
+    const [x, z] = F.pos(gateU + (i - 1.5) * 0.36 + (rnd() - 0.5) * 0.1, doorV + 0.85 + rnd() * 0.3), r = 0.12 + rnd() * 0.08;
+    B.cyl(x, r * 0.9, z, r, r * 0.75, r * 1.8, rnd() < 0.6 ? TMAT.terracotta : TMAT.trimDark, 10);
+    lot.pots = lot.pots || []; lot.pots.push([x, z, r * 1.8]);
+  }
+  return h;
+}
+function buildVacantLot(B, lot, F, rnd) { // 空き地: 잡초 흙 + 로프 울타리 + 방치 타이어·봉투 / 텃밭
+  const { W: LW, D: LD } = lot;
+  F.box(B, 0, 0.015, 0, LW - 0.4, 0.03, LD - 0.4, 'gardenSoil');
+  lot.weeds = true;
+  const fv = LD / 2 - 0.2;
+  for (let u = -LW / 2 + 0.4; u <= LW / 2 - 0.3; u += 2.2) { F.box(B, u, 0.45, fv, 0.08, 0.9, 0.08, TMAT.trimWhite, true); }
+  F.seg(B, -LW / 2 + 0.4, 0.8, fv, LW / 2 - 0.4, 0.75, fv, 0.012, TMAT.yellow);
+  F.seg(B, -LW / 2 + 0.4, 0.45, fv, LW / 2 - 0.4, 0.42, fv, 0.012, TMAT.yellow);
+  if (rnd() < 0.5) for (let i = 0; i < 4; i++) F.box(B, (i - 1.5) * 1.6, 0.12, -1 + (rnd() - 0.5), 1.1, 0.24, LD * 0.5, 'gardenSoil'); // 텃밭 이랑
+  const [x, z] = F.pos((rnd() - 0.5) * LW * 0.5, (rnd() - 0.5) * LD * 0.4);
+  TOWN_PROPS.push(['tyre', x, 0, z, { rotY: rnd() * 6 }]);
+}
+function townBike(B, x, z, yaw, seed) { // 절차 자전거(마마차리): 바퀴 2 + 프레임 + 안장 + 바구니. 콜라이더 없음
+  const rnd = mulberry32(seed + 91), col = [TMAT.aluSilver, TMAT.red, TMAT.blue, TMAT.white, TMAT.trimDark][Math.floor(rnd() * 5)];
+  const c = Math.cos(yaw), s = Math.sin(yaw), P = (a, y) => _tv(x + a * s, y, z + a * c);
+  for (const a of [-0.55, 0.55]) { const g = new THREE.TorusGeometry(0.31, 0.022, 6, 18); g.rotateY(yaw + Math.PI / 2); const p = P(a, 0.33); g.translate(p.x, p.y, p.z); B.geo(x, z, TMAT.rubber, g); }
+  for (const [a0, y0, a1, y1] of [[-0.55, 0.33, -0.05, 0.36], [-0.05, 0.36, 0.42, 0.78], [-0.05, 0.36, -0.2, 0.8], [0.55, 0.33, 0.42, 0.9], [-0.55, 0.33, -0.2, 0.8]]) B.seg(P(a0, y0), P(a1, y1), 0.018, col);
+  { const p = P(-0.22, 0.86); B.box(p.x, p.y, p.z, 0.12, 0.05, 0.12, TMAT.trimDark); }
+  { const p = P(0.62, 0.86); B.boxR(p.x, p.y, p.z, 0.34, 0.24, 0.3, TMAT.aluSilver, 0, yaw, 0); }
+}
+
+// ── 개천 (#319): 트렌치 바닥(젖은 자갈) + 석축 벽(이끼 띠·물빼기 구멍) + 코핑 + 녹색 난간 + 수면(노멀 흐름) + 꽃잎 뗏목 + 다리 + 계단 호안 ──
+function buildTownCanal(B) {
+  const C = TOWN.canal, L = WORLD_HALF, rnd = mulberry32(3191);
+  const zc = (C.z0 + C.z1) / 2, cw = C.z1 - C.z0;
+  B.box(0, C.bed - 0.1, zc, L * 2, 0.2, cw, 'gravelWet');
+  // 벽 구간: 다리·계단 참 제외
+  const gapsFor = (side) => {
+    const g = TOWN.bridges.map(([a, b]) => [a, b]);
+    for (const r of TOWN.ramps) if (r.side === side) g.push([r.x0 - TOWN.landing, r.x0]);
+    return g.sort((a, b) => a[0] - b[0]);
+  };
+  for (const side of [-1, 1]) {
+    const zi = side < 0 ? C.z0 : C.z1, zw = zi + side * 0.3, zOut = zi + side * 0.6; // 벽 중심(0.6 두께, 수로 바깥쪽)
+    let prev = -L;
+    const run = (a, b) => {
+      if (b - a < 0.2) return; const m = (a + b) / 2, len = b - a;
+      B.box(m, (C.bed - 0.2 + 0.35) / 2, zw, len, 0.35 - C.bed + 0.2, 0.6, 'canalStone');
+      colliders.push(axisCollider(a, b, C.bed - 0.3, 1.1, Math.min(zi, zOut), Math.max(zi, zOut)));
+      B.box(m, 0.41, zw, len, 0.12, 0.74, 'concrete');                                            // 코핑
+      B.box(m, C.bed + 0.3, zi - side * 0.012, len, 0.62, 0.02, TMAT.moss);                        // 수위 이끼 띠
+      for (let x = a + 1.5; x < b - 0.5; x += 3.2) B.box(x, -0.9, zi - side * 0.012, 0.1, 0.1, 0.02, TMAT.interior); // 물빼기 구멍
+      for (let x = a + 0.3; x <= b - 0.2; x += 1.9) B.box(x, 0.8, zw - side * 0.05, 0.05, 0.68, 0.05, TMAT.rail); // 난간 기둥
+      for (const y of [0.78, 1.12]) B.box(m, y, zw - side * 0.05, len - 0.2, 0.045, 0.045, TMAT.rail);
+    };
+    for (const [a, b] of gapsFor(side)) { run(prev, a); prev = Math.max(prev, b); }
+    run(prev, L);
+  }
+  // 계단 호안 (램프): 계단 블록 + 안쪽 난간(콜라이더) — 지형은 townTerrain 이 매끈한 경사로 처리
+  for (const r of TOWN.ramps) {
+    const zin = r.side < 0 ? C.z0 : C.z1, zr = zin - r.side * TOWN.rampW / 2, zEdge = zin - r.side * TOWN.rampW;
+    B.box(r.x0 - TOWN.landing / 2, (C.bed - 0.2) / 2, zr, TOWN.landing, -C.bed + 0.2 - 0.0, TOWN.rampW, 'concrete');
+    const N = 10;
+    for (let i = 0; i < N; i++) {
+      const top = C.bed * (i + 0.5) / N + 0.02, x = r.x0 + TOWN.rampLen * (i + 0.5) / N;
+      B.box(x, (top + C.bed - 0.2) / 2, zr, TOWN.rampLen / N + 0.01, top - C.bed + 0.2, TOWN.rampW, 'concrete');
+    }
+    const xa = r.x0 - TOWN.landing, xb = r.x0 + TOWN.rampLen - 1.0;
+    colliders.push(axisCollider(xa, xb, C.bed - 0.3, 1.0, Math.min(zEdge, zEdge - r.side * 0.12), Math.max(zEdge, zEdge - r.side * 0.12)));
+    const hy = (x) => (x <= r.x0 ? 0 : C.bed * Math.min(1, (x - r.x0) / TOWN.rampLen)) + 0.95;
+    for (let x = xa + 0.1; x <= xb; x += 1.2) B.box(x, hy(x) - 0.47, zEdge, 0.05, 0.95, 0.05, TMAT.rail);
+    B.seg(_tv(xa, hy(xa), zEdge), _tv(r.x0, hy(r.x0), zEdge), 0.025, TMAT.rail);
+    B.seg(_tv(r.x0, hy(r.x0), zEdge), _tv(xb, hy(xb), zEdge), 0.025, TMAT.rail);
+  }
+  // 다리: 도로교(콘크리트 상판 + 아스팔트 + 난간 파라펫) / 보행교(목재 데크 + 철 난간). 다리 밑 = 수문 격자(콜라이더)
+  for (const [a, b] of TOWN.roadBridges) {
+    const m = (a + b) / 2, w = b - a;
+    B.box(m, -0.25, zc, w, 0.5, cw + 1.4, 'concrete');
+    B.box(m, 0.0175, zc, w - 0.8, 0.035, cw + 1.4, 'asphaltTown');
+    for (const x of [a + 0.2, b - 0.2]) {
+      B.box(x, 0.45, zc, 0.35, 0.9, cw + 1.6, 'concrete', true);
+      B.box(x, 0.93, zc, 0.42, 0.06, cw + 1.7, 'concrete');
+      B.box(x, 0.2, zc, 0.36, 0.04, cw + 1.62, TMAT.moss);
+    }
+    B.box(m, -0.58, zc, w - 0.3, 0.16, 0.5, 'concreteStain');                                   // 거더
+  }
+  for (const [a, b] of TOWN.footBridges) {
+    const m = (a + b) / 2, w = b - a;
+    B.box(m, -0.12, zc, w, 0.24, cw + 1.4, TMAT.shrineWood);
+    for (let z = C.z0 - 0.6; z < C.z1 + 0.7; z += 0.22) B.box(m, 0.005, z, w - 0.1, 0.012, 0.18, 'woodfloor');
+    for (const x of [a + 0.06, b - 0.06]) {
+      colliders.push(axisCollider(x - 0.06, x + 0.06, -0.2, 1.1, C.z0 - 0.7, C.z1 + 0.7));
+      for (let z = C.z0 - 0.6; z <= C.z1 + 0.65; z += 1.1) B.box(x, 0.52, z, 0.05, 1.05, 0.05, TMAT.rail);
+      B.box(x, 1.05, zc, 0.07, 0.05, cw + 1.4, TMAT.rail); B.box(x, 0.55, zc, 0.03, 0.03, cw + 1.4, TMAT.rail);
+    }
+  }
+  for (const [a, b] of TOWN.bridges) for (const x of [a, b]) { // 수문 격자
+    colliders.push(axisCollider(x - 0.1, x + 0.1, C.bed - 0.3, -0.4, C.z0, C.z1));
+    const g = metricPlane(cw, 1.55); g.rotateY(Math.PI / 2); g.translate(x, C.bed + 0.78, zc); B.geo(x, zc, TMAT.chain, g);
+    B.box(x, -0.42, zc, 0.1, 0.1, cw, TMAT.rail);
+  }
+  // 수면: 흐르는 노멀 + 꽃잎 뗏목 (배치 밖 개별 메시)
+  const wn = GROUND_TEX.water_nrm ? GROUND_TEX.water_nrm.clone() : null;
+  if (wn) { wn.needsUpdate = true; wn.wrapS = wn.wrapT = THREE.RepeatWrapping; wn.repeat.set(L * 2 / 7, cw / 7); wn.colorSpace = THREE.NoColorSpace; }
+  const waterMat = new THREE.MeshStandardMaterial({ color: 0x344f4a, roughness: 0.05, metalness: 0.0, transparent: true, opacity: 0.86, normalMap: wn, normalScale: new THREE.Vector2(0.35, 0.35), envMapIntensity: 1.5 });
+  const water = new THREE.Mesh(new THREE.PlaneGeometry(L * 2, cw), waterMat); water.rotation.x = -Math.PI / 2; water.position.set(0, C.water, zc); water.receiveShadow = true; scene.add(water);
+  const pt = (CANOPY_TEX.sakura_raft || CANOPY_TEX.sakura_ground) ? (CANOPY_TEX.sakura_raft || CANOPY_TEX.sakura_ground).clone() : null;
+  if (pt) { pt.needsUpdate = true; pt.wrapS = pt.wrapT = THREE.RepeatWrapping; pt.repeat.set(L * 2 / 2.2, cw / 2.2); }
+  const raftMat = new THREE.MeshStandardMaterial({ map: pt, transparent: true, alphaTest: 0.3, depthWrite: false, roughness: 0.8, alphaMap: null });
+  const raft = new THREE.Mesh(new THREE.PlaneGeometry(L * 2, cw - 0.1), raftMat); raft.rotation.x = -Math.PI / 2; raft.position.set(0, C.water + 0.006, zc); raft.receiveShadow = true; scene.add(raft);
+  return { water: wn, raft: pt };
+}
+
+// ── 도로·골목·산책로·측구·노면 표시 ──
+function buildTownStreets(B) {
+  const L = WORLD_HALF, rnd = mulberry32(3192), C = TOWN.canal;
+  // 바닥: 개천 남·북 두 판(흙·자갈) — 지형 타일 대신 평면(동네는 평탄)
+  const src = GROUND_TEX.gravel || GROUND_TEX.ground;
+  if (src) {
+    const tex = src.clone(); tex.needsUpdate = true; tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    const gm = new THREE.MeshStandardMaterial({ map: tex, color: 0xa29a8c, roughness: 1 });
+    for (const [z0, z1] of [[-L - 12, C.z0 - 0.6], [C.z1 + 0.6, L + 12]]) {
+      const g = new THREE.PlaneGeometry(L * 2 + 24, z1 - z0); g.rotateX(-Math.PI / 2);
+      const uv = g.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * (L * 2 + 24) / 4, uv.getY(i) * (z1 - z0) / 4);
+      const m = new THREE.Mesh(g, gm); m.position.set(0, 0, (z0 + z1) / 2); m.receiveShadow = true; m.userData.terrainTile = true; scene.add(m); obstacleMeshes.push(m);
+    }
+  }
+  const skipCanal = (z0, z1) => [[z0, C.z0 - 0.6], [C.z1 + 0.6, z1]].filter(([a, b]) => b - a > 0.1);
+  for (const [z0, z1] of TOWN.roadsEW) B.box(0, 0.015, (z0 + z1) / 2, L * 2, 0.03, z1 - z0, 'asphaltTown');
+  for (const [x0, x1] of TOWN.roadsNS) for (const [a, b] of skipCanal(-L, L)) B.box((x0 + x1) / 2, 0.0175, (a + b) / 2, x1 - x0, 0.035, b - a, 'asphaltTown');
+  for (const [z0, z1] of TOWN.alleys) for (const [bx0, bx1] of TOWN.blocksX) {
+    if (z0 < 0 && bx0 === -41.5) continue; if (z0 < 0 && bx0 === 46.5) continue; // 공원·신사 블록 관통 안 함
+    B.box((bx0 + bx1) / 2, 0.012, (z0 + z1) / 2, bx1 - bx0 + 0.2, 0.024, z1 - z0, 'concrete');
+  }
+  // 산책로(개천 양안) — 포장
+  B.box(0, 0.02, (-4.5 + C.z0 - 0.6) / 2, L * 2, 0.04, C.z0 - 0.6 + 4.5, 'paving');
+  B.box(0, 0.02, (C.z1 + 0.6 + 12) / 2, L * 2, 0.04, 12 - C.z1 - 0.6, 'paving');
+  // 백선(가장자리 실선) + 중앙 점선(x=0 간선) + 측구(뚜껑 콘크리트·격자)
+  const nsCut = (x) => TOWN.roadsNS.some(([a, b]) => x > a - 1.2 && x < b + 1.2);
+  for (const [z0, z1] of TOWN.roadsEW) for (const z of [z0 + 0.35, z1 - 0.35]) {
+    for (let x = -L; x < L; x += 3) { if (nsCut(x + 1.5)) continue; B.box(x + 1.5, 0.036, z, 3, 0.01, 0.14, TMAT.whiteLine); }
+  }
+  for (const [x0, x1] of TOWN.roadsNS) for (const x of [x0 + 0.35, x1 - 0.35]) for (const [a, b] of skipCanal(-L, L)) {
+    for (let z = a; z < b - 0.1; z += 3) { if (TOWN.roadsEW.some(([p, q]) => z + 1.5 > p - 1.2 && z + 1.5 < q + 1.2)) continue; B.box(x, 0.041, z + 1.5, 0.14, 0.01, 3, TMAT.whiteLine); }
+  }
+  for (const [a, b] of skipCanal(-L, L)) for (let z = a + 1; z < b - 3; z += 6) { if (TOWN.roadsEW.some(([p, q]) => z + 1.5 > p - 2 && z + 1.5 < q + 2)) continue; B.box(0, 0.041, z + 1.5, 0.12, 0.01, 3, TMAT.whiteLine); }
+  for (const [z0, z1] of TOWN.roadsEW) for (const [z, s] of [[z0 - 0.2, -1], [z1 + 0.2, 1]]) {   // 측구: 도로 바깥 0.4m
+    for (const [bx0, bx1] of TOWN.blocksX) {
+      if (z > -5 && z < 12.5) continue; // 산책로 쪽은 없음
+      B.box((bx0 + bx1) / 2, 0.05, z, bx1 - bx0, 0.1, 0.4, 'concrete');
+      for (let x = bx0 + 2; x < bx1 - 1; x += 6) B.box(x, 0.105, z, 0.5, 0.02, 0.34, TMAT.trimDark);
+    }
+  }
+  // 횡단보도: x=0 간선이 개천변 도로와 만나는 곳 + 공원 앞
+  const zebra = (cx, cz, alongX, n, span) => { for (let i = 0; i < n; i++) { const o = (i - (n - 1) / 2) * 0.9; if (alongX) B.box(cx + o, 0.043, cz, 0.45, 0.01, span, TMAT.whiteLine); else B.box(cx, 0.043, cz + o, span, 0.01, 0.45, TMAT.whiteLine); } };
+  zebra(0, -11.2, true, 6, 2.6); zebra(0, 18.8, true, 6, 2.6); zebra(-22, -40, false, 5, 2.6); zebra(-5, -7, false, 5, 2.6);
+  // 정지선: N-S 소로 → E-W 도로 진입
+  for (const [x0, x1] of TOWN.roadsNS) for (const [z0, z1] of TOWN.roadsEW) for (const [z, s] of [[z0 - 0.6, -1], [z1 + 0.6, 1]]) {
+    if (z > C.z0 - 6 && z < C.z1 + 6) continue;
+    B.box((x0 + x1) / 2 + ((x1 - x0) / 4) * -s, 0.042, z, (x1 - x0) / 2 - 0.3, 0.01, 0.3, TMAT.whiteLine);
+  }
+  for (const [x, z] of [[-5.5, -30], [22, -7.8], [-44, 26], [44, -20], [0, 36], [-22, 48], [60, 14.5], [-70, -40]]) TOWN_PROPS.push(['manhole', x, 0.02, z, { rotY: rnd() * 3 }]);
+}
+
+// ── 전신주 + 처진 전선 + 변압기 + 가로등 (#319) ──
+function buildTownPoles(B) {
+  const lines = [], wires = [], rnd = mulberry32(3193), C = TOWN.canal;
+  const inRoad = (x, z) => TOWN.roadsNS.some(([a, b]) => x > a - 0.3 && x < b + 0.3) || TOWN.roadsEW.some(([a, b]) => z > a - 0.3 && z < b + 0.3);
+  const lineAlongX = (z, x0, x1, step) => { const pts = []; for (let x = x0; x <= x1; x += step) { const xx = x + (rnd() - 0.5) * 3; if (TOWN.roadsNS.some(([a, b]) => xx > a - 2 && xx < b + 2)) continue; pts.push([xx, z, 'x']); } lines.push(pts); };
+  const lineAlongZ = (x, z0, z1, step) => { const pts = []; for (let z = z0; z <= z1; z += step) { const zz = z + (rnd() - 0.5) * 3; if (TOWN.roadsEW.some(([a, b]) => zz > a - 2 && zz < b + 2) || (zz > C.z0 - 6 && zz < C.z1 + 6)) continue; pts.push([x, zz, 'z']); } lines.push(pts); };
+  lineAlongX(-9.2, -82, 82, 25); lineAlongX(16.75, -82, 82, 25); lineAlongX(-42.2, -82, 82, 25); lineAlongX(50.2, -82, 82, 25); // 도로 가장자리(대지 쪽) 안
+  lineAlongZ(2.72, -82, 82, 24); lineAlongZ(-46.2, -82, 82, 24); lineAlongZ(46.2, -82, 82, 24);
+  let k = 0;
+  const heads = [];
+  for (const pts of lines) {
+    const prevH = [];
+    pts.forEach(([x, z, ax], i) => {
+      if (!isPointOpen(x, z, 0.3)) { prevH.push(null); return; }
+      B.cyl(x, 5, z, 0.12, 0.17, 10, TMAT.pole, 10, true);
+      for (let j = 0; j < 4; j++) B.cyl(x, 0.3 + j * 0.4, z, 0.19, 0.19, 0.2, j % 2 ? TMAT.poleBlack : TMAT.poleYellow, 10); // 호랑이 표지
+      const arm = (y, len) => { if (ax === 'x') B.box(x, y, z, 0.09, 0.09, len, TMAT.trimDark); else B.box(x, y, z, len, 0.09, 0.09, TMAT.trimDark); };
+      arm(9.3, 1.7); arm(8.6, 1.3);
+      const off = (o) => (ax === 'x' ? [x, z + o] : [x + o, z]);
+      const hs = [];
+      for (const [y, os] of [[9.42, [-0.7, 0, 0.7]], [8.72, [-0.5, 0.5]]]) for (const o of os) { const [ix, iz] = off(o); B.cyl(ix, y, iz, 0.035, 0.05, 0.14, TMAT.insulator, 6); hs.push([ix, y + 0.07, iz]); }
+      hs.push([off(0.18)[0], 6.6, off(0.18)[1]]); // 통신선(아래)
+      if (k % 3 === 1) { const [tx, tz] = off(-0.42); B.cyl(tx, 7.6, tz, 0.26, 0.26, 0.95, TMAT.transformer, 12); B.cyl(tx, 8.1, tz, 0.28, 0.28, 0.05, TMAT.transformer, 12); }
+      if (k % 2 === 0) { // 방범등(도로 쪽)
+        const [lx, lz] = off(0.9); const [ax1, az1] = off(0.1);
+        B.seg(_tv(ax1, 5.4, az1), _tv(lx, 5.6, lz), 0.03, TMAT.pole);
+        B.box(lx, 5.55, lz, 0.32, 0.1, 0.18, TMAT.lampGlow);
+      }
+      B.box(x, 3.2, z, 0.3, 0.5, 0.03, TMAT.aluSilver); // 번호판
+      prevH.push(hs); heads.push([x, z]); k++;
+    });
+    for (let i = 1; i < prevH.length; i++) { const a = prevH[i - 1], b = prevH[i]; if (!a || !b) continue; for (let j = 0; j < a.length; j++) wires.push([a[j], b[j]]); }
+  }
+  // 전선: 현수선 근사(포물선) → LineSegments 1개
+  const P = [];
+  for (const [a, b] of wires) {
+    const span = Math.hypot(b[0] - a[0], b[2] - a[2]), sag = 0.3 + span * 0.014, N = 10;
+    for (let i = 0; i < N; i++) for (const t of [i / N, (i + 1) / N]) P.push(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t - sag * 4 * t * (1 - t), a[2] + (b[2] - a[2]) * t);
+  }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+  const wl = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x1b1c1e })); scene.add(wl);
+  return heads;
+}
+
+// ── 벚나무 (소메이요시노): 낮게 갈라지는 굵은 줄기 + 수평으로 퍼지는 주지 + 넓은 반구 수관(벚꽃 카드). lean = 수관 치우침(개천 쪽) ──
+function foliageNoFlip(m) { // 양면 재질의 뒷면 노멀 반전 제거 — 폴리지 노멀(바깥 방향)이 뒷면에서 뒤집혀 카드가 검게 보이는 문제 (#319)
+  m.onBeforeCompile = (sh) => { sh.fragmentShader = sh.fragmentShader.replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\n normal *= faceDirection;\n#endif'); };
+  m.customProgramCacheKey = () => 'foliageNoFlip';
+  return m;
+}
+function sphereNormals(g, cx, cy, cz) { // 폴리지 노멀: 정점 노멀 = 수관 중심에서 바깥 방향(+위쪽 가중) — 교차 카드가 구름처럼 매끈히 음영
+  const p = g.attributes.position, n = g.attributes.normal, v = new THREE.Vector3();
+  for (let i = 0; i < p.count; i++) { v.set(p.getX(i) - cx, (p.getY(i) - cy) + 1.2, p.getZ(i) - cz).normalize(); n.setXYZ(i, v.x, v.y, v.z); }
+  n.needsUpdate = true;
+}
+const SAKURA_MAT = {};
+function sakuraMat(key) { // 벚꽃 카드: 텍스처 자체 발광(약) — 얇은 꽃잎의 투과광, 수관 안쪽 그늘이 회보라로 탁해지는 것 방지
+  if (!SAKURA_MAT[key]) { const t = CANOPY_TEX[key]; SAKURA_MAT[key] = foliageNoFlip(new THREE.MeshStandardMaterial({ map: t || null, color: t ? 0xffffff : 0xf0c8d4, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.9, metalness: 0, vertexColors: true, emissive: 0xffffff, emissiveMap: t || null, emissiveIntensity: 0.16 })); }
+  return SAKURA_MAT[key];
+}
+function placeSakura(fb, x, z, h, lx = 0, lz = 0, seed = 1) {
+  const rnd = mulberry32(seed), gy = terrainH(x, z), V = (px, py, pz) => _tv(x + px, gy + py, z + pz), bm = matOf('barkSakura');
+  const put = (g) => fb.put(x, z, 'barkSakura', bm, g);
+  const r0 = 0.11 + h * 0.011, fk = h * (0.28 + rnd() * 0.08), fork = V(lx * 0.4, fk, lz * 0.4);
+  put(barkSeg(V(0, -0.2, 0), fork, r0, r0 * 0.78, 8));
+  const rx = h * (0.58 + rnd() * 0.1), cyy = h * 0.66, ccx = lx * 1.3, ccz = lz * 1.3, cs = [];
+  const nl = 4 + Math.floor(rnd() * 3);
+  for (let i = 0; i < nl; i++) {
+    const a = (i / nl) * Math.PI * 2 + rnd() * 0.7, rr = rx * (0.55 + 0.3 * rnd());
+    const end = V(ccx + Math.cos(a) * rr, cyy + (rnd() - 0.3) * h * 0.12, ccz + Math.sin(a) * rr);
+    const mid = V(lx * 0.4 + Math.cos(a) * rr * 0.45, fk + (cyy - fk) * 0.55, lz * 0.4 + Math.sin(a) * rr * 0.45);
+    put(barkSeg(fork, mid, r0 * 0.62, r0 * 0.4, 6)); put(barkSeg(mid, end, r0 * 0.4, 0.035, 5));
+    cs.push([end.x - x, end.y - gy, end.z - z], [mid.x - x + (rnd() - 0.5), mid.y - gy + h * 0.1, mid.z - z + (rnd() - 0.5)]);
+    if (rnd() < 0.6) { const a2 = a + (rnd() - 0.5) * 1.3, e2 = V(ccx + Math.cos(a2) * rx * 0.95, cyy - h * 0.12, ccz + Math.sin(a2) * rx * 0.95); put(barkSeg(mid, e2, 0.05, 0.02, 5)); cs.push([e2.x - x, e2.y - gy - 0.3, e2.z - z]); }
+  }
+  cs.push([ccx, cyy + h * 0.14, ccz], [ccx + (rnd() - 0.5) * 2, cyy + h * 0.08, ccz + (rnd() - 0.5) * 2]);
+  const kind = rnd() < 0.7 ? 'canopy_sakura' : 'canopy_sakura_b', cm = sakuraMat(kind), tone = 0.95 + rnd() * 0.1;
+  for (const [ox, oy, oz] of cs) { // 클러스터 = 무작위 방향 카드 6장(중심 ±0.35s 흩뿌림) → 근경에서 평면·교차선이 덜 보이고 윤곽이 둥글다
+    const s = h * (0.26 + 0.08 * rnd()), hf = Math.min(1, Math.max(0, (oy - (cyy - h * 0.15)) / (h * 0.35))), c = tone * (0.9 + 0.16 * hf);
+    for (let k = 0; k < 6; k++) {
+      const jx = (rnd() - 0.5) * s * 0.7, jy = (rnd() - 0.4) * s * 0.5, jz = (rnd() - 0.5) * s * 0.7, sz = s * (0.8 + 0.4 * rnd());
+      const g = cardGeo(V(ox + jx, oy + jy, oz + jz), sz, sz * 0.85, rnd() * Math.PI, (rnd() - 0.5) * 2.2, [c, c * 0.98, c * 0.99], rnd() < 0.5);
+      sphereNormals(g, x + ccx, gy + cyy - h * 0.05, z + ccz); // 수관 전체를 한 덩어리로 음영 → 카드 면이 각져 보이지 않음
+      fb.put(x, z, kind, cm, g);
+    }
+  }
+  colliders.push(axisCollider(x - 0.3, x + 0.3, gy, gy + 3.2, z - 0.3, z + 0.3));
+  SAKURA_TREES.push({ x: x + ccx, y: gy + cyy, z: z + ccz, r: rx, decal: h > 6 });
+}
+
+// 낙화 파티클: 카메라 주변 N장 순환. 재스폰은 근처(45m) 벚나무 수관 안(가중) 또는 카메라 주변 상공. 바람 + 흔들림 + 회전.
+function makePetalSystem() {
+  const N = IS_MOBILE ? 450 : 1400;
+  const tex = CANOPY_TEX.petal || null;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, color: tex ? 0xf0dce2 : 0xf6d6df, alphaTest: 0.4, side: THREE.DoubleSide }); // 무광(Basic): 역광 뒷면이 검은 점으로 보이던 문제 — 얇은 꽃잎은 투과광으로 늘 밝다
+  const mesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(0.06, 0.045), mat, N);
+  mesh.frustumCulled = false; mesh.castShadow = false; scene.add(mesh);
+  const P = new Float32Array(N * 3), Vv = new Float32Array(N * 4), R = new Float32Array(N * 6);
+  let near = [], nearT = 0, t = 0;
+  const _m = new THREE.Matrix4(), _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _e = new THREE.Euler(), _s = new THREE.Vector3(1, 1, 1);
+  const spawn = (i, cam, init) => {
+    const tr = near.length && Math.random() < 0.85 ? near[Math.floor(Math.random() * near.length)] : null;
+    if (tr) { const a = Math.random() * 6.283, r = Math.sqrt(Math.random()) * tr.r; P[i * 3] = tr.x + Math.cos(a) * r; P[i * 3 + 1] = tr.y + (Math.random() - 0.4) * tr.r * 0.5; P[i * 3 + 2] = tr.z + Math.sin(a) * r; }
+    else { P[i * 3] = cam.x + (Math.random() - 0.5) * 60; P[i * 3 + 1] = 2 + Math.random() * 9; P[i * 3 + 2] = cam.z + (Math.random() - 0.5) * 60; }
+    if (init && tr) P[i * 3 + 1] -= Math.random() * (tr.y - 0.2); // 초기엔 공중 전역에 분포
+    Vv[i * 4] = 0.45 + Math.random() * 0.6; Vv[i * 4 + 1] = Math.random() * 6.283; Vv[i * 4 + 2] = 0.8 + Math.random() * 1.6; Vv[i * 4 + 3] = 0.25 + Math.random() * 0.4;
+    for (let k = 0; k < 3; k++) { R[i * 6 + k] = Math.random() * 6.283; R[i * 6 + 3 + k] = (Math.random() - 0.5) * 7; }
+  };
+  const refreshNear = (cam) => { near = SAKURA_TREES.filter((tr) => Math.hypot(tr.x - cam.x, tr.z - cam.z) < 48); };
+  let inited = false;
+  return {
+    mesh,
+    update(dt, cam) {
+      t += dt; nearT -= dt;
+      if (nearT <= 0) { refreshNear(cam); nearT = 0.5; }
+      if (!inited) { for (let i = 0; i < N; i++) spawn(i, cam, true); inited = true; }
+      const gust = 0.6 + 0.5 * Math.sin(t * 0.37) + 0.25 * Math.sin(t * 1.3 + 1.7), wx = 0.9 * gust, wz = 0.3 * gust;
+      for (let i = 0; i < N; i++) {
+        const ph = Vv[i * 4 + 1], fr = Vv[i * 4 + 2], sw = Vv[i * 4 + 3];
+        P[i * 3] += (wx + Math.sin(ph + t * fr) * sw) * dt;
+        P[i * 3 + 1] -= Vv[i * 4] * (0.75 + 0.35 * Math.sin(ph * 2 + t * fr * 1.3)) * dt;
+        P[i * 3 + 2] += (wz + Math.cos(ph * 1.3 + t * fr * 0.8) * sw) * dt;
+        const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+        const floor = (z > TOWN.canal.z0 && z < TOWN.canal.z1) ? TOWN.canal.water : 0.02;
+        if (y < floor || Math.abs(x - cam.x) > 38 || Math.abs(z - cam.z) > 38) spawn(i, cam, false);
+        for (let k = 0; k < 3; k++) R[i * 6 + k] += R[i * 6 + 3 + k] * dt;
+        _e.set(R[i * 6], R[i * 6 + 1], R[i * 6 + 2]); _q.setFromEuler(_e);
+        mesh.setMatrixAt(i, _m.compose(_p.set(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]), _q, _s));
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+    },
+  };
+}
+
+// ── 자판기 / 반사경 / 벤치 / 산책로 가로등 ──
+const VEND_TEX = [];
+function townVending(B, x, z, yaw, seed) {
+  if (!VEND_TEX.length) for (let i = 0; i < 3; i++) VEND_TEX.push(vendingTexture(700 + i));
+  const tex = VEND_TEX[seed % 3], c = Math.cos(yaw), s = Math.sin(yaw);
+  B.boxR(x, 0.92, z, 1.0, 1.84, 0.72, TMAT.white, 0, yaw, 0);
+  const front = new THREE.Mesh(new THREE.PlaneGeometry(0.94, 1.78), new THREE.MeshStandardMaterial({ map: tex, emissiveMap: tex, emissive: 0xffffff, emissiveIntensity: 0.28, roughness: 0.35 }));
+  front.position.set(x + s * 0.362, 0.93, z + c * 0.362); front.rotation.y = yaw; scene.add(front); obstacleMeshes.push(front);
+  colliders.push(axisCollider(x - 0.55, x + 0.55, 0, 1.84, z - 0.55, z + 0.55));
+}
+function townMirror(B, x, z, yaw) { // 커브미러: 주황 기둥 + 원형 볼록거울(금속 반사)
+  B.cyl(x, 1.6, z, 0.045, 0.05, 3.2, TMAT.orange, 8, true);
+  const c = Math.cos(yaw), s = Math.sin(yaw), mx = x + s * 0.18, mz = z + c * 0.18;
+  const g = new THREE.CylinderGeometry(0.36, 0.36, 0.05, 20); g.rotateX(Math.PI / 2); g.rotateY(yaw); g.translate(mx, 3.05, mz); B.geo(mx, mz, TMAT.orange, g);
+  const m = new THREE.CylinderGeometry(0.31, 0.31, 0.02, 20); m.rotateX(Math.PI / 2); m.rotateY(yaw); m.translate(mx + s * 0.03, 3.05, mz + c * 0.03); B.geo(mx, mz, TMAT.mirror, m);
+}
+function townBench(B, x, z, yaw) {
+  const c = Math.cos(yaw), s = Math.sin(yaw), P = (a, b) => [x + a * c + b * s, z - a * s + b * c];
+  for (const a of [-0.7, 0.7]) { const [px, pz] = P(a, 0); B.boxR(px, 0.22, pz, 0.08, 0.44, 0.5, 'concrete', 0, yaw, 0); }
+  for (let i = 0; i < 3; i++) { const [px, pz] = P(0, -0.18 + i * 0.13); B.boxR(px, 0.45, pz, 1.7, 0.035, 0.1, TMAT.doorWood, 0, yaw, 0); }
+  for (let i = 0; i < 2; i++) { const [px, pz] = P(0, -0.26); B.boxR(px, 0.62 + i * 0.14, pz, 1.7, 0.1, 0.035, TMAT.doorWood, 0, yaw, 0); }
+  colliders.push(axisCollider(x - 0.9, x + 0.9, 0, 0.5, z - 0.35, z + 0.35));
+}
+function townLamp(B, x, z) { // 복고풍 산책로 가로등(짙은 녹색 기둥 + 등롱)
+  B.cyl(x, 0.12, z, 0.14, 0.16, 0.24, TMAT.rail, 8);
+  B.cyl(x, 1.9, z, 0.05, 0.06, 3.6, TMAT.rail, 8, true);
+  B.box(x, 3.85, z, 0.3, 0.42, 0.3, TMAT.lampGlow); B.cone(x, 4.2, z, 0.28, 0.26, TMAT.rail);
+}
+// batchBuilder 에는 cone 이 있지만 townBatch 에 없어 추가
+function addConeTo(B) { B.cone = (cx, cy, cz, r, h, mat, seg = 4) => { const g = new THREE.ConeGeometry(r, h, seg); g.rotateY(Math.PI / 4); g.translate(cx, cy, cz); B.geo(cx, cz, mat, g); }; }
+
+// ── 편의점 + 상가 2채 (C × 남1열, 개천변 도로 z=17 향) ──
+function townKonbini(B) {
+  const x0 = 5.5, x1 = 21.5, z0 = 22, z1 = 31, H = 4.0, t = 0.25, xm = (x0 + x1) / 2, zm = (z0 + z1) / 2, w = x1 - x0, d = z1 - z0;
+  notePlacement('konbini', xm, zm, w / 2, d / 2, 0, H + 1);
+  B.box(xm, 0.05, zm, w, 0.1, d, 'paving');
+  B.box(xm, H / 2, z1, w, H, t, 'plasterWhite', true); B.box(x0, H / 2, zm, t, H, d, 'plasterWhite', true); B.box(x1, H / 2, zm, t, H, d, 'plasterWhite', true);
+  // 정면 유리 커튼월 + 자동문(8~10) 개구부
+  const door = [7.3, 9.3];
+  for (const [a, b] of [[x0, door[0]], [door[1], x1]]) { B.box((a + b) / 2, 1.3, z0, b - a, 2.6, 0.06, TMAT.glass); colliders.push(axisCollider(a, b, 0, 2.6, z0 - 0.1, z0 + 0.1)); }
+  for (let x = x0; x <= x1 + 0.01; x += 1.6) if (x < door[0] - 0.05 || x > door[1] + 0.05) B.box(x, 1.3, z0, 0.08, 2.6, 0.12, TMAT.aluSilver);
+  for (const x of door) B.box(x, 1.3, z0, 0.1, 2.6, 0.14, TMAT.aluSilver);
+  B.box(xm, 0.06, z0, w, 0.12, 0.14, TMAT.aluSilver); B.box(xm, 2.64, z0, w, 0.08, 0.14, TMAT.aluSilver);
+  B.box(xm, 3.3, z0, w, 1.4, t, 'plasterWhite');
+  const sign = signCanvas(1024, 96, (g, W, Hh) => {
+    g.fillStyle = '#f7f7f4'; g.fillRect(0, 0, W, Hh);
+    for (const [y, c] of [[0, '#2f9d57'], [22, '#f08a24'], [44, '#2a64b8']]) { g.fillStyle = c; g.fillRect(0, y, W * 0.36, 20); }
+    g.fillStyle = '#2a64b8'; g.font = 'bold 60px sans-serif'; g.textBaseline = 'middle'; g.fillText('24 MART', W * 0.42, Hh / 2 + 3);
+  });
+  const sm = new THREE.Mesh(new THREE.PlaneGeometry(w + 0.2, 0.9), new THREE.MeshStandardMaterial({ map: sign, emissiveMap: sign, emissive: 0xffffff, emissiveIntensity: 0.3, roughness: 0.5 }));
+  sm.position.set(xm, 3.35, z0 - 0.14); sm.rotation.y = Math.PI; scene.add(sm); obstacleMeshes.push(sm);
+  B.box(xm, H + 0.05, zm, w + 0.3, 0.12, d + 0.3, 'concrete'); B.box(xm, H + 0.35, z0 - 0.05, w + 0.3, 0.5, 0.2, 'plasterWhite');
+  B.box(xm, H - 0.05, zm, w - 0.4, 0.06, d - 0.4, TMAT.ceiling);
+  for (let x = x0 + 2; x < x1 - 1; x += 3) for (let z = z0 + 2; z < z1 - 1; z += 3) B.box(x, H - 0.1, z, 1.2, 0.04, 0.3, TMAT.fridgeGlow); // 천장 조명
+  // 실내: 곤돌라 진열대 3줄 + 냉장 벽 + 계산대 + 잡지 선반
+  const goods = signCanvas(512, 128, (g, W, Hh) => { const r = mulberry32(55); g.fillStyle = '#e8e8e4'; g.fillRect(0, 0, W, Hh); for (let s = 0; s < 3; s++) for (let i = 0; i < 26; i++) { g.fillStyle = `hsl(${Math.floor(r() * 360)},${50 + r() * 40}%,${40 + r() * 30}%)`; g.fillRect(4 + i * 19.5, 6 + s * 41, 15, 34); } });
+  goods.wrapS = THREE.RepeatWrapping; goods.repeat.set(3, 1); // 상품 1개 ≈ 8cm
+  const gm = new THREE.MeshStandardMaterial({ map: goods, roughness: 0.7 });
+  for (const z of [25.2, 27.4]) {
+    B.box(13.5, 0.75, z, 6.5, 1.5, 0.9, TMAT.white, true);
+    for (const s of [-1, 1]) { const p = new THREE.Mesh(new THREE.PlaneGeometry(6.4, 1.3), gm); p.position.set(13.5, 0.78, z + s * 0.46); p.rotation.y = s > 0 ? 0 : Math.PI; scene.add(p); obstacleMeshes.push(p); }
+  }
+  B.box(xm, 1.1, z1 - 0.55, w - 1.2, 2.2, 0.8, TMAT.fridgeGlow, true);
+  for (let x = x0 + 1.2; x < x1 - 0.6; x += 0.9) B.box(x, 1.1, z1 - 0.96, 0.05, 2.2, 0.04, TMAT.aluSilver);
+  B.box(19.2, 0.5, 24.2, 1.0, 1.0, 3.2, TMAT.trimWhite, true); B.box(19.2, 1.05, 23.5, 0.5, 0.3, 0.4, TMAT.trimDark);   // 계산대 + 계산기
+  B.box(xm - 1, 0.5, z0 + 0.5, 6, 1.0, 0.45, TMAT.white, true);                                                    // 잡지 선반(창가)
+  TOWN_LOOT.push([10.5, 26.3], [17.5, 28.8]);
+  if (townLights < 8) { const L = new THREE.PointLight(0xf2f6ff, 6, 14, 2); L.position.set(xm, H - 0.6, zm); scene.add(L); townLights++; }
+  // 외부: 주차 칸·차 멈춤·자판기·쓰레기통·옥상 실외기
+  for (let x = x0 + 1; x <= x1 - 1; x += 2.6) { B.box(x, 0.034, 19.5, 0.12, 0.01, 4.6, TMAT.whiteLine); B.box(x + 1.3, 0.08, 21.1, 1.2, 0.12, 0.2, 'concrete'); }
+  townVending(B, x1 + 0.9, 21.8, Math.PI, 1); townVending(B, x1 + 1.95, 21.8, Math.PI, 2);
+  for (const x of [x0 + 0.5, x0 + 1.2]) B.box(x, 0.5, z0 - 0.4, 0.55, 1.0, 0.45, TMAT.aluSilver, true);
+  TOWN_PROPS.push(['acUnit', x1 - 2, H + 0.11, z1 - 1.5, { rotY: Math.PI, height: 0.9, keep: /^exterior_aircon_unit$/ }], ['acUnit', x1 - 3.2, H + 0.11, z1 - 1.5, { rotY: Math.PI, height: 0.9, keep: /^exterior_aircon_unit$/ }]);
+  townBike(B, x0 - 0.8, 20, Math.PI / 2 + 0.1, 5); townBike(B, x0 - 0.8, 21, Math.PI / 2 - 0.1, 6);
+}
+function townShop(B, x0, z0, w, d, name, col, seed, kind) { // 1층 가게(진입) + 2층 주거. 정면 −z(개천변 도로)
+  const H1 = 3.0, H2 = 2.7, t = 0.22, xm = x0 + w / 2, zm = z0 + d / 2, rnd = mulberry32(seed), wm = kind === 'cafe' ? 'plasterBeige' : 'sidingGray';
+  notePlacement('shop', xm, zm, w / 2, d / 2, 0, H1 + H2 + 1);
+  B.box(xm, 0.04, zm, w, 0.08, d, 'woodfloor');
+  B.box(xm, (H1 + H2) / 2, z0 + d, w, H1 + H2, t, wm, true); B.box(x0, (H1 + H2) / 2, zm, t, H1 + H2, d, wm, true); B.box(x0 + w, (H1 + H2) / 2, zm, t, H1 + H2, d, wm, true);
+  const dA = xm - 0.8, dB = xm + 0.8; // 가게 문
+  for (const [a, b] of [[x0, dA], [dB, x0 + w]]) { B.box((a + b) / 2, 0.3, z0, b - a, 0.6, t, wm, true); B.box((a + b) / 2, 1.55, z0, b - a - 0.1, 1.9, 0.05, TMAT.glass); colliders.push(axisCollider(a, b, 0, 2.5, z0 - 0.1, z0 + 0.1)); }
+  B.box(xm, 2.75, z0, w, 0.5, t, wm); for (const x of [x0 + 0.1, dA, dB, x0 + w - 0.1]) B.box(x, 1.4, z0, 0.1, 2.8, 0.14, TMAT.trimDark);
+  B.box(xm, H1 + H2 / 2, z0, w, H2, t, wm); // 2층 전면 벽
+  for (const x of [x0 + w * 0.28, x0 + w * 0.72]) { B.box(x, H1 + 1.4, z0 - 0.02, 1.4, 1.1, 0.06, TMAT.glass); B.box(x, H1 + 1.4, z0 - 0.06, 1.5, 1.2, 0.04, TMAT.alu); B.box(x, H1 + 1.4, z0 + 0.16, 1.5, 1.2, 0.03, TMAT.interior); }
+  const aw = signCanvas(256, 64, (g, W, Hh) => { for (let i = 0; i < 8; i++) { g.fillStyle = i % 2 ? '#f4f1ea' : col; g.fillRect(i * W / 8, 0, W / 8, Hh); } g.fillStyle = 'rgba(0,0,0,0.15)'; g.fillRect(0, Hh - 10, W, 10); });
+  const am = new THREE.Mesh(new THREE.BoxGeometry(w - 0.3, 0.04, 1.3), new THREE.MeshStandardMaterial({ map: aw, roughness: 0.9 }));
+  am.position.set(xm, 2.72, z0 - 0.62); am.rotation.x = -0.32; am.castShadow = true; scene.add(am); obstacleMeshes.push(am);
+  const sg = signCanvas(512, 96, (g, W, Hh) => { g.fillStyle = '#2b2622'; g.fillRect(0, 0, W, Hh); g.fillStyle = '#f3ead8'; g.font = 'bold 56px serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(name, W / 2, Hh / 2 + 2); });
+  const sm = new THREE.Mesh(new THREE.PlaneGeometry(w * 0.6, 0.55), new THREE.MeshStandardMaterial({ map: sg, roughness: 0.6 }));
+  sm.position.set(xm, 3.35, z0 - 0.13); sm.rotation.y = Math.PI; scene.add(sm); obstacleMeshes.push(sm);
+  B.box(xm, H1 + H2 + 0.1, zm, w + 0.2, 0.2, d + 0.2, 'concrete'); B.box(xm, H1 + H2 + 0.4, z0, w + 0.2, 0.5, 0.2, wm);
+  B.box(xm, H1, zm, w - 0.4, 0.12, d - 0.4, TMAT.ceiling);
+  B.box(xm + w * 0.2, 0.55, zm + 1.2, 2.4, 1.1, 0.6, TMAT.doorWood, true);
+  if (kind === 'cafe') for (const [x, z] of [[xm - 1.8, zm - 1], [xm - 1.2, zm + 1.8]]) { B.cyl(x, 0.37, z, 0.4, 0.4, 0.04, TMAT.doorWood, 14); B.cyl(x, 0.18, z, 0.04, 0.04, 0.36, TMAT.trimDark, 6); }
+  if (kind === 'flower') for (let i = 0; i < 7; i++) { const x = x0 + 0.6 + i * 0.52, z = z0 - 0.5; B.cyl(x, 0.2, z, 0.16, 0.13, 0.4, TMAT.aluSilver, 10); B.cyl(x, 0.52, z, 0.2, 0.08, 0.3, [TMAT.red, TMAT.yellow, TMAT.fabric[2], TMAT.white, TMAT.fabric[3]][i % 5], 8); }
+  if (kind === 'cafe') { townBench(B, x0 + 1.2, z0 - 1.0, Math.PI); }
+  TOWN_LOOT.push([xm - 0.8, zm]);
+}
+
+// ── 공원 (B × 북2열): 흙 광장 + 체인 링크 울타리 + 벚나무 + 미끄럼틀·그네·정글짐·모래밭 + 벤치 + 공중화장실 + 음수대 + 시계탑 ──
+function townPark(B, fb) {
+  const x0 = -41.5, x1 = -3, z0 = -85, z1 = -42.5, xm = (x0 + x1) / 2, zm = (z0 + z1) / 2, rnd = mulberry32(3194);
+  B.box(xm, 0.012, zm, x1 - x0, 0.024, z1 - z0, 'gardenSoil');
+  B.box(-22, 0.02, (z1 + -58) / 2, 3.2, 0.04, z1 + 58, 'paving');                          // 정문 산책로
+  const fence = (ax, c, a0, a1) => { // 낮은 블록 + 체인 링크(1.3m) + 기둥
+    const len = a1 - a0, m = (a0 + a1) / 2; if (len < 0.3) return;
+    if (ax === 'x') { B.box(m, 0.25, c, len, 0.5, 0.2, 'blockwall', true); const g = metricPlane(len, 1.3); g.translate(m, 1.15, c); B.geo(m, c, TMAT.chain, g); colliders.push(axisCollider(a0, a1, 0, 1.8, c - 0.1, c + 0.1)); for (let x = a0; x <= a1; x += 2.4) B.box(x, 1.2, c, 0.06, 1.4, 0.06, TMAT.aluSilver); B.box(m, 1.82, c, len, 0.04, 0.04, TMAT.aluSilver); }
+    else { B.box(c, 0.25, m, 0.2, 0.5, len, 'blockwall', true); const g = metricPlane(len, 1.3); g.rotateY(Math.PI / 2); g.translate(c, 1.15, m); B.geo(c, m, TMAT.chain, g); colliders.push(axisCollider(c - 0.1, c + 0.1, 0, 1.8, a0, a1)); for (let z = a0; z <= a1; z += 2.4) B.box(c, 1.2, z, 0.06, 1.4, 0.06, TMAT.aluSilver); B.box(c, 1.82, m, 0.04, 0.04, len, TMAT.aluSilver); }
+  };
+  fence('x', z1 - 0.3, x0 + 0.3, -24); fence('x', z1 - 0.3, -20, x1 - 0.3);                    // 남(정문 −22)
+  fence('z', x1 - 0.3, z0 + 0.3, -62); fence('z', x1 - 0.3, -58, z1 - 0.3);                     // 동(옆문 z=−60)
+  fence('z', x0 + 0.3, z0 + 0.3, z1 - 0.3); fence('x', z0 + 0.4, x0 + 0.3, x1 - 0.3);
+  for (const x of [-23.6, -20.4]) B.cyl(x, 0.4, z1 - 0.3, 0.09, 0.09, 0.8, TMAT.aluSilver, 8, true); // 차단 볼라드
+  // 벚나무: 외곽 링 + 광장 두 그루
+  const ring = [];
+  for (let x = x0 + 3.5; x < x1 - 2; x += 7) ring.push([x, z0 + 3.5], [x, z1 - 3.2]);
+  for (let z = z0 + 10; z < z1 - 6; z += 7.5) ring.push([x0 + 3.2, z], [x1 - 3.2, z]);
+  ring.forEach(([x, z], i) => { if (Math.abs(x + 22) < 3 && z > z1 - 5) return; if (Math.abs(z + 60) < 3 && x > x1 - 5) return; placeSakura(fb, x + (rnd() - 0.5), z + (rnd() - 0.5), 7.5 + rnd() * 2.5, 0, 0, 900 + i); });
+  placeSakura(fb, -14, -52, 10, 0, 0, 951); placeSakura(fb, -33, -70, 9.5, 0, 0, 952);
+  // 미끄럼틀 (−28, −60): 계단 + 플랫폼 + 경사 슬라이드
+  { const x = -30, z = -58;
+    for (const [dx, dz] of [[-0.6, -0.6], [0.6, -0.6], [-0.6, 0.6], [0.6, 0.6]]) B.cyl(x + dx, 1.1, z + dz, 0.05, 0.05, 2.2, TMAT.yellow, 8, true);
+    B.box(x, 1.6, z, 1.4, 0.08, 1.4, TMAT.blue); for (const s of [-1, 1]) B.box(x + s * 0.68, 2.0, z, 0.05, 0.8, 1.3, TMAT.red);
+    for (let i = 0; i < 6; i++) B.box(x, 0.25 + i * 0.26, z - 0.9 - i * 0.02, 0.6, 0.04, 0.12, TMAT.aluSilver);
+    for (const s of [-1, 1]) B.seg(_tv(x + s * 0.3, 0, z - 1.05), _tv(x + s * 0.3, 1.7, z - 0.72), 0.03, TMAT.aluSilver);
+    B.boxR(x, 0.85, z + 2.0, 0.6, 0.05, 3.3, TMAT.red, -0.52, 0, 0); for (const s of [-1, 1]) B.boxR(x + s * 0.3, 0.97, z + 2.0, 0.04, 0.22, 3.3, TMAT.red, -0.52, 0, 0);
+    TOWN_LOOT.push([x + 1.4, z]); }
+  // 그네 (−20, −66): A 프레임 + 가로대 + 줄(선) + 좌판 2
+  { const x = -19, z = -67, W = 3.4;
+    for (const s of [-1, 1]) for (const dz of [-0.9, 0.9]) B.seg(_tv(x + s * W / 2, 0, z + dz), _tv(x + s * W / 2, 2.4, z), 0.05, TMAT.green);
+    B.seg(_tv(x - W / 2, 2.4, z), _tv(x + W / 2, 2.4, z), 0.06, TMAT.green);
+    for (const sx of [-0.8, 0.8]) { for (const d of [-0.2, 0.2]) B.seg(_tv(x + sx + d, 2.38, z), _tv(x + sx + d, 0.5, z + (sx > 0 ? 0.25 : 0)), 0.008, TMAT.aluSilver); B.box(x + sx, 0.48, z + (sx > 0 ? 0.25 : 0), 0.46, 0.04, 0.22, TMAT.rubber); }
+    B.box(x, 0.3, z + 1.6, W + 0.6, 0.6, 0.06, TMAT.yellow, true); }
+  // 정글짐 (−33, −49)
+  { const x = -34, z = -50, n = 3, s = 0.8;
+    for (let i = 0; i <= n; i++) for (let j = 0; j <= n; j++) B.seg(_tv(x + i * s - 1.2, 0, z + j * s - 1.2), _tv(x + i * s - 1.2, n * s, z + j * s - 1.2), 0.025, TMAT.blue);
+    for (let k = 1; k <= n; k++) for (let i = 0; i <= n; i++) { B.seg(_tv(x - 1.2, k * s, z + i * s - 1.2), _tv(x + 1.2, k * s, z + i * s - 1.2), 0.022, TMAT.red); B.seg(_tv(x + i * s - 1.2, k * s, z - 1.2), _tv(x + i * s - 1.2, k * s, z + 1.2), 0.022, TMAT.yellow); }
+    colliders.push(axisCollider(x - 1.25, x + 1.25, 0, 2.4, z - 1.25, z + 1.25)); }
+  // 모래밭 (−12, −62)
+  { const x = -12, z = -63; B.box(x, 0.05, z, 4.2, 0.1, 3.6, TMAT.sand); for (const [dx, dz, w, d] of [[0, -1.9, 4.6, 0.2], [0, 1.9, 4.6, 0.2], [-2.2, 0, 0.2, 3.6], [2.2, 0, 0.2, 3.6]]) B.box(x + dx, 0.13, z + dz, w, 0.26, d, 'concrete'); }
+  // 벤치 · 음수대 · 시계탑 · 휴지통
+  for (const [x, z, y] of [[-26, -46.5, Math.PI], [-16, -46.5, Math.PI], [-37.5, -60, Math.PI / 2], [-7, -72, -Math.PI / 2], [-25, -80, 0]]) townBench(B, x, z, y);
+  B.cyl(-24.5, 0.45, -52, 0.2, 0.26, 0.9, 'concrete', 12, true); B.box(-24.5, 0.93, -52, 0.5, 0.06, 0.5, TMAT.aluSilver);
+  B.cyl(-19.5, 1.8, -50, 0.07, 0.07, 3.6, TMAT.aluSilver, 8, true); { const g = new THREE.CylinderGeometry(0.34, 0.34, 0.12, 20); g.rotateX(Math.PI / 2); g.translate(-19.5, 3.7, -50); B.geo(-19.5, -50, TMAT.white, g); }
+  for (const [x, z] of [[-23.8, -47], [-8, -60]]) B.cyl(x, 0.4, z, 0.25, 0.25, 0.8, TMAT.green, 12, true);
+  // 공중화장실 (−10, −78)
+  { const x = -9.5, z = -79, w = 5, d = 4, H = 2.9;
+    for (const [dx, dz, ww, dd] of [[0, -d / 2, w, 0.22], [-w / 2, 0, 0.22, d], [w / 2, 0, 0.22, d]]) B.box(x + dx, H / 2, z + dz, ww, H, dd, 'concreteStain', true);
+    for (const [a, b] of [[-w / 2, -1.6], [-0.4, 0.4], [1.6, w / 2]]) B.box(x + (a + b) / 2, H / 2, z + d / 2, b - a, H, 0.22, 'concreteStain', true);
+    B.box(x, 0.3, z + d / 2 + 0.25, 1.4, 0.04, 0.3, TMAT.blue); B.box(x, 0.3, z + d / 2 - 0, 0.08, 0.6, 0.02, TMAT.whiteLine);
+    B.box(x, H + 0.1, z, w + 0.8, 0.2, d + 0.8, 'concrete'); B.box(x, 0.8, z, 0.1, 1.6, d - 0.3, 'plasterWhite', true);
+    B.box(x, 0.03, z, w - 0.3, 0.06, d - 0.3, 'paving');
+    TOWN_LOOT.push([x - 1.1, z]); }
+  // 풀 · 잡초 영역
+  return { grass: [[x0 + 2, z0 + 2, x1 - 2, z1 - 2]] };
+}
+
+// ── 신사 (D × 북2열): 도리이 + 석등 + 참배로 + 데미즈야 + 배전(높은 마루·박공 기와) + 벚나무 + 삼나무 배경 ──
+function townShrine(B, fb) {
+  const x0 = 46.5, x1 = 85, z0 = -85, z1 = -42.5, cxs = 64, rnd = mulberry32(3195);
+  B.box((x0 + x1) / 2, 0.012, (z0 + z1) / 2, x1 - x0, 0.024, z1 - z0, 'gravelWet');
+  B.box(cxs, 0.03, -57, 2.4, 0.06, 29, 'paving');
+  for (const [a, b] of [[x0 + 0.2, cxs - 3], [cxs + 3, x1 - 0.2]]) { B.box((a + b) / 2, 0.35, z1 - 0.3, b - a, 0.7, 0.4, TMAT.stone, true); B.box((a + b) / 2, 0.74, z1 - 0.3, b - a, 0.08, 0.5, TMAT.stone); } // 석축 담
+  B.box(x1 - 0.3, 0.35, (z0 + z1) / 2, 0.4, 0.7, z1 - z0, TMAT.stone, true); B.box(x0 + 0.3, 0.35, (z0 + z1) / 2, 0.4, 0.7, z1 - z0, TMAT.stone, true); B.box((x0 + x1) / 2, 0.35, z0 + 0.3, x1 - x0, 0.7, 0.4, TMAT.stone, true);
+  // 도리이 (z=−45)
+  { const z = -45.5, s = 1.95;
+    for (const d of [-s, s]) { B.cyl(cxs + d, 2.1, z, 0.2, 0.23, 4.2, TMAT.vermilion, 12, true); B.cyl(cxs + d, 0.2, z, 0.28, 0.3, 0.4, TMAT.poleBlack, 12); }
+    B.box(cxs, 3.3, z, 4.8, 0.26, 0.26, TMAT.vermilion); B.box(cxs, 4.25, z, 5.6, 0.3, 0.4, TMAT.vermilion); B.box(cxs, 4.48, z, 6.0, 0.18, 0.5, TMAT.poleBlack);
+    B.box(cxs, 3.78, z, 0.3, 0.7, 0.2, TMAT.vermilion); }
+  // 석등 2쌍
+  for (const z of [-51, -60]) for (const s of [-1, 1]) { const x = cxs + s * 2.3;
+    B.box(x, 0.15, z, 0.7, 0.3, 0.7, TMAT.stone, true); B.cyl(x, 0.85, z, 0.13, 0.16, 1.1, TMAT.stone, 8); B.box(x, 1.55, z, 0.5, 0.3, 0.5, TMAT.stone);
+    B.box(x, 1.9, z, 0.36, 0.4, 0.36, TMAT.lampGlow); B.cone(x, 2.35, z, 0.55, 0.4, TMAT.stone); B.cyl(x, 2.62, z, 0.07, 0.1, 0.16, TMAT.stone, 8); }
+  // 데미즈야(손 씻는 정자) (57, −55)
+  { const x = 57.5, z = -55; for (const [dx, dz] of [[-1, -0.8], [1, -0.8], [-1, 0.8], [1, 0.8]]) B.cyl(x + dx, 1.2, z + dz, 0.08, 0.08, 2.4, TMAT.shrineWood, 8, true);
+    B.boxR(x, 2.65, z - 0.65, 2.8, 0.1, 1.5, 'kawara', -0.5, 0, 0); B.boxR(x, 2.65, z + 0.65, 2.8, 0.1, 1.5, 'kawara', 0.5, 0, 0); B.box(x, 3.0, z, 2.9, 0.12, 0.2, TMAT.ridge);
+    B.box(x, 0.45, z, 1.4, 0.7, 0.7, TMAT.stone, true); B.box(x, 0.82, z, 1.2, 0.04, 0.5, TMAT.glass); }
+  // 배전 (64, −74): 높은 마루(0.6) + 계단 + 목조 벽(격자) + 깊은 처마 박공 기와
+  { const x = cxs, z = -74, w = 8, d = 6.5, fy = 0.6, H = 3.2;
+    B.box(x, fy / 2, z, w + 1.2, fy, d + 1.2, TMAT.shrineWood, true);
+    for (let i = 0; i < 3; i++) B.box(x, 0.1 + i * 0.2, z + d / 2 + 1.25 - i * 0.3, 3, 0.2 * (i + 1), 0.3, TMAT.shrineWood, true);
+    for (const [dx, dz] of [[-w / 2, -d / 2], [w / 2, -d / 2], [-w / 2, d / 2], [w / 2, d / 2], [-w / 6, d / 2], [w / 6, d / 2]]) B.cyl(x + dx, fy + H / 2, z + dz, 0.14, 0.14, H, TMAT.vermilion, 10, true);
+    B.box(x, fy + H / 2, z - d / 2, w, H, 0.15, TMAT.shrineWood, true); B.box(x - w / 2, fy + H / 2, z, 0.15, H, d, TMAT.shrineWood, true); B.box(x + w / 2, fy + H / 2, z, 0.15, H, d, TMAT.shrineWood, true);
+    for (const [a, b] of [[-w / 2, -w / 6], [w / 6, w / 2]]) { B.box(x + (a + b) / 2, fy + H / 2, z + d / 2 - 0.1, b - a, H, 0.1, TMAT.shrineWood, true); for (let k = a + 0.25; k < b; k += 0.3) B.box(x + k, fy + H / 2, z + d / 2 + 0.0, 0.04, H - 0.4, 0.06, TMAT.poleBlack); }
+    B.box(x, fy + H - 0.3, z + d / 2 - 0.1, w / 3, 0.6, 0.1, TMAT.shrineWood);
+    B.box(x, fy + 0.4, z + d / 2 + 0.3, 1.2, 0.6, 0.6, TMAT.shrineWood, true); // 새전함
+    B.seg(_tv(x, fy + H - 0.2, z + d / 2 + 0.2), _tv(x, fy + 1.0, z + d / 2 + 0.25), 0.03, TMAT.sand); B.cyl(x, fy + H - 0.25, z + d / 2 + 0.2, 0.12, 0.14, 0.2, TMAT.yellow, 10); // 방울 줄
+    const e = 1.3, p = 0.5, yT = fy + H, S = d, rise = (S / 2) * Math.tan(p), Ls = (S / 2 + e) / Math.cos(p), yc = yT + rise - ((S / 2 + e) / 2) * Math.tan(p) + 0.1;
+    for (const s of [-1, 1]) B.boxR(x, yc, z + s * (S / 2 + e) / 2, w + 2.2, 0.18, Ls, 'kawara', s > 0 ? p : -p, 0, 0);
+    for (const q of [-1, 1]) { const g = gableGeo(S, rise, 0.2); g.rotateY(-Math.PI / 2); g.translate(x + q * w / 2, yT, z); B.geo(x, z, TMAT.shrineWood, g); }
+    B.box(x, yT + rise + 0.2, z, w + 2.4, 0.3, 0.4, TMAT.ridge);
+    for (const q of [-1, 1]) for (const s of [-1, 1]) B.boxR(x + q * (w / 2 + 1.12), yc - 0.05, z + s * (S / 2 + e) / 2, 0.08, 0.34, Ls, TMAT.trimWhite, s > 0 ? p : -p, 0, 0);
+    TOWN_LOOT.push([x - 2.5, z + d / 2 + 0.8], [x + 3, z + d / 2 + 0.8]); }
+  // 나무: 벚꽃 4 + 배경 삼나무(침엽 카드)
+  for (const [x, z, h, i] of [[53, -48, 8.5, 1], [76, -49, 9, 2], [52, -66, 8, 3], [78, -64, 9.5, 4]]) placeSakura(fb, x, z, h, 0, 0, 960 + i);
+  for (let x = x0 + 3; x < x1 - 2; x += 4.2) placeCardTree(fb, 'pine', x + (rnd() - 0.5) * 1.5, z0 + 3 + rnd() * 2.5, 13 + rnd() * 5, 0.4, 970 + Math.round(x));
+  for (const z of [-80, -72, -64]) { placeCardTree(fb, 'pine', x0 + 2.5, z, 12 + rnd() * 4, 0.4, 990 + z); placeCardTree(fb, 'pine', x1 - 2.5, z + 3, 12 + rnd() * 4, 0.4, 995 + z); }
+  B.box(72, 0.9, -57, 0.5, 1.8, 0.25, TMAT.stone, true); // 비석
+}
+
+// ── 코인 주차장 (B × 남2열) ──
+function townParking(B) {
+  const x0 = -41.5, x1 = -3, z0 = 50.5, z1 = 67.5;
+  B.box((x0 + x1) / 2, 0.02, (z0 + z1) / 2, x1 - x0, 0.04, z1 - z0, 'asphaltTown');
+  for (let x = x0 + 1; x <= x1 - 1; x += 2.6) { B.box(x, 0.045, z1 - 3, 0.12, 0.01, 5, TMAT.whiteLine); B.box(x + 1.3, 0.1, z1 - 1, 1.1, 0.14, 0.18, 'concrete'); }
+  B.box((x0 + x1) / 2, 0.8, z1 - 0.2, x1 - x0, 1.6, 0.1, 'blockwall', true);
+  B.cyl(x1 - 1.5, 1.6, z0 + 1.2, 0.06, 0.06, 3.2, TMAT.aluSilver, 8, true);
+  const ps = signCanvas(128, 128, (g, W, H) => { g.fillStyle = '#1f55a8'; g.fillRect(0, 0, W, H); g.fillStyle = '#fff'; g.font = 'bold 100px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('P', W / 2, H / 2 + 6); });
+  const pm = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.8), new THREE.MeshStandardMaterial({ map: ps, roughness: 0.5, side: THREE.DoubleSide }));
+  pm.position.set(x1 - 1.5, 3.0, z0 + 1.2); pm.rotation.y = Math.PI / 4; scene.add(pm); obstacleMeshes.push(pm);
+  B.box(x0 + 2.2, 0.8, z0 + 1.4, 0.6, 1.6, 0.5, TMAT.yellow, true);
+  for (const x of [x0 + 7.4, x0 + 15.2, x0 + 25.6]) TOWN_PROPS.push(['@car', x, 0, z1 - 3.2, { rotY: Math.PI / 2 * 0 + 0.02 }]);
+  TOWN_LOOT.push([x0 + 12, z0 + 4]);
+}
+
+// ── 대지 행 구성 ──
+const TOWN_ROWS = [
+  { z0: -23.5, z1: -9.5, face: 0, back: true, blocks: [0, 1, 2, 3] },
+  { z0: -37.5, z1: -23.5, face: 2, back: false, blocks: [0, 1, 2, 3] },
+  { z0: -62.5, z1: -42.5, face: 0, back: true, blocks: [0, 2] },
+  { z0: -85, z1: -65.5, face: 0, back: true, blocks: [0, 2] },
+  { z0: 17, z1: 31, face: 2, back: true, blocks: [0, 1, 3] },
+  { z0: 31, z1: 45.5, face: 0, back: false, blocks: [0, 1, 2, 3] },
+  { z0: 50.5, z1: 67.5, face: 2, back: true, blocks: [0, 2, 3] },
+  { z0: 70.5, z1: 85, face: 2, back: true, blocks: [0, 1, 2, 3] },
+];
+function townLots() {
+  const rnd = mulberry32(3196), lots = [];
+  let enterN = 0, seed = 5000;
+  for (const row of TOWN_ROWS) for (const bi of row.blocks) {
+    const [bx0, bx1] = TOWN.blocksX[bi], n = rnd() < 0.5 ? 2 : 3, W = (bx1 - bx0) / n, D = row.z1 - row.z0, cz = (row.z0 + row.z1) / 2;
+    for (let i = 0; i < n; i++) {
+      const cx = bx0 + W * (i + 0.5), last = row.face === 0 ? i === n - 1 : i === 0;
+      const vacant = rnd() < 0.09, enter = !vacant && enterN < 12 && rnd() < 0.3;
+      if (enter) enterN++;
+      lots.push({ cx, cz, W, D, face: row.face, seed: seed++, left: true, right: last, back: row.back, vacant, enter });
+    }
+  }
+  return lots;
+}
+
+function buildTownMap() {
+  buildTexMats(); buildTownMats();
+  scene.fog = new THREE.Fog(0xdcd6dc, 55, 230);
+  TOWN_LOOT.length = 0; SAKURA_TREES.length = 0; TOWN_PROPS.length = 0; townLights = 0;
+  const B = townBatch(), fb = forestBatch(), rnd = mulberry32(3197), L = WORLD_HALF, T = [], tm = (k) => T.push(`${k} ${Math.round(performance.now() - t0)}`), t0 = performance.now();
+  addConeTo(B);
+  buildTownStreets(B);
+  const canal = buildTownCanal(B);
+  // 외곽: 블록 담(2.6m) + 생울타리 + 바깥 숲
+  for (const [x, z, w, d] of [[0, -L, L * 2 + 1, 0.4], [0, L, L * 2 + 1, 0.4], [-L, 0, 0.4, L * 2 + 1], [L, 0, 0.4, L * 2 + 1]]) {
+    B.box(x, 1.3, z, w, 2.6, d, 'blockwall', true); B.box(x, 3.2, z, w + (d > 1 ? 0.4 : 0), 1.2, d + (w > 1 ? 0.5 : 0), 'hedge'); colliders.push(axisCollider(x - w / 2, x + w / 2, 0, 6, z - d / 2, z + d / 2));
+  }
+  for (let a = -L; a <= L; a += 9) for (const [x, z] of [[a, -L - 5], [a, L + 5], [-L - 5, a], [L + 5, a]]) placeCardTree(fb, rnd() < 0.4 ? 'pine' : rnd() < 0.5 ? 'canopy_broad_a' : 'canopy_broad_b', x + (rnd() - 0.5) * 3, z + (rnd() - 0.5) * 3, 10 + rnd() * 6, 0.4, 3300 + Math.round(a * 3 + x));
+  townKonbini(B);
+  townShop(B, 24, 18.5, 8.2, 9, 'CAFE', '#3a6b4a', 1, 'cafe');
+  townShop(B, 33, 18.5, 8.2, 9, 'FLOWER', '#c0506a', 2, 'flower');
+  const park = townPark(B, fb);
+  townShrine(B, fb);
+  townParking(B);
+  tm('special');
+  const lots = townLots();
+  for (const lot of lots) buildTownLot(B, lot);
+  tm('lots');
+  // 개천 벚꽃길: 양안 가로수(수관이 개천 쪽으로) + 가로등 + 벤치
+  const nearGap = (x) => TOWN.bridges.some(([a, b]) => x > a - 2.5 && x < b + 2.5) || TOWN.roadsNS.some(([a, b]) => x > a - 2.5 && x < b + 2.5);
+  let ti = 0;
+  for (const [z, lz] of [[-2.3, 1.3], [10.0, -1.3]]) {
+    for (let x = -83; x <= 83; x += 7.2) {
+      const xx = x + (rnd() - 0.5) * 1.4;
+      if (nearGap(xx)) continue;
+      placeSakura(fb, xx, z + (rnd() - 0.5) * 0.4, 7.5 + rnd() * 2, 0, lz, 800 + ti++);
+      if (ti % 2 === 0 && !nearGap(xx + 3.6)) townLamp(B, xx + 3.6, z < 0 ? -3.9 : 11.5);
+      if (ti % 5 === 0 && !nearGap(xx + 3.6)) townBench(B, xx + 3.6, z < 0 ? -0.6 : 8.6, z < 0 ? 0 : Math.PI);
+    }
+  }
+  // 정원 벚나무·관목 + 풀
+  const grassMat = canopyMat('grass_card');
+  const tuft = (x, z, s = 1) => { const y = terrainH(x, z), c = 0.72 + rnd() * 0.25, yaw = rnd() * Math.PI; for (let k = 0; k < 2; k++) fb.put(x, z, 'grass_card', grassMat, cardGeo(_tv(x, y + 0.2 * s, z), 0.7 * s, 0.42 * s, yaw + k * Math.PI / 2, 0, [c, c, c * 0.95], rnd() < 0.5)); };
+  for (const lot of lots) {
+    if (lot.garden) { const g = lot.garden; for (let i = 0; i < 6; i++) tuft(g.x + (rnd() - 0.5) * g.w * 0.8, g.z + (rnd() - 0.5) * g.d * 0.8, 0.8); if (rnd() < 0.35) placeSakura(fb, g.x, g.z, 4.8 + rnd() * 1.2, 0, 0, lot.seed + 11); else if (rnd() < 0.6) placeCardTree(fb, rnd() < 0.5 ? 'canopy_broad_a' : 'canopy_broad_b', g.x, g.z, 3.4 + rnd() * 1.4, 0.2, lot.seed + 13); }
+    if (lot.weeds) for (let i = 0; i < 26; i++) tuft(lot.cx + (rnd() - 0.5) * lot.W * 0.85, lot.cz + (rnd() - 0.5) * lot.D * 0.85, 1.2);
+    if (lot.pots) for (const [x, z, h] of lot.pots) for (let k = 0; k < 2; k++) fb.put(x, z, 'grass_card', grassMat, cardGeo(_tv(x, h + 0.12, z), 0.36, 0.3, rnd() * 3 + k * 1.57, 0, [0.7, 0.8, 0.6], false));
+  }
+  for (const [x0, z0, x1, z1] of park.grass) for (let i = 0; i < 160; i++) { const x = x0 + rnd() * (x1 - x0), z = z0 + rnd() * (z1 - z0); if (isPointOpen(x, z, 0.4)) tuft(x, z, 1); }
+  // 자판기 · 반사경
+  townVending(B, 6.2, -3.8, Math.PI, 3); townVending(B, -19.2, -42.0, 0, 4); townVending(B, 70.5, -42.1, 0, 5);
+  for (const [x, z, y] of [[3.8, -10.2, -Math.PI * 0.75], [-41.0, -10.2, Math.PI * 0.75], [41.0, 17.8, -Math.PI * 0.25], [-3.8, 17.8, Math.PI * 0.25], [3.8, -43.0, -Math.PI * 0.75], [-41.0, 51.0, Math.PI * 0.25], [47.0, 51.0, -Math.PI * 0.25], [-47.0, -43.0, Math.PI * 0.75]]) townMirror(B, x, z, y);
+  tm('trees');
+  buildTownPoles(B);
+  tm('poles');
+  // 지면 꽃잎: 벚나무 아래 원판(도로·산책로·마당 위) — 텍스처 미터 UV
+  for (const t of SAKURA_TREES) {
+    if (!t.decal) continue; // 정원 소형목은 원판 없음(집 안으로 번짐)
+    const r = t.r + 1.4, g = new THREE.CircleGeometry(r, 22); g.rotateX(-Math.PI / 2);
+    const uv = g.attributes.uv, p = g.attributes.position; for (let i = 0; i < uv.count; i++) uv.setXY(i, (p.getX(i) + t.x), (p.getZ(i) + t.z));
+    const y = (t.z > TOWN.canal.z0 - 0.1 && t.z < TOWN.canal.z1 + 0.1) ? 0.06 : 0.052;
+    g.translate(t.x, y, t.z); B.geo(t.x, t.z, TMAT.petalGround, g);
+  }
+  tm('decals');
+  const nb = B.flush(), nf = fb.flush();
+  tm('flush');
+  for (const [key, x, y, z, o] of TOWN_PROPS) {
+    if (key === '@car') { if (ASSETS.carCovered) placeModel('carCovered', x, z, { height: 1.45, rotY: o.rotY }); continue; }
+    if (key === 'tyre') { placeProp('tyre', x, 0.02, z, o); continue; }
+    if (ASSETS[key]) placeProp(key, x, y, z, o);
+  }
+  tm('props');
+  townFx = { petals: makePetalSystem(), water: canal.water, raft: canal.raft, t: 0 };
+  console.info(`[town] batch meshes ${nb} · forest ${nf} · lots ${lots.length} (houses ${lots.filter((l) => !l.vacant).length}, enter ${lots.filter((l) => l.enter).length}) · sakura ${SAKURA_TREES.length} · loot ${TOWN_LOOT.length} · props ${TOWN_PROPS.length} · lights ${townLights} · ms ${T.join(', ')}`);
+  losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile);
+}
+function updateTownFx(dt) {
+  if (!townFx) return;
+  townFx.t += dt;
+  if (townFx.water) { townFx.water.offset.x = townFx.t * 0.012; townFx.water.offset.y = Math.sin(townFx.t * 0.2) * 0.02; }
+  if (townFx.raft) townFx.raft.offset.x = townFx.t * 0.018;
+  townFx.petals.update(dt, camera.position);
+}
+const MAP_TOWN = {
+  key: 'town', name: '벚꽃 동네', desc: '벚꽃 흩날리는 개천변 주택가 — 골목·담장·개천 트렌치 근접전',
+  build: buildTownMap,
+  terrain: townTerrain,
+  sun: [55, 48, 40], // 남동 오전광 — 개천변 벚꽃 역광 방지, 집 정면(+z) 채광
+  look: 'spring',
+  flattens: [],
+  lootSpots: TOWN_LOOT,
+  extract: [
+    { name: '북쪽 간선 끝', pos: new THREE.Vector3(0, 0, -83) },
+    { name: '남쪽 간선 끝', pos: new THREE.Vector3(0, 0, 83) },
+    { name: '개천 하류 수문', pos: new THREE.Vector3(83, 0, 4) },
+    { name: '서쪽 골목', pos: new THREE.Vector3(-83, 0, 69) },
+  ],
+  spawns: [
+    new THREE.Vector3(0, 0, -80), new THREE.Vector3(0, 0, 80), new THREE.Vector3(-82, 0, -7),
+    new THREE.Vector3(82, 0, 14.5), new THREE.Vector3(-82, 0, 48), new THREE.Vector3(82, 0, -40),
+  ],
+  barrels: [[-20, -6.5, false], [25, 15, true], [-60, 48, false], [60, -40, true], [1.5, 30, false], [-44, -25, true], [44, 30, false], [-30, -40, false]],
+};
+
 
 // ── 사격 연습장 (#209): 반동·탄퍼짐·탄착군 연습. 적 없음·무한탄약·전 무기, 거리별 표적 + 후벽 ──
 function rangeBullseyeTexture() {
@@ -5787,7 +6919,7 @@ const MAP_INDUSTRIAL = {
   flattens: FLATTENS, lootSpots: LOOT_SPOTS, extract: EXTRACT_CANDIDATES,
   spawns: SPAWN_POINTS, barrels: PHYS_BARRELS,
 };
-const MAPS = { industrial: MAP_INDUSTRIAL, school: MAP_SCHOOL, urban: MAP_URBAN, range: MAP_RANGE };
+const MAPS = { industrial: MAP_INDUSTRIAL, town: MAP_TOWN, school: MAP_SCHOOL, urban: MAP_URBAN, range: MAP_RANGE };
 let currentMapKey = 'industrial';
 let builtMapKey = null;
 let staticObjects = []; // 현재 정적 맵이 scene 에 추가한 최상위 오브젝트 (맵 전환 시 제거)
@@ -5809,8 +6941,10 @@ function applyMap(key) {
   const m = MAPS[key] || MAP_INDUSTRIAL;
   if (builtMapKey) tearDownStatic();
   FLATTENS = m.flattens; LOOT_SPOTS = m.lootSpots; EXTRACT_CANDIDATES = m.extract;
+  TERRAIN_FN = m.terrain || null; townFx = null; // (#319)
   SPAWN_POINTS = m.spawns; PHYS_BARRELS = m.barrels;
   setMapSun(m.sun); // 맵별 태양 방향 (#277)
+  applyLook(m.look || 'default'); // 맵별 하늘·조명·그레이딩 (#319)
   const before = new Set(scene.children);
   m.build();
   for (const c of scene.children) if (!before.has(c)) staticObjects.push(c);
@@ -6518,9 +7652,12 @@ function loop() {
     updateHUD();
   }
   updateEffects(dt);
+  if (townFx && builtMapKey === 'town') updateTownFx(dt); // 낙화·수면 (#319)
   // 하늘: 카메라 추종(구면 클리핑 방지) + 구름 드리프트
   skyMesh.position.copy(camera.position);
   skyUniforms.uTime.value = now / 1000;
+  updateSunShadow(); // 그림자 범위 추종 (#319)
+  if (gradePass) gradePass.uniforms.uTime.value = now / 1000;
   if (composer) composer.render();       // 항상 컴포저 경유 (톤매핑 일관) — 효과 OFF 는 GTAO/블룸 패스만 비활성
   else renderer.render(scene, camera);
 }
@@ -6591,6 +7728,8 @@ window.__ex = {
     info.autoReset = true; return out;
   },
   get _map() { return { current: currentMapKey, built: builtMapKey, maps: Object.keys(MAPS) }; },
+  // 렌더 QA (#319): 룩 전환·톤매핑 비교·낙화 상태
+  applyLook(k) { currentLook = null; applyLook(k); }, LOOKS, _tone(name, exp) { renderer.toneMapping = { aces: THREE.ACESFilmicToneMapping, agx: THREE.AgXToneMapping, neutral: THREE.NeutralToneMapping }[name] ?? renderer.toneMapping; if (exp) renderer.toneMappingExposure = exp; }, get townFx() { return townFx; }, get sakura() { return SAKURA_TREES; }, _townTick(dt) { updateTownFx(dt); }, _shadow() { updateSunShadow(true); return { t: sun.target.position.toArray(), half: SHADOW_HALF }; },
   _dbgAim() {
     if (!pc) return null;
     const cam = new THREE.Vector3(); camera.getWorldDirection(cam);

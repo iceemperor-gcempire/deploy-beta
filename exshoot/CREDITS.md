@@ -25,6 +25,7 @@
 
 - Ground048, Gravel023 — ambientCG — https://ambientcg.com (CC0) — 지면/자갈 마당 컬러맵 (1K JPG 재압축)
 - Bricks097, PaintedPlaster017, RoofingTiles012A, CorrugatedSteel007A, WoodFloor043, Concrete034 — ambientCG — https://ambientcg.com (CC0) — 리얼 주택/건물 PBR (Color+NormalGL 1K, #107)
+- RoofingTiles013A, WoodSiding009, Fence003 — ambientCG — https://ambientcg.com (CC0) — 벚꽃 동네 기와·사이딩·체인 링크 펜스 (#319)
 
 FBX → GLB 변환: Blender 5.1 headless (총기, 캐릭터+애니메이션).
 
