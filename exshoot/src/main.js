@@ -941,18 +941,20 @@ function canopyMat(key) {
 }
 const FOREST_CHUNK = 44;
 function forestBatch() { // 청크·재질별 지오메트리 누적 → flush 시 병합 메시 1개씩
-  const byKey = new Map();
+  const byKey = new Map(), bid = bakeBatchId(), rp = bakeReplay(); // (#325)
   return {
-    put(x, z, mkey, mat, geo) { const k = `${Math.floor(x / FOREST_CHUNK)},${Math.floor(z / FOREST_CHUNK)}|${mkey}`; if (!byKey.has(k)) byKey.set(k, { mat, geos: [] }); byKey.get(k).geos.push(geo); },
+    put(x, z, mkey, mat, geo) { if (rp || !geo) return; const k = `${Math.floor(x / FOREST_CHUNK)},${Math.floor(z / FOREST_CHUNK)}|${mkey}`; if (!byKey.has(k)) byKey.set(k, { mat, geos: [] }); byKey.get(k).geos.push(geo); },
     flush() {
+      if (rp) return bakeReplayFlush(bid);
       let n = 0;
-      for (const { mat, geos } of byKey.values()) { const g = mergeGeometries(geos, false); for (const q of geos) q.dispose(); const m = new THREE.Mesh(g, mat); m.castShadow = m.receiveShadow = true; scene.add(m); obstacleMeshes.push(m); n++; }
+      for (const { mat, geos } of byKey.values()) { const g = mergeGeometries(geos, false); for (const q of geos) q.dispose(); const m = new THREE.Mesh(g, mat); m.castShadow = m.receiveShadow = true; scene.add(m); obstacleMeshes.push(m); bakeRecord(bid, m, true); n++; }
       byKey.clear(); return n;
     },
   };
 }
 const _up = new THREE.Vector3(0, 1, 0), _q = new THREE.Quaternion(), _dir = new THREE.Vector3();
-function barkSeg(p0, p1, r0, r1, radial = 7) { // 원뿔대 p0→p1 (반지름 r0→r1). 껍질 UV 를 미터(둘레·길이)로 → TEXMAT repeat(1/tile) 와 정합
+function barkSeg(p0, p1, r0, r1, radial = 7) { return bakeReplay() ? null : barkSegRaw(p0, p1, r0, r1, radial); } // 배치 전용 — 굽기 재생 중엔 null (#325)
+function barkSegRaw(p0, p1, r0, r1, radial = 7) { // 원뿔대 p0→p1 (반지름 r0→r1). 껍질 UV 를 미터(둘레·길이)로 → TEXMAT repeat(1/tile) 와 정합
   _dir.subVectors(p1, p0); const len = _dir.length(); _dir.normalize();
   const g = new THREE.CylinderGeometry(r1, r0, len, radial, 1, true);
   const uv = g.attributes.uv, circ = Math.PI * (r0 + r1);
@@ -962,6 +964,7 @@ function barkSeg(p0, p1, r0, r1, radial = 7) { // 원뿔대 p0→p1 (반지름 r
   return g;
 }
 function cardGeo(c, w, h, yaw, tilt, col, flipU) { // 알파 카드 1장 (vertexColors 명도)
+  if (bakeReplay()) return null; // (#325)
   const g = new THREE.PlaneGeometry(w, h);
   if (flipU) { const uv = g.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setX(i, 1 - uv.getX(i)); }
   g.rotateX(tilt); g.rotateY(yaw); g.translate(c.x, c.y, c.z);
@@ -1997,8 +2000,9 @@ function addWindowWall(cx, cz, len, h, axis, mat, openings, baseY = 0) {
 
 function addBuilding(cx, cz, w, d, h, mat) {
   notePlacement('building', cx, cz, w / 2, d / 2, terrainH(cx, cz), terrainH(cx, cz) + h); // 겹침 진단 (#215)
-  addWallWithDoor(cx, cz + d / 2, w, h, 'x', mat, (Math.random() - 0.5) * (w - 4));
-  addWallWithDoor(cx, cz - d / 2, w, h, 'x', mat, (Math.random() - 0.5) * (w - 4));
+  const dr = mulberry32(Math.round(cx * 73 + cz * 131) >>> 0); // 문 위치: 건물 좌표 시드 (#325 — 굽기 재생과 결정론 일치)
+  addWallWithDoor(cx, cz + d / 2, w, h, 'x', mat, (dr() - 0.5) * (w - 4));
+  addWallWithDoor(cx, cz - d / 2, w, h, 'x', mat, (dr() - 0.5) * (w - 4));
   addWall(cx - w / 2, cz, d, h, 'z', mat);
   addWall(cx + w / 2, cz, d, h, 'z', mat);
   addBox(cx, h + 0.15, cz, w + 0.6, 0.3, d + 0.6, MAT.roof);
@@ -2086,11 +2090,147 @@ function addHouse(hx, hz, { wall = 'brick' } = {}) {
 
 // ── 배치 빌더 (#213 Phase 3): 박스/실린더/콘 파트를 재질별 mergeGeometries 로 병합 → 드로우콜 최소화.
 // 이동충돌은 파트별 axisCollider 로 등록(collide), 병합 메시는 재질당 1개만 obstacleMeshes(탄착/차폐) 에 추가.
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 맵 정적 형상 굽기 (#325): 레이드 시작 프리즈(절차 생성 3~5s, 대부분 박스 수만 개 조립 + 병합) 제거 ──
+// 기록(record): 평소대로 빌드하면서 병합 배치(batchBuilder·forestBatch·townBatch)의 최종 병합 형상을 배치 순번별로 저장.
+// 재생(replay): 빌드 로직(시드 PRNG·콜라이더·루팅·프롭 배치)은 그대로 돌리되 형상 생성만 건너뛰고, flush 에서 구운 형상으로 메시를 만든다.
+// 재료는 이름(MAT/TEXMAT/TMAT/canopy/sakura/prop)으로 직렬화. main.js 해시가 다르면 굽기를 무시하고 기존 생성으로 폴백.
+// 파일: assets/baked/<map>.bin.gz = [u32 헤더길이][헤더 JSON][4바이트 정렬 바이너리]. 위치·UV 는 메시별 min/scale Int16 양자화, 노멀 Int8, 색 Uint8(×2 범위).
+// 굽기: scripts/bake_maps.py (헤드리스 크롬 → index.html?bake=1 → POST /__bake/<map>.bin.gz). 릴리스 스크립트가 자동 실행.
+// ══════════════════════════════════════════════════════════════════════════════
+const BAKE = { mode: null, seq: 0, out: null, data: null, fail: null, used: 0 };
+const BAKED = {};              // key → 파싱된 굽기 { hash, batchCount, byBatch: Map<id, entry[]>, bytes }
+let SRC_HASH = null;           // main.js 내용 해시(굽기 무효화 키)
+const SRC_HASH_P = (async () => { // http(비보안 컨텍스트)에선 crypto.subtle 이 없어 cyrb53 사용
+  try { const t = await (await fetch(import.meta.url)).text(); let h1 = 0xdeadbeef, h2 = 0x41c6ce57; for (let i = 0; i < t.length; i++) { const c = t.charCodeAt(i); h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); } h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909); h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909); SRC_HASH = (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36) + ':' + t.length; }
+  catch (e) { console.warn('[bake] 소스 해시 실패 — 굽기 사용 안 함', e && e.message); }
+  return SRC_HASH;
+})();
+const bakeReplay = () => BAKE.mode === 'replay';
+function bakeBatchId() { return BAKE.mode ? BAKE.seq++ : -1; }
+let _matNames = null;
+function matNameOf(m) {
+  if (!_matNames || !_matNames.has(m)) {
+    _matNames = new Map();
+    const reg = (o, pfx) => { for (const [k, v] of Object.entries(o)) { if (v && v.isMaterial) { if (!_matNames.has(v)) _matNames.set(v, pfx + k); } else if (Array.isArray(v)) v.forEach((q, i) => { if (q && q.isMaterial && !_matNames.has(q)) _matNames.set(q, `${pfx}${k}.${i}`); }); } };
+    reg(TEXMAT, 'TEXMAT.'); reg(MAT, 'MAT.'); reg(TMAT, 'TMAT.');
+    for (const [k, v] of Object.entries(CANOPY_MAT)) _matNames.set(v, 'canopy:' + k);
+    for (const [k, v] of Object.entries(SAKURA_MAT)) _matNames.set(v, 'sakura:' + k);
+    for (const [k, v] of Object.entries(PROP_GEO)) if (v && v.mat) _matNames.set(v.mat, 'prop:' + k);
+  }
+  return _matNames.get(m) || null;
+}
+function matByName(n) {
+  if (n.startsWith('canopy:')) return canopyMat(n.slice(7));
+  if (n.startsWith('sakura:')) return sakuraMat(n.slice(7));
+  if (n.startsWith('prop:')) { const ck = n.slice(5), i = ck.indexOf('|'), re = ck.slice(i + 1).match(/^\/(.*)\/([a-z]*)$/); const p = re && propGeo(ck.slice(0, i), new RegExp(re[1], re[2])); return p ? p.mat : null; }
+  const [root, k, idx] = n.split('.'), o = { MAT, TEXMAT, TMAT }[root], v = o && o[k];
+  return idx !== undefined ? v && v[+idx] : v;
+}
+// 병합 결과 기록 / 구운 메시 재생 — 배치 flush 공용
+function bakeRecord(id, mesh, hit) {
+  if (BAKE.mode !== 'record') return;
+  const name = matNameOf(mesh.material);
+  if (!name) { BAKE.fail = BAKE.fail || `이름 없는 재질 (batch ${id}, color #${mesh.material.color && mesh.material.color.getHexString()})`; return; }
+  BAKE.out.push({ id, mat: name, cast: mesh.castShadow, hit, geo: mesh.geometry });
+}
+function bakeReplayFlush(id) {
+  const list = (BAKE.data && BAKE.data.byBatch.get(id)) || [];
+  let n = 0;
+  for (const e of list) {
+    const mat = matByName(e.mat);
+    if (!mat) { BAKE.fail = BAKE.fail || `재질 복원 실패 ${e.mat}`; continue; }
+    const mesh = new THREE.Mesh(e.geometry, mat); mesh.castShadow = e.cast; mesh.receiveShadow = true;
+    scene.add(mesh); if (e.hit) obstacleMeshes.push(mesh); n++; BAKE.used++;
+  }
+  return n;
+}
+function bakeSerialize(entries, meta) {
+  const parts = [], head = { v: 1, ...meta, entries: [] };
+  let off = 0;
+  const push = (arr) => { const pad = (4 - (off % 4)) % 4; if (pad) { parts.push(new Uint8Array(pad)); off += pad; } const o = off; parts.push(new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength)); off += arr.byteLength; return o; };
+  const quant = (attr, comps) => { // 메시별 min/scale → Int16
+    const a = attr.array, n = attr.count, mn = new Array(comps).fill(Infinity), mx = new Array(comps).fill(-Infinity);
+    for (let i = 0; i < n; i++) for (let c = 0; c < comps; c++) { const v = a[i * comps + c]; if (v < mn[c]) mn[c] = v; if (v > mx[c]) mx[c] = v; }
+    const sc = mn.map((m, c) => (mx[c] - m) / 65535 || 1), q = new Int16Array(n * comps);
+    for (let i = 0; i < n; i++) for (let c = 0; c < comps; c++) q[i * comps + c] = Math.round((a[i * comps + c] - mn[c]) / sc[c]) - 32768;
+    return { off: push(q), min: mn, sc };
+  };
+  for (const e of entries) {
+    const g = e.geo, P = g.attributes.position, n = P.count, rec = { id: e.id, mat: e.mat, cast: e.cast, hit: e.hit, n };
+    rec.pos = quant(P, 3);
+    if (g.attributes.uv) rec.uv = quant(g.attributes.uv, 2);
+    if (g.attributes.normal) { const a = g.attributes.normal.array, q = new Int8Array(n * 3); for (let i = 0; i < n * 3; i++) q[i] = Math.round(Math.max(-1, Math.min(1, a[i])) * 127); rec.nrm = push(q); }
+    if (g.attributes.color) { const a = g.attributes.color.array, q = new Uint8Array(n * 3); for (let i = 0; i < n * 3; i++) q[i] = Math.round(Math.max(0, Math.min(2, a[i])) / 2 * 255); rec.col = push(q); }
+    if (g.index) { const ia = g.index.array, big = n > 65535, q = big ? new Uint32Array(ia) : new Uint16Array(ia); rec.idx = push(q); rec.ni = ia.length; rec.i32 = big; }
+    head.entries.push(rec);
+  }
+  const hj = new TextEncoder().encode(JSON.stringify(head)), total = 4 + hj.length, pad = (4 - (total % 4)) % 4;
+  const out = new Uint8Array(total + pad + off); new DataView(out.buffer).setUint32(0, hj.length + pad, true);
+  out.set(hj, 4); out.fill(32, 4 + hj.length, 4 + hj.length + pad); // 공백 패딩(JSON 유효)
+  let p = total + pad; for (const part of parts) { out.set(part, p); p += part.byteLength; }
+  return out;
+}
+function bakeParse(buf) {
+  const dv = new DataView(buf), hl = dv.getUint32(0, true), head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl))), base = 4 + hl;
+  const byBatch = new Map();
+  const deq = (q, comps, n) => { const a = new Int16Array(buf, base + q.off, n * comps), f = new Float32Array(n * comps); for (let i = 0; i < n; i++) for (let c = 0; c < comps; c++) f[i * comps + c] = (a[i * comps + c] + 32768) * q.sc[c] + q.min[c]; return f; };
+  for (const e of head.entries) {
+    const g = new THREE.BufferGeometry(), n = e.n;
+    g.setAttribute('position', new THREE.BufferAttribute(deq(e.pos, 3, n), 3));
+    if (e.nrm !== undefined) g.setAttribute('normal', new THREE.BufferAttribute(new Int8Array(buf.slice(base + e.nrm, base + e.nrm + n * 3)), 3, true));
+    if (e.uv) g.setAttribute('uv', new THREE.BufferAttribute(deq(e.uv, 2, n), 2));
+    if (e.col !== undefined) { const a = new Uint8Array(buf, base + e.col, n * 3), f = new Float32Array(n * 3); for (let i = 0; i < n * 3; i++) f[i] = a[i] / 255 * 2; g.setAttribute('color', new THREE.BufferAttribute(f, 3)); }
+    if (e.idx !== undefined) g.setIndex(new THREE.BufferAttribute(e.i32 ? new Uint32Array(buf.slice(base + e.idx, base + e.idx + e.ni * 4)) : new Uint16Array(buf.slice(base + e.idx, base + e.idx + e.ni * 2)), 1));
+    g.computeBoundingSphere(); g.computeBoundingBox();
+    if (!byBatch.has(e.id)) byBatch.set(e.id, []);
+    byBatch.get(e.id).push({ mat: e.mat, cast: e.cast, hit: e.hit, geometry: g });
+  }
+  return { hash: head.hash, key: head.key, batchCount: head.batchCount, entryCount: head.entries.length, byBatch };
+}
+const _bakedP = {};
+function loadBaked(key) { // 레이드 시작 전 비동기 로드(1회 캐시). 실패·불일치는 null → 기존 생성
+  if (!_bakedP[key]) _bakedP[key] = (async () => {
+    const hash = await SRC_HASH_P; if (!hash) return null;
+    const t0 = performance.now(), res = await fetch(`assets/baked/${key}.bin.gz${ASSET_VER}`);
+    if (!res.ok) { console.info(`[bake] ${key}: 구운 파일 없음(${res.status}) — 절차 생성`); return null; }
+    let buf = await res.arrayBuffer(); const bytes = buf.byteLength, b = new Uint8Array(buf, 0, 2);
+    if (b[0] === 0x1f && b[1] === 0x8b) buf = await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer(); // 서버가 Content-Encoding 으로 풀어 줬으면 그대로
+    const d = bakeParse(buf);
+    if (d.hash !== hash) { console.info(`[bake] ${key}: 소스 해시 불일치(구운 ${d.hash} ≠ 현재 ${hash}) — 절차 생성`); return null; }
+    d.bytes = bytes; BAKED[key] = d;
+    console.info(`[bake] ${key}: 로드 ${Math.round(performance.now() - t0)}ms · ${(bytes / 1048576).toFixed(2)}MB · 메시 ${d.entryCount} · 배치 ${d.batchCount}`);
+    return d;
+  })().catch((e) => { console.warn(`[bake] ${key}: 로드 실패 — 절차 생성`, e && e.message); return null; });
+  return _bakedP[key];
+}
+// 굽기 페이지(index.html?bake=1): 전 맵을 기록 모드로 빌드 → gzip → POST. scripts/bake_maps.py 가 받아 assets/baked 에 저장
+async function bakeAllMaps() {
+  const hash = await SRC_HASH_P, summary = [];
+  for (const key of Object.keys(MAPS)) {
+    if (builtMapKey) tearDownStatic(); builtMapKey = null;
+    BAKE.mode = 'record'; BAKE.seq = 0; BAKE.out = []; BAKE.fail = null;
+    const t0 = performance.now();
+    try { applyMap(key); } catch (e) { BAKE.fail = 'build: ' + e.message; }
+    const ms = Math.round(performance.now() - t0), batchCount = BAKE.seq, entries = BAKE.out;
+    BAKE.mode = null;
+    if (BAKE.fail) { summary.push({ key, error: BAKE.fail }); console.warn('[bake]', key, BAKE.fail); continue; }
+    const raw = bakeSerialize(entries, { hash, key, batchCount });
+    const gz = await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+    const r = await fetch(`/__bake/${key}.bin.gz`, { method: 'POST', body: gz });
+    summary.push({ key, ms, batches: batchCount, meshes: entries.length, raw: raw.byteLength, gz: gz.byteLength, saved: r.status });
+  }
+  await fetch('/__bake/done.json', { method: 'POST', body: JSON.stringify({ hash, summary }) });
+  console.info('[bake] done', JSON.stringify(summary));
+  return summary;
+}
+
 function batchBuilder() {
-  const byMat = new Map();
+  const byMat = new Map(), bid = bakeBatchId(), rp = bakeReplay(); // 굽기 재생이면 형상 생성 생략(콜라이더만) (#325)
   const put = (m, geo) => { if (!byMat.has(m)) byMat.set(m, []); byMat.get(m).push(geo); };
   return {
     box(cx, cy, cz, w, h, d, mat, collide = true) {
+      if (rp) { if (collide) colliders.push(axisCollider(cx - w / 2, cx + w / 2, cy - h / 2, cy + h / 2, cz - d / 2, cz + d / 2)); return; }
       const m = matOf(mat);
       const geo = new THREE.BoxGeometry(w, h, d);
       if (m.userData && m.userData.worldUV) uvWorldBox(geo, w, h, d, cx, cy, cz);
@@ -2098,16 +2238,17 @@ function batchBuilder() {
       if (collide) colliders.push(axisCollider(cx - w / 2, cx + w / 2, cy - h / 2, cy + h / 2, cz - d / 2, cz + d / 2));
     },
     cyl(cx, cy, cz, rTop, rBot, hh, mat, seg = 14, collide = true) {
-      const geo = new THREE.CylinderGeometry(rTop, rBot, hh, seg); geo.translate(cx, cy, cz); put(matOf(mat), geo);
+      if (!rp) { const geo = new THREE.CylinderGeometry(rTop, rBot, hh, seg); geo.translate(cx, cy, cz); put(matOf(mat), geo); }
       const r = Math.max(rTop, rBot);
       if (collide) colliders.push(axisCollider(cx - r, cx + r, cy - hh / 2, cy + hh / 2, cz - r, cz + r));
     },
-    cone(cx, cy, cz, r, hh, mat, seg = 14) { const geo = new THREE.ConeGeometry(r, hh, seg); geo.translate(cx, cy, cz); put(matOf(mat), geo); },
+    cone(cx, cy, cz, r, hh, mat, seg = 14) { if (rp) return; const geo = new THREE.ConeGeometry(r, hh, seg); geo.translate(cx, cy, cz); put(matOf(mat), geo); },
     flush() {
+      if (rp) return bakeReplayFlush(bid);
       for (const [m, gs] of byMat) {
         const merged = mergeGeometries(gs, false); for (const g of gs) g.dispose();
         const mesh = new THREE.Mesh(merged, m); mesh.castShadow = mesh.receiveShadow = true;
-        scene.add(mesh); obstacleMeshes.push(mesh);
+        scene.add(mesh); obstacleMeshes.push(mesh); bakeRecord(bid, mesh, true);
       }
     },
   };
@@ -2228,6 +2369,7 @@ function buildSilo(cx, cz, count = 3, { r = 2.6, h = 12 } = {}) {
 }
 
 function buildIndustrialMap() {
+  const irnd = mulberry32(2370); // 시드 고정 (#325): 굽기 재생과 콜라이더·풀 배치가 일치하도록 (전엔 로드마다 소품 위치가 바뀜)
   buildTexMats(); // 건축 PBR 재질 (#107) — 텍스처 로드 후 1회
   scene.fog = new THREE.Fog(0xaeb6bd, 45, 210); // 기본 안개 복원(맵 전환 시 숲 안개 잔존 방지)
   // 지면 (ambientCG Ground048 — 없으면 절차 생성)
@@ -2366,7 +2508,7 @@ function buildIndustrialMap() {
 
   // 드럼통 (Kenney survival-kit)
   const drums = [[5, -25], [7, -25.8], [-42, 10], [30, -50], [-25, 35], [62, -45], [18, 20], [-65, 55]];
-  for (const [x, z] of drums) placeModel('barrel', x, z, { height: 1.1, rotY: Math.random() * Math.PI * 2 });
+  for (const [x, z] of drums) placeModel('barrel', x, z, { height: 1.1, rotY: irnd() * Math.PI * 2 });
 
   // 나무 (리얼 카드 트리 #280 — 산업지대는 침엽/고사목 위주로 황량하게, 리얼 바위와 톤 통일)
   { const trees = [[-70, -60], [-75, 20], [70, 60], [65, -60], [-20, 70], [50, 70], [-70, 70], [75, -20], [-40, -70], [20, -68], [-5, -55], [68, 30]], fb = forestBatch();
@@ -2378,13 +2520,13 @@ function buildIndustrialMap() {
     ['rockRealA', -15, 62, 2.8], ['rockRealB', 55, -68, 1.7],
     ['rockRealC', -72, -15, 1.3], ['rockRealB', 35, 12, 1.9],
   ];
-  for (const [key, x, z, h] of rocks) placeModel(key, x, z, { height: h + Math.random() * 0.5, rotY: Math.random() * Math.PI * 2 });
+  for (const [key, x, z, h] of rocks) placeModel(key, x, z, { height: h + irnd() * 0.5, rotY: irnd() * Math.PI * 2 });
 
   // 나무상자 엄폐물 (Kenney survival-kit / blaster-kit)
   const boxes = [[3, -30], [-13, -6], [22, 5], [48, 30], [-52, -12], [10, 48], [-38, 22], [58, -25]];
   for (const [x, z] of boxes) {
-    if (Math.random() < 0.5) placeModel('box', x, z, { height: 1.0, rotY: Math.random() * Math.PI * 2 });
-    else placeModel('crateWide', x, z, { height: 1.0, rotY: Math.floor(Math.random() * 4) * Math.PI / 2 });
+    if (irnd() < 0.5) placeModel('box', x, z, { height: 1.0, rotY: irnd() * Math.PI * 2 });
+    else placeModel('crateWide', x, z, { height: 1.0, rotY: Math.floor(irnd() * 4) * Math.PI / 2 });
   }
 
   // 추가 산업 건물 (city-kit-industrial 미사용분)
@@ -2407,7 +2549,7 @@ function buildIndustrialMap() {
     });
   }
   const tires = [[4.6, 24.2], [36, -11.5], [-20, -27.5], [27.8, 46.4], [14, -3]];
-  for (const [x, z] of tires) placeModel('carTire', x, z, { height: 0.62, rotY: Math.random() * Math.PI * 2, collide: false });
+  for (const [x, z] of tires) placeModel('carTire', x, z, { height: 0.62, rotY: irnd() * Math.PI * 2, collide: false });
 
   // 펜스 라인 (survival-kit) — 야적장/창고 경계
   const fenceRow = (x0, z0, dx, dz, n, rotY, kind = 'fenceFort') => {
@@ -2503,12 +2645,12 @@ function buildIndustrialMap() {
   const PROPS = ['barrel', 'box', 'crateWide'];
   const scatterProps = (x, z, clearR, n) => {
     for (let i = 0; i < n; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const px = x + Math.cos(a) * (clearR + Math.random() * 3.5);
-      const pz = z + Math.sin(a) * (clearR + Math.random() * 3.5);
+      const a = irnd() * Math.PI * 2;
+      const px = x + Math.cos(a) * (clearR + irnd() * 3.5);
+      const pz = z + Math.sin(a) * (clearR + irnd() * 3.5);
       if (!isPointOpen(px, pz, 1.3)) continue;
-      placeModel(PROPS[Math.floor(Math.random() * PROPS.length)], px, pz,
-        { height: 0.9 + Math.random() * 0.3, rotY: Math.random() * Math.PI * 2 });
+      placeModel(PROPS[Math.floor(irnd() * PROPS.length)], px, pz,
+        { height: 0.9 + irnd() * 0.3, rotY: irnd() * Math.PI * 2 });
     }
   };
   scatterProps(30, 32, 14, 4);   // warehouse A (22x15)
@@ -5094,6 +5236,7 @@ function propGeo(key, keepRe) { // Poly Haven 프롭에서 keep 에 맞는 메�
 const _ppM = new THREE.Matrix4(), _ppP = new THREE.Vector3(), _ppQ = new THREE.Quaternion(), _ppS = new THREE.Vector3();
 function putProp(fb, key, keepRe, x, z, height, rotY) {
   const p = propGeo(key, keepRe); if (!p) return false;
+  if (bakeReplay()) return true; // (#325)
   const s = height / Math.max(0.01, p.h), g = p.geo.clone();
   g.applyMatrix4(_ppM.compose(_ppP.set(x, terrainH(x, z) - 0.02, z), _ppQ.setFromAxisAngle(_up, rotY), _ppS.set(s, s, s)));
   fb.put(x, z, key + '|' + keepRe, p.mat, g); return true;
@@ -5644,8 +5787,9 @@ function townTerrain(x, z) {
 
 // 청크 병합 빌더: box/boxR/cyl/seg/geo 를 40m 청크·재질별로 모아 flush 에서 merge. 비인덱스 지오메트리는 인덱스 부여(병합 호환).
 function townBatch(chunk = 90) { // 90m 청크(맵 2×2 + 가장자리) — 40m 는 재질 수(~45) × 청크 수로 1000+ draw call
-  const by = new Map();
+  const by = new Map(), bid = bakeBatchId(), rp = bakeReplay(); // 굽기 재생: 형상 생략·콜라이더만 (#325)
   const put = (x, z, m, g) => {
+    if (rp || !g) return;
     if (!g.index) { const n = g.attributes.position.count, idx = new Uint32Array(n); for (let i = 0; i < n; i++) idx[i] = i; g.setIndex(new THREE.BufferAttribute(idx, 1)); }
     for (const a of Object.keys(g.attributes)) if (!['position', 'normal', 'uv'].includes(a)) g.deleteAttribute(a);
     if (!g.attributes.uv) g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
@@ -5655,30 +5799,32 @@ function townBatch(chunk = 90) { // 90m 청크(맵 2×2 + 가장자리) — 40m 
   return {
     put,
     box(cx, cy, cz, w, h, d, mat, collide = false) {
-      const m = matOf(mat), g = new THREE.BoxGeometry(w, h, d);
-      if (m.userData && m.userData.worldUV) uvWorldBox(g, w, h, d, cx, cy, cz);
-      g.translate(cx, cy, cz); put(cx, cz, m, g);
+      if (!rp) { const m = matOf(mat), g = new THREE.BoxGeometry(w, h, d);
+        if (m.userData && m.userData.worldUV) uvWorldBox(g, w, h, d, cx, cy, cz);
+        g.translate(cx, cy, cz); put(cx, cz, m, g); }
       if (collide) colliders.push(axisCollider(cx - w / 2, cx + w / 2, cy - h / 2, cy + h / 2, cz - d / 2, cz + d / 2));
     },
     boxR(cx, cy, cz, w, h, d, mat, rx = 0, ry = 0, rz = 0) {
+      if (rp) return;
       const m = matOf(mat), g = new THREE.BoxGeometry(w, h, d);
       if (m.userData && m.userData.worldUV) uvWorldBox(g, w, h, d);
       if (rx) g.rotateX(rx); if (rz) g.rotateZ(rz); if (ry) g.rotateY(ry);
       g.translate(cx, cy, cz); put(cx, cz, m, g);
     },
     cyl(cx, cy, cz, rt, rb, h, mat, seg = 10, collide = false) {
-      const g = new THREE.CylinderGeometry(rt, rb, h, seg); g.translate(cx, cy, cz); put(cx, cz, matOf(mat), g);
+      if (!rp) { const g = new THREE.CylinderGeometry(rt, rb, h, seg); g.translate(cx, cy, cz); put(cx, cz, matOf(mat), g); }
       if (collide) { const r = Math.max(rt, rb); colliders.push(axisCollider(cx - r, cx + r, cy - h / 2, cy + h / 2, cz - r, cz + r)); }
     },
-    seg(p0, p1, r, mat, radial = 6) { put((p0.x + p1.x) / 2, (p0.z + p1.z) / 2, matOf(mat), barkSeg(p0, p1, r, r, radial)); },
+    seg(p0, p1, r, mat, radial = 6) { if (rp) return; put((p0.x + p1.x) / 2, (p0.z + p1.z) / 2, matOf(mat), barkSeg(p0, p1, r, r, radial)); },
     geo(x, z, mat, g) { put(x, z, matOf(mat), g); },
     flush() {
+      if (rp) return bakeReplayFlush(bid);
       let n = 0;
       for (const { m, gs } of by.values()) {
         const g = mergeGeometries(gs, false); for (const q of gs) q.dispose();
         if (!g) continue;
-        const mesh = new THREE.Mesh(g, m); mesh.castShadow = !(m.userData && m.userData.noShadow); mesh.receiveShadow = true;
-        scene.add(mesh); if (!(m.userData && m.userData.noHit)) obstacleMeshes.push(mesh); n++;
+        const mesh = new THREE.Mesh(g, m), hit = !(m.userData && m.userData.noHit); mesh.castShadow = !(m.userData && m.userData.noShadow); mesh.receiveShadow = true;
+        scene.add(mesh); if (hit) obstacleMeshes.push(mesh); bakeRecord(bid, mesh, hit); n++;
       }
       by.clear(); return n;
     },
@@ -6256,6 +6402,7 @@ function foliageNoFlip(m) { // 양면 재질의 뒷면 노멀 반전 제거 — 
   return m;
 }
 function sphereNormals(g, cx, cy, cz) { // 폴리지 노멀: 정점 노멀 = 수관 중심에서 바깥 방향(+위쪽 가중) — 교차 카드가 구름처럼 매끈히 음영
+  if (!g) return;
   const p = g.attributes.position, n = g.attributes.normal, v = new THREE.Vector3();
   for (let i = 0; i < p.count; i++) { v.set(p.getX(i) - cx, (p.getY(i) - cy) + 1.2, p.getZ(i) - cz).normalize(); n.setXYZ(i, v.x, v.y, v.z); }
   n.needsUpdate = true;
@@ -6732,8 +6879,8 @@ function buildTownBackdrop() {
   const tg = [], tops = [];
   for (const a of [0.55, 1.05]) {
     const x = Math.cos(a) * 205, z = -Math.sin(a) * 205, H = 42;
-    for (const [dx, dz] of [[-3, -3], [3, -3], [-3, 3], [3, 3]]) tg.push(barkSeg(_tv(x + dx, 0, z + dz), _tv(x + dx * 0.25, H, z + dz * 0.25), 0.25, 0.18, 4));
-    for (let y = 8; y < H; y += 8) { const s = 3 * (1 - y / H * 0.75); for (const q of [[-s, -s, s, -s], [s, -s, s, s], [s, s, -s, s], [-s, s, -s, -s]]) tg.push(barkSeg(_tv(x + q[0], y, z + q[1]), _tv(x + q[2], y, z + q[3]), 0.12, 0.12, 4)); }
+    for (const [dx, dz] of [[-3, -3], [3, -3], [-3, 3], [3, 3]]) tg.push(barkSegRaw(_tv(x + dx, 0, z + dz), _tv(x + dx * 0.25, H, z + dz * 0.25), 0.25, 0.18, 4));
+    for (let y = 8; y < H; y += 8) { const s = 3 * (1 - y / H * 0.75); for (const q of [[-s, -s, s, -s], [s, -s, s, s], [s, s, -s, s], [-s, s, -s, -s]]) tg.push(barkSegRaw(_tv(x + q[0], y, z + q[1]), _tv(x + q[2], y, z + q[3]), 0.12, 0.12, 4)); }
     for (const y of [H - 6, H - 14]) { const g = new THREE.BoxGeometry(14, 0.6, 0.6); g.translate(x, y, z); tg.push(g); }
     tops.push([x, H - 6, z]);
   }
@@ -7164,6 +7311,7 @@ function tearDownStatic() {
 }
 
 // 선택된 맵의 정적 지오메트리·물리를 구성 (필요 시 이전 맵 teardown)
+let lastBuildInfo = null;
 function applyMap(key) {
   if (builtMapKey === key) return;
   const m = MAPS[key] || MAP_INDUSTRIAL;
@@ -7174,7 +7322,18 @@ function applyMap(key) {
   setMapSun(m.sun); // 맵별 태양 방향 (#277)
   applyLook(m.look || 'default'); // 맵별 하늘·조명·그레이딩 (#319)
   const before = new Set(scene.children);
-  m.build();
+  const bk = BAKE.mode === 'record' ? null : (BAKED[key] && BAKED[key].hash === SRC_HASH ? BAKED[key] : null);
+  if (bk) { BAKE.mode = 'replay'; BAKE.data = bk; BAKE.seq = 0; BAKE.used = 0; BAKE.fail = null; }
+  const t0 = performance.now();
+  try { m.build(); } finally { if (bk) BAKE.mode = null; }
+  if (bk && (BAKE.seq !== bk.batchCount || BAKE.used !== bk.entryCount || BAKE.fail)) { // 불일치 → 버리고 절차 생성으로 다시 (#325)
+    console.warn(`[bake] ${key}: 재생 불일치(배치 ${BAKE.seq}/${bk.batchCount}, 메시 ${BAKE.used}/${bk.entryCount}${BAKE.fail ? ', ' + BAKE.fail : ''}) — 절차 생성으로 재빌드`);
+    for (const c of scene.children) if (!before.has(c)) scene.remove(c);
+    colliders = []; obstacleMeshes = []; losMeshes = []; placements = []; rangeTargets = [];
+    delete BAKED[key]; m.build();
+  }
+  lastBuildInfo = { key, ms: Math.round(performance.now() - t0), baked: !!bk && !!BAKED[key] };
+  console.info(`[map] ${key} 빌드 ${lastBuildInfo.ms}ms (${lastBuildInfo.baked ? '구운 형상' : '절차 생성'})`);
   for (const c of scene.children) if (!before.has(c)) staticObjects.push(c);
   buildPhysicsStatics();
   checkMapOverlaps(); // 배치 겹침 진단 (#215) — 겹침 있으면 console.warn + mapOverlaps 에 저장
@@ -7203,6 +7362,23 @@ function clearRaidObjects() {
   clearPhysics(); // 물리 소품/래그돌 정리 (#119)
 }
 
+// 레이드 시작 (#325): 로딩 표시 → 구운 형상 로드(비동기) → 빌드 → 셰이더 선컴파일(renderer.compileAsync, 그동안 렌더 보류) → 표시
+let renderHold = false, raidLoadingEl = null;
+async function beginRaid(key) {
+  if (!raidLoadingEl) { raidLoadingEl = document.createElement('div'); raidLoadingEl.style.cssText = 'position:fixed;inset:0;z-index:70;display:flex;align-items:center;justify-content:center;background:rgba(8,12,10,.86);color:#dfe8df;font-size:20px;letter-spacing:2px'; document.body.appendChild(raidLoadingEl); }
+  raidLoadingEl.textContent = '지역 불러오는 중…'; raidLoadingEl.hidden = false;
+  try {
+    await Promise.race([loadBaked(key), new Promise((r) => setTimeout(r, 20000))]);
+    await Promise.race([new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))), new Promise((r) => setTimeout(r, 120))]); // 오버레이를 먼저 그린 뒤 동기 빌드 (탭이 백그라운드면 rAF 가 멈추므로 타임아웃 병행)
+    startRaid(key);
+    if (state.phase === 'raid' && renderer.compileAsync) {
+      raidLoadingEl.textContent = '셰이더 준비 중…'; renderHold = true;
+      const t0 = performance.now();
+      await Promise.race([renderer.compileAsync(scene, camera).catch(() => {}), new Promise((r) => setTimeout(r, 8000))]);
+      console.info(`[raid] 셰이더 선컴파일 ${Math.round(performance.now() - t0)}ms`);
+    }
+  } finally { renderHold = false; raidLoadingEl.hidden = true; }
+}
 function startRaid(mapKey) {
   if (!assetsReady) return;
   clearRaidObjects();
@@ -7659,7 +7835,7 @@ function showMapSelect() {
       card.onmouseenter = () => { card.style.borderColor = '#8fb06a'; card.style.background = 'rgba(60,80,50,.7)'; };
       card.onmouseleave = () => { card.style.borderColor = 'rgba(255,255,255,.16)'; card.style.background = 'rgba(24,32,24,.85)'; };
       card.innerHTML = `<div style="font-size:20px;font-weight:700;margin-bottom:8px">${m.name}</div><div style="font-size:13px;color:#a8b6a0;line-height:1.5">${m.desc}</div>`;
-      card.onclick = () => { mapSelectEl.style.display = 'none'; startRaid(key); };
+      card.onclick = () => { mapSelectEl.style.display = 'none'; beginRaid(key); };
       row.appendChild(card);
     }
     const cancel = document.createElement('button');
@@ -7886,6 +8062,7 @@ function loop() {
   skyUniforms.uTime.value = now / 1000;
   updateSunShadow(); // 그림자 범위 추종 (#319)
   if (gradePass) gradePass.uniforms.uTime.value = now / 1000;
+  if (renderHold) return;                 // 셰이더 선컴파일 중 (#325)
   if (composer) composer.render();       // 항상 컴포저 경유 (톤매핑 일관) — 효과 OFF 는 GTAO/블룸 패스만 비활성
   else renderer.render(scene, camera);
 }
@@ -7943,7 +8120,7 @@ window.__ex = {
     const m = pcMuzzle();
     return { muzzle: m.toArray().map((v) => +v.toFixed(2)), gunPivot: pc ? pc.gunPivot.position.toArray().map((v) => +v.toFixed(2)) : null, gunLen: pc && pc.gunLen, handR: !!(pc && pc.handR), handL: !!(pc && pc.handL), curGun: !!(pc && pc.curGun) };
   },
-  _startRaid(k) { startRaid(k); },
+  _startRaid(k) { startRaid(k); }, _beginRaid(k) { return beginRaid(k); }, _loadBaked(k) { return loadBaked(k); }, get bakeInfo() { return { hash: SRC_HASH, loaded: Object.keys(BAKED), last: lastBuildInfo }; },
   _fire() { if (state.phase !== 'raid') return; if (gun.mag <= 0) gun.mag = GUN.magSize; fireShot(); }, // QA: 트리거 게이트(포인터락·raiseT 등) 우회 1발, 탄창 자동 보충 (#292)
   get rangeTargets() { return rangeTargets; }, get drill() { return drill; }, _startDrill() { startDrill(); }, _rangeTick(dt) { updateRangeTargets(dt); }, _cycleDrillMode() { cycleDrillMode(); }, get recoilPat() { return recoilPat; }, // QA (#295/#298)
   _flushProjectiles() { for (let k = 0; k < 200 && projectiles.length; k++) updateProjectiles(0.02); return projectiles.length; }, _stepProjectiles(dt) { updateProjectiles(dt); }, get projectiles() { return projectiles; }, // QA (#301): 발사체를 즉시 비행 완료 / 수동 스텝 — 자동화 탭은 rAF 가 느려 드릴/이동 표적 시간을 수동 진행
@@ -7980,7 +8157,9 @@ updateMenuStash();
 refreshInventoryUI();
 dom.btnStart.disabled = true;
 dom.btnStart.textContent = '에셋 로딩 중...';
-loadAssets().catch((err) => {
+const _assetsP = loadAssets();
+if (new URLSearchParams(location.search).has('bake')) _assetsP.then(() => bakeAllMaps()).catch((e) => fetch('/__bake/done.json', { method: 'POST', body: JSON.stringify({ error: String(e && e.message) }) }));
+_assetsP.catch((err) => {
   console.error('asset load failed:', err);
   dom.btnStart.textContent = '에셋 로딩 실패 — 새로고침 해 주세요';
   const label = document.getElementById('load-label');
