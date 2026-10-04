@@ -2786,6 +2786,101 @@ const ENEMY = {
 
 const HITBOX_MAT = new THREE.MeshBasicMaterial();
 const CHAR_HEIGHT = 1.75;
+// ── 캐릭터 장비 (#331 캐릭터 개편 2단계): 헬멧(NVG 마운트)·플레이트 캐리어·배낭을 절차 지오메트리로 만들어 본에 부착.
+// - 치수는 모델 바인드 포즈에서 실측(몸통 폭·앞뒤 깊이·어깨 높이·얼굴 박스) → VRoid 4종 모두 피팅. 키별 1회 계산 캐시.
+// - 부위별 지오메트리는 정점 색으로 병합(메시 1개) → 적 13기도 드로우 콜 거의 안 늘어난다.
+// - Object3D.attach 가 월드 변환을 보존하므로 g 공간(캐릭터 앞=+z, y 위, 미터)에서 만들고 본에 붙이면 끝(본 로컬 축을 알 필요 없음).
+const GEAR_PAL = { olive: [0x4e5539, 0x363c28], tan: [0x8c7c5a, 0x6c5f44], black: [0x25282c, 0x17191c], gray: [0x5d6267, 0x45494e], boss: [0x4a1c1f, 0x2e1013] };
+const GEAR_MAT = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.86, metalness: 0.08, side: THREE.DoubleSide });
+const GEAR_FIT = {};
+function gearFit(model, g, key) {
+  if (GEAR_FIT[key]) return GEAR_FIT[key];
+  model.updateMatrixWorld(true); g.updateMatrixWorld(true);
+  const inv = g.matrixWorld.clone().invert(), V = new THREE.Vector3();
+  const wp = (n) => { const b = model.getObjectByName(n); return b ? b.getWorldPosition(new THREE.Vector3()).applyMatrix4(inv) : null; };
+  const spine = wp('Spine'), chest = wp('Chest'), upper = wp('UpperChest'), neck = wp('Neck');
+  const verts = (re) => { const out = []; model.traverse((o) => { if (o.isSkinnedMesh && re.test(o.name)) { const a = o.geometry.attributes.position; for (let i = 0; i < a.count; i++) out.push(V.fromBufferAttribute(a, i).applyMatrix4(o.matrixWorld).applyMatrix4(inv).clone()); } }); return out; };
+  const pct = (arr, q) => { const a = [...arr].sort((x, y) => x - y); return a[Math.max(0, Math.min(a.length - 1, Math.round(q * (a.length - 1))))]; };
+  const body = verts(/^Body/i), face = verts(/^Face/i);
+  const yLo = spine.y, yHi = chest.y + 0.07;
+  const sl = body.filter((v) => v.y > yLo && v.y < yHi && Math.abs(v.x) < 0.2);
+  const wx = pct(sl.map((v) => Math.abs(v.x)), 0.97), zf = pct(sl.map((v) => v.z), 0.97), zb = pct(sl.map((v) => v.z), 0.03);
+  const sh = body.filter((v) => v.x > 0.045 && v.x < 0.09 && v.y < neck.y + 0.01 && v.y > upper.y && Math.abs(v.z - (zf + zb) / 2) < 0.05);
+  const shoulderY = sh.length ? pct(sh.map((v) => v.y), 0.97) : upper.y + 0.08;
+  const fb = new THREE.Box3(); for (const v of face) fb.expandByPoint(v);
+  const fit = { yLo, yHi, wx, zf, zb, zc: (zf + zb) / 2, shoulderY, chestY: chest.y, head: { cx: (fb.min.x + fb.max.x) / 2, cz: (fb.min.z + fb.max.z) / 2, fw: fb.max.x - fb.min.x, fd: fb.max.z - fb.min.z, top: fb.max.y, fh: fb.max.y - fb.min.y }, bones: { head: 'Head', chest: 'Chest', upper: 'UpperChest' } };
+  console.info(`[gear] ${key} fit wx ${wx.toFixed(3)} z ${zb.toFixed(3)}..${zf.toFixed(3)} shoulderY ${shoulderY.toFixed(2)} face ${fit.head.fw.toFixed(3)}×${fit.head.fd.toFixed(3)}×${fit.head.fh.toFixed(3)} top ${fit.head.top.toFixed(2)}`);
+  return (GEAR_FIT[key] = fit);
+}
+const gBox = (w, h, d, x, y, z, c, rx = 0, ry = 0) => { const q = new THREE.BoxGeometry(w, h, d); if (rx) q.rotateX(rx); if (ry) q.rotateY(ry); q.translate(x, y, z); return { g: q, c }; };
+const gCyl = (rt, rb, h, x, y, z, c, seg = 12, sx = 1, sz = 1, open = false, rz = 0) => { const q = new THREE.CylinderGeometry(rt, rb, h, seg, 1, open); if (rz) q.rotateZ(rz); q.scale(sx, 1, sz); q.translate(x, y, z); return { g: q, c }; };
+function gearMesh(parts) {
+  const gs = parts.map(({ g, c }) => {
+    const col = new THREE.Color(c), n = g.attributes.position.count, a = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { a[i * 3] = col.r; a[i * 3 + 1] = col.g; a[i * 3 + 2] = col.b; }
+    g.setAttribute('color', new THREE.BufferAttribute(a, 3));
+    for (const k of Object.keys(g.attributes)) if (!['position', 'normal', 'uv', 'color'].includes(k)) g.deleteAttribute(k);
+    return g;
+  });
+  const m = new THREE.Mesh(mergeGeometries(gs, false), GEAR_MAT);
+  m.castShadow = true; m.frustumCulled = false; m.userData.gear = true;
+  return m;
+}
+// style: { helmet: 팔레트키|null, nvg, vest: 키|null, pack: 키|null, heavy } → { helmet, vest, pack } 메시(없으면 null). 본에 부착까지.
+function attachGear(model, g, key, style) {
+  const F = gearFit(model, g, key), out = { helmet: null, vest: null, pack: null };
+  const bone = (n) => model.getObjectByName(n);
+  const put = (mesh, boneName) => { g.add(mesh); g.updateMatrixWorld(true); const b = bone(boneName); if (b) b.attach(mesh); else model.add(mesh); };
+  const { wx, zf, zb, zc, yLo, yHi, shoulderY } = F, H = F.head;
+  if (style.helmet) {
+    const [c, c2] = GEAR_PAL[style.helmet], rx = H.fw * 0.5 * 1.3, rz = H.fd * 0.5 * 1.32, edgeY = H.top - H.fh * 0.3, cz = H.cz - 0.012;
+    const P = [];
+    const dome = new THREE.SphereGeometry(1, 22, 10, 0, Math.PI * 2, 0, Math.PI / 2); dome.scale(rx, rx * 0.95, rz); dome.translate(H.cx, edgeY, cz); P.push({ g: dome, c });
+    const rim = new THREE.TorusGeometry(1, 0.045, 6, 22); rim.rotateX(Math.PI / 2); rim.scale(rx * 1.005, 1, rz * 1.005); rim.translate(H.cx, edgeY + 0.004, cz); P.push({ g: rim, c: c2 });
+    P.push(gBox(rx * 1.4, 0.012, 0.045, H.cx, edgeY + 0.012, cz + rz * 0.98, c2, -0.18));                         // 챙
+    P.push(gBox(rx * 1.5, 0.05, 0.03, H.cx, edgeY - 0.012, cz - rz * 0.98, c, 0.28));                             // 뒷목 덮개
+    for (const sx of [-1, 1]) P.push(gBox(0.014, 0.04, rz * 0.9, H.cx + sx * rx * 0.99, edgeY + 0.012, cz, c2));   // 측면 레일
+    if (style.nvg) {
+      P.push(gBox(0.06, 0.036, 0.026, H.cx, edgeY + rx * 0.62, cz + rz * 0.86, 0x181a1d));                         // 마운트
+      P.push(gBox(0.105, 0.05, 0.06, H.cx, edgeY + rx * 0.7, cz + rz * 0.98 + 0.02, 0x1c1f23, -0.5));              // 올려둔 NVG
+      for (const sx of [-1, 1]) P.push(gCyl(0.017, 0.017, 0.04, H.cx + sx * 0.026, edgeY + rx * 0.72, cz + rz * 0.98 + 0.052, 0x101214, 8, 1, 1, false, 0));
+    }
+    out.helmet = gearMesh(P); put(out.helmet, F.bones.head);
+  }
+  if (style.vest) {
+    const [c, c2] = GEAR_PAL[style.vest], h = yHi - yLo, yc = (yLo + yHi) / 2, rx = wx + 0.012, rz = (zf - zb) / 2 + 0.012, P = [];
+    P.push(gCyl(1, 1, h, 0, yc, zc, c, 22, rx, rz, true));                                                        // 몸통을 두르는 띠(커머밴드 포함)
+    const pw = Math.min(0.21, wx * 1.55);
+    P.push(gBox(pw, h * 0.86, 0.03, 0, yc + h * 0.04, zf + 0.018, c2));                                           // 앞 플레이트
+    P.push(gBox(pw, h * 0.86, 0.03, 0, yc + h * 0.04, zb - 0.018, c2));                                           // 뒤 플레이트
+    for (const px of [-0.066, 0, 0.066]) P.push(gBox(0.058, 0.082, 0.04, px, yLo + 0.062, zf + 0.052, c));        // 탄창 파우치
+    P.push(gBox(0.05, 0.1, 0.04, wx * 0.96, yc, zc + 0.01, c2));                                                  // 측면 무전기 파우치
+    for (const sx of [-1, 1]) {
+      const sxp = sx * Math.min(0.075, wx * 0.62), d = zf - zb + 0.05;
+      P.push(gBox(0.04, 0.012, d, sxp, shoulderY + 0.006, zc, c));                                                // 어깨끈
+      P.push(gBox(0.04, Math.max(0.02, shoulderY - yHi + 0.02), 0.014, sxp, (shoulderY + yHi) / 2 + 0.01, zf + 0.012, c));
+      P.push(gBox(0.04, Math.max(0.02, shoulderY - yHi + 0.02), 0.014, sxp, (shoulderY + yHi) / 2 + 0.01, zb - 0.012, c));
+    }
+    if (style.heavy) for (const sx of [-1, 1]) P.push(gBox(0.075, 0.03, 0.115, sx * (wx + 0.045), shoulderY - 0.012, zc, c2, 0, 0.0));   // 어깨 보호대
+    out.vest = gearMesh(P); put(out.vest, F.bones.chest);
+  }
+  if (style.pack) {
+    const [c, c2] = GEAR_PAL[style.pack], w = Math.min(0.27, wx * 2.05), hh = style.heavy ? 0.34 : 0.3, d = 0.13, yc = (yLo + yHi) / 2 + 0.05, z = zb - 0.024 - d / 2, P = [];
+    P.push(gBox(w, hh, d, 0, yc, z, c));
+    P.push(gBox(w * 0.92, 0.045, d * 1.05, 0, yc + hh / 2 + 0.01, z, c2));                                        // 덮개
+    for (const sx of [-1, 1]) P.push(gBox(0.05, hh * 0.62, d * 0.62, sx * (w / 2 + 0.022), yc - 0.03, z, c2));     // 측면 주머니
+    P.push(gCyl(0.036, 0.036, w * 0.9, 0, yc + hh / 2 + 0.07, z - 0.01, c2, 10, 1, 1, false, Math.PI / 2));       // 말린 매트
+    for (const sx of [-1, 1]) P.push(gBox(0.03, 0.02, 0.05, sx * w * 0.32, yc - hh / 2 + 0.012, z + d / 2 + 0.002, 0x181a1d)); // 하단 버클
+    out.pack = gearMesh(P); put(out.pack, F.bones.upper);
+  }
+  return out;
+}
+function randomGearStyle(boss) {
+  if (boss) return { helmet: 'boss', nvg: true, vest: 'boss', pack: 'boss', heavy: true };
+  const keys = ['olive', 'tan', 'black', 'gray'], pk = () => keys[Math.floor(Math.random() * keys.length)], base = pk();
+  return { helmet: Math.random() < 0.7 ? (Math.random() < 0.7 ? base : pk()) : null, nvg: Math.random() < 0.3, vest: Math.random() < 0.75 ? base : null, pack: Math.random() < 0.45 ? (Math.random() < 0.6 ? base : pk()) : null, heavy: Math.random() < 0.15 };
+}
+
 // ── 플레이어 히트박스 (#316): 적 발사체 레이캐스트 전용(비표시). 적과 같은 캡슐(0.22, 1.0 @0.85) + 머리 구(0.16 @1.60) — 플레이어는 앉기 없음.
 // 위치·요는 updateProjectiles 에서 레이 검사 직전에 player.pos/yaw 로 맞춘다(자동화 탭처럼 프레임이 없어도 정확).
 const playerHit = { group: new THREE.Group() };
@@ -2795,7 +2890,7 @@ playerHit.body.userData = { playerHit: true, part: 'body' }; playerHit.head.user
 playerHit.group.add(playerHit.body, playerHit.head); scene.add(playerHit.group);
 function syncPlayerHit() { playerHit.group.position.copy(player.pos); playerHit.group.rotation.y = player.yaw || 0; playerHit.group.updateMatrixWorld(true); }
 
-function makeEnemyMesh() {
+function makeEnemyMesh(boss = false) {
   const g = new THREE.Group();
 
   // 캐릭터 (VRoid CC0 애니메 걸 — 개체마다 랜덤 모델, Kenney 애니메이션 리타게팅)
@@ -2812,6 +2907,7 @@ function makeEnemyMesh() {
     }
   });
   g.add(model);
+  const gear = attachGear(model, g, key, randomGearStyle(boss)); // 장비 부착 — 믹서 전(바인드 포즈)에서 (#331)
 
   const clips = CHAR_CLIPS[key];
   const mixer = new THREE.AnimationMixer(model);
@@ -2886,7 +2982,7 @@ function makeEnemyMesh() {
   // 상체 본 — 피격 flinch / 전투 조준 자세용 (mixer 갱신 후 오프셋 적용)
   const spine = model.getObjectByName('Spine') || null;
   return {
-    group: g, body, head, flash, model, mixer, actIdle, actRun,
+    group: g, body, head, flash, model, mixer, gear, actIdle, actRun,
     actDeath, actHitChest, actHitHead, actShoot, actReload, actHitDir, actDeathDir,
     actRoll, actCrouch, actAimUp, actAimDown, actWalk, actLimp, actAlert,
     running: false, crouched: false, baseAct: actIdle, spine,
@@ -2955,10 +3051,10 @@ function spawnEnemies(avoidPos) {
 function spawnBoss(avoidPos) {
   let p;
   do { p = randomOpenPoint(); } while (p.distanceTo(avoidPos) < 40);
-  const m = makeEnemyMesh();
+  const m = makeEnemyMesh(true);
   m.model.scale.multiplyScalar(1.07);
   m.model.traverse((o) => {
-    if ((o.isMesh || o.isSkinnedMesh) && o.material) {
+    if ((o.isMesh || o.isSkinnedMesh) && o.material && !o.userData.gear) { // 장비는 자체 팔레트(boss)라 틴트 제외 (#331)
       o.material = o.material.clone(); // 재질 공유 해제 후 틴트
       o.material.color.multiply(new THREE.Color(0.4, 0.16, 0.18)); // 어두운 적갈색
     }
@@ -3846,6 +3942,7 @@ function buildPlayerChar() {
   model.traverse((o) => { if (o.isMesh || o.isSkinnedMesh) { o.castShadow = true; o.frustumCulled = false; } });
   const g = new THREE.Group();
   g.add(model);
+  const gear = attachGear(model, g, PC_KEY, { helmet: 'olive', nvg: true, vest: 'olive', pack: 'tan', heavy: false }); // 전부 만들고 상태별 표시 (#331)
   g.visible = false;
   scene.add(g);
 
@@ -3917,7 +4014,7 @@ function buildPlayerChar() {
 
   const spine = model.getObjectByName('Spine') || null;
   pc = {
-    group: g, model, mixer, handR, handL, lArm, lFore, gunPivot, spine, spinePose: null,
+    group: g, model, mixer, gear, handR, handL, lArm, lFore, gunPivot, spine, spinePose: null,
     ikBlend: 0, leftGrip: new THREE.Vector3(),
     actIdleLower, actWalkLower, actRunLower, upperReady, upperRun, upperAimAdd,
     aimBody, aimLegs, walkLegsAim, loco: (loco && loco.walkLo && loco.jogLo && loco.walkLg && loco.jogLg) ? loco : null,
@@ -4159,6 +4256,7 @@ function driveLoco(L, which, target, dt, hSpeed, lf, lr) {
 }
 function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   if (!pc) return;
+  if (pc.gear) { pc.gear.helmet.visible = !!player.helmet; pc.gear.vest.visible = player.armorDur > 0; } // 헬멧·방탄복 착용 상태 반영 (#331)
   pc.group.visible = state.phase === 'raid' && !scopeShown && viewMode === 'tps'; // FPS 는 캐릭터 숨김 (#145)
   if (pc.gunPivot) pc.gunPivot.visible = pc.group.visible;
   pc.group.position.set(player.pos.x, player.pos.y, player.pos.z);
