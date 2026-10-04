@@ -2914,7 +2914,9 @@ function makeEnemyMesh(boss = false) {
   mixer.timeScale = 0.95 + Math.random() * 0.1; // 개체 간 락스텝 방지
   const actIdle = clips.idle ? mixer.clipAction(clips.idle) : null;
   const actRun = clips.run ? mixer.clipAction(clips.run) : null;
-  const actWalk = clips.walk ? mixer.clipAction(clips.walk) : null;
+  const kcl = clips.k || {}; // Kimodo 클립 (#337): 순찰=KPatrol(좌우를 살피는 경계 걷기), 후퇴=KWalkB(뒷걸음) — 없으면 기존 걷기
+  const actWalk = (kcl.KPatrol || clips.walk) ? mixer.clipAction(kcl.KPatrol || clips.walk) : null;
+  const actBack = kcl.KWalkB ? mixer.clipAction(kcl.KWalkB) : null;
   const actLimp = clips.limp ? mixer.clipAction(clips.limp) : null;
   // 원샷 액션 (사망/피격) — 마지막 프레임 유지, 피격은 finished 시 복귀
   const mkOnce = (clip) => {
@@ -2982,7 +2984,7 @@ function makeEnemyMesh(boss = false) {
   // 상체 본 — 피격 flinch / 전투 조준 자세용 (mixer 갱신 후 오프셋 적용)
   const spine = model.getObjectByName('Spine') || null;
   return {
-    group: g, body, head, flash, model, mixer, gear, actIdle, actRun,
+    group: g, body, head, flash, model, mixer, gear, actIdle, actRun, actBack,
     actDeath, actHitChest, actHitHead, actShoot, actReload, actHitDir, actDeathDir,
     actRoll, actCrouch, actAimUp, actAimDown, actWalk, actLimp, actAlert,
     running: false, crouched: false, baseAct: actIdle, spine,
@@ -3301,8 +3303,9 @@ function updateEnemy(e, dt) {
     const wounded = e.actLimp && (e.hp < (e.maxHp || ENEMY.hp) * 0.35 || enemyLegsOut(e)) && e.rollT <= 0;
     const wantWalk = wantRun && e.actWalk && speed <= ENEMY.walkSpeed + 0.01; // 순찰·후퇴 보행
     const wantCrouch = !wantRun && e.state === 'combat' && e.stance === 'crouch' && !!e.actCrouch;
+    const retreating = e.state === 'combat' && e.combatMove === 'retreat' && e.rollT <= 0 && !!e.actBack; // 후퇴는 뒷걸음 클립 (#337)
     const desired = wantRun
-      ? (wounded ? e.actLimp : (wantWalk ? e.actWalk : e.actRun))
+      ? (wounded ? e.actLimp : (wantWalk ? (retreating ? e.actBack : e.actWalk) : e.actRun))
       : (wantCrouch ? e.actCrouch : e.actIdle);
     if (desired !== e.baseAct) {
       e.animSwitchT = (e.animSwitchT || 0) + dt;
@@ -3310,7 +3313,7 @@ function updateEnemy(e, dt) {
         e.animSwitchT = 0;
         e.baseAct.fadeOut(0.15);
         desired.reset().fadeIn(0.15).play();
-        if (desired === e.actRun || desired === e.actWalk) {
+        if (desired === e.actRun || desired === e.actWalk || desired === e.actBack) {
           desired.time = Math.random() * desired.getClip().duration; // 위상 분산
         }
         e.baseAct = desired;
@@ -3326,7 +3329,8 @@ function updateEnemy(e, dt) {
     }
     if (e.running) {
       if (e.baseAct === e.actLimp) e.actLimp.timeScale = Math.max(0.6, speed / 0.41); // ARDY 원속 0.41m/s
-      else if (e.baseAct === e.actWalk) e.actWalk.timeScale = Math.max(0.5, speed / 1.0); // ARDY 원속 1.0m/s
+      else if (e.baseAct === e.actWalk) e.actWalk.timeScale = Math.max(0.5, speed / 1.0); // 원속 1.0m/s (ARDY·KPatrol)
+      else if (e.baseAct === e.actBack) e.actBack.timeScale = Math.max(0.5, speed / 1.09); // KWalkB 원속 1.09m/s
       else e.actRun.timeScale = Math.max(0.5, speed / 3.4);
     }
   }
@@ -3578,7 +3582,7 @@ function killEnemy(e, dir = null) {
   }
   if (e.actDeath) {
     // UAL Death01 모션캡처 재생 (Hips 이동 포함 — 바닥까지 모션이 표현)
-    for (const a of [e.actIdle, e.actRun, e.actWalk, e.actLimp, e.actCrouch, e.actHitChest, e.actHitHead,
+    for (const a of [e.actIdle, e.actRun, e.actWalk, e.actBack, e.actLimp, e.actCrouch, e.actHitChest, e.actHitHead,
       e.actShoot, e.actReload, e.actRoll, e.actAlert, ...Object.values(e.actHitDir || {})]) {
       if (a && a.isRunning()) a.fadeOut(0.1);
     }
