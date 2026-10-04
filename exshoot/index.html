@@ -163,6 +163,15 @@
     position: absolute; inset: 0; opacity: 0;
     background: radial-gradient(ellipse at center, transparent 45%, rgba(120, 0, 0, 0.65) 100%);
   }
+  /* 피격 방향 표시 (#343): 화면 중앙 링 위의 호 — 맞은 쪽을 가리키고 카메라를 따라 회전, JS 가 opacity/transform 을 매 프레임 갱신 */
+  #hitdir { position: absolute; left: 50%; top: 50%; width: 0; height: 0; pointer-events: none; }
+  #hitdir .hd {
+    position: absolute; left: 0; top: 0; width: min(360px, 62vmin); height: min(360px, 62vmin);
+    border-radius: 50%; will-change: transform, opacity;
+    background: conic-gradient(from -24deg, rgba(255, 40, 30, 0) 0deg, rgba(255, 40, 30, 0.95) 7deg, rgba(255, 40, 30, 0.95) 41deg, rgba(255, 40, 30, 0) 48deg, rgba(255, 40, 30, 0) 360deg);
+    -webkit-mask: radial-gradient(circle closest-side, transparent 80%, #000 83%, #000 95%, transparent 99%);
+            mask: radial-gradient(circle closest-side, transparent 80%, #000 83%, #000 95%, transparent 99%);
+  }
 
   #killfeed {
     position: absolute; left: 24px; top: 90px; font-size: 12px; color: #c9d4c9;
@@ -456,6 +465,7 @@
   <div class="overlay" id="hud">
     <div id="damage-vignette"></div>
     <div id="lowhp-vignette"></div>
+    <div id="hitdir"></div>
     <div id="crosshair">
       <div class="ch-dot"></div>
       <div class="ch-line ch-t"></div>
@@ -662,6 +672,6 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=e2c7e39"></script>
+  <script type="module" src="./src/main.js?v=d74960f"></script>
 </body>
 </html>

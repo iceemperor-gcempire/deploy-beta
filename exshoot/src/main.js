@@ -247,7 +247,7 @@ const dom = {
   lootValue: $('loot-value-num'), kills: $('kills'),
   prompt: $('prompt'), extractProgress: $('extract-progress'),
   extractFill: $('extract-fill'), extractLabel: $('extract-label'),
-  damageVignette: $('damage-vignette'), lowhpVignette: $('lowhp-vignette'),
+  damageVignette: $('damage-vignette'), lowhpVignette: $('lowhp-vignette'), hitDir: $('hitdir'),
   hitmarker: $('hitmarker'), killfeed: $('killfeed'),
   inventory: $('inventory'), invList: $('inv-list'), invTotal: $('inv-total-val'),
   menuStash: $('menu-stash'), btnStart: $('btn-start'),
@@ -1731,7 +1731,33 @@ function tone({ freq = 600, dur = 0.1, gain = 0.15, type = 'sine', slide = 0 }) 
   o.connect(g).connect(sfxBus);
   o.start(); o.stop(ctx.currentTime + dur);
 }
+// 근접탄 휘파람 (#343): 대역통과 노이즈의 하강 스윕(탄이 지나가며 낮아지는 소리) + 첫머리의 짧은 고역 균열음. pan −1(왼)~1(오), k 0~1(가까울수록 큼)
+function whizzGraph(ctx, dest, pan, k, t0, rnd = Math.random) {
+  const out = ctx.createGain(); out.gain.value = 1;
+  if (ctx.createStereoPanner) { const p = ctx.createStereoPanner(); p.pan.value = pan; out.connect(p).connect(dest); } else out.connect(dest);
+  const mk = (dur, decay) => {
+    const len = Math.max(1, Math.floor(ctx.sampleRate * dur)), buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (rnd() * 2 - 1) * (decay ? Math.exp(-i / len * decay) : 1);
+    const s = ctx.createBufferSource(); s.buffer = buf; return s;
+  };
+  const dur = 0.26, g = 0.3 + 0.4 * k;
+  const w = mk(dur, 0), f = ctx.createBiquadFilter(), wg = ctx.createGain();
+  f.type = 'bandpass'; f.Q.value = 3.2;
+  f.frequency.setValueAtTime(3300 + rnd() * 700, t0); f.frequency.exponentialRampToValueAtTime(950, t0 + dur);
+  wg.gain.setValueAtTime(0.0001, t0); wg.gain.exponentialRampToValueAtTime(g, t0 + 0.035); wg.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  w.connect(f).connect(wg).connect(out); w.start(t0);
+  const c = mk(0.045, 14), hf = ctx.createBiquadFilter(), cg = ctx.createGain();
+  hf.type = 'highpass'; hf.frequency.value = 2600; cg.gain.value = g * 0.7;
+  c.connect(hf).connect(cg).connect(out); c.start(t0);
+}
+let _lastWhizzT = -1;
 const sfx = {
+  whizz(pan = 0, k = 1) {
+    const ctx = audio();
+    if (ctx.currentTime - _lastWhizzT < 0.04) return; // 연발이 한 덩어리로 뭉개지지 않게 최소 간격
+    _lastWhizzT = ctx.currentTime;
+    whizzGraph(ctx, sfxBus, pan, k, ctx.currentTime);
+  },
   shoot() {
     const sil = currentAtt.includes('silencer');
     if (!playBuf('shoot', { vol: GUN.sfxVol * (sil ? 0.32 : 1), rate: GUN.sfxRate * (sil ? 1.06 : 1), lp: sil ? 1600 : 0, jitter: 0.04 })) {
@@ -3571,9 +3597,10 @@ function enemyShoot(e, dist) {
   return spawnEnemyProjectile(muzzle, dir, dmg, e, hit);
 }
 let lastEnemyShot = null; // QA
+let lastEnvHit = null; // QA (#343): 적 탄이 마지막으로 맞은 환경 교차 정보 (엄폐물 정체 확인용)
 function spawnEnemyProjectile(muzzle, dir, dmg, e, rolled) {
   const pr = { pos: muzzle.clone(), vel: dir.clone().multiplyScalar(ENEMY.velocity), t: 0, dist: 0, range: ENEMY.fireRange * 3, dmgBody: dmg, dmgHead: dmg,
-    line: null, enemy: true, from: e, rolled, result: null };
+    line: null, enemy: true, from: e, rolled, result: null, origin: muzzle.clone(), whizzed: false, hitPlayer: false };
   const geo = new THREE.BufferGeometry().setFromPoints([muzzle, muzzle]); // 라이브 트레이서(총구→현재 위치), 소멸 후 0.07s 페이드
   pr.line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffaa66, transparent: true, opacity: 0.85 })); scene.add(pr.line);
   projectiles.push(pr); lastEnemyShot = pr;
@@ -3596,7 +3623,8 @@ function legsK() { if (painFree()) return 1; const f = partFrac('legs'); return 
 function armsSpread() { if (painFree()) return 0; const f = partFrac('arms'); return f <= 0 ? 0.012 : f < 0.5 ? 0.005 : 0; }  // 탄퍼짐 가산
 function limbBlacked() { return !!player.parts && ['stomach', 'arms', 'legs'].some((k) => player.parts[k] <= 0); }
 const PART_EFFECT = { legs: '이동 저하·질주/점프 불가', arms: '조준 흔들림·재장전 지연', stomach: '지구력 회복 저하' };
-function damagePlayer(dmg, headshot = false, part = null) {
+function damagePlayer(dmg, headshot = false, part = null, src = null) {
+  if (src) showHitDir(src); // 헬멧이 막은 헤드샷도 "맞았다"는 정보라 방향은 알린다 (#343)
   const k = headshot ? 'head' : (part || randomPart()); // 부위 먼저 — 방어구는 부위별 (#307)
   if (headshot) {
     if (player.helmet) {
@@ -4794,6 +4822,61 @@ function spawnProjectile(muzzle, dir, tracerStart) {
   projectiles.push(pr);
 }
 const _pDir = new THREE.Vector3(), _pNext = new THREE.Vector3();
+// ── 근접탄 휘파람 (#343): 적 탄이 몸 중심 WHIZZ_R 안을 지나가면 한 번 소리. 탄 진행 직선과 몸 중심의 수직 거리(d)로 크기, 최근접점의 카메라 좌우 오프셋으로 패닝.
+// 이번 스텝(엄폐에 잘렸으면 잘린 선분)이 최근접점을 지날 때만 울린다 — 최근접점에 닿기 전에 벽에 막힌 탄·멀어지는 탄은 제외, 접근 중이면 다음 스텝에 본다. 명중한 탄은 호출되지 않는다.
+const WHIZZ_R = 3.0;
+const _wzD = new THREE.Vector3(), _wzP = new THREE.Vector3(), _wzC = new THREE.Vector3(), _wzR = new THREE.Vector3(), _wzF = new THREE.Vector3();
+let whizzCount = 0, lastWhizz = null; // QA
+function checkWhizz(pr, next) {
+  _wzC.set(player.pos.x, player.pos.y + 1.0, player.pos.z);
+  _wzD.subVectors(next, pr.pos); const sl = _wzD.length();
+  if (sl < 1e-6) return;
+  _wzD.multiplyScalar(1 / sl);
+  const along = _wzP.subVectors(_wzC, pr.pos).dot(_wzD); // 현재 위치에서 최근접점까지의 진행 거리
+  if (along < -0.5 || along > sl) return; // 이미 멀어지는 탄 / 아직 최근접점 전 (다음 스텝에 다시 본다)
+  _wzR.copy(pr.pos).addScaledVector(_wzD, Math.max(0, along));
+  const d = _wzR.distanceTo(_wzC);
+  if (d > WHIZZ_R) return;
+  pr.whizzed = true;
+  camera.getWorldDirection(_wzF); const rx = -_wzF.z, rz = _wzF.x, rl = Math.hypot(rx, rz) || 1; // 카메라 오른쪽(수평)
+  const lat = ((_wzR.x - _wzC.x) * rx + (_wzR.z - _wzC.z) * rz) / rl;
+  const pan = THREE.MathUtils.clamp(lat / 1.5, -1, 1) * 0.85, k = 1 - d / WHIZZ_R;
+  whizzCount++; lastWhizz = { d: +d.toFixed(2), pan: +pan.toFixed(2), k: +k.toFixed(2) };
+  sfx.whizz(pan, k);
+}
+// ── 피격 방향 표시 (#343): 화면 중앙 링 위 호가 맞은 쪽(월드 좌표 기준)을 가리킨다 — 카메라가 돌면 따라 돌고 HD_LIFE 초에 걸쳐 사라진다.
+// 같은 방향(≈20°) 연속 피격은 새로 만들지 않고 수명만 되돌린다. 출처 없는 피해(출혈·낙하)는 호출하지 않는다.
+const HD_LIFE = 1.4, HD_MAX = 8;
+const hitDirs = []; // { el, src: Vector3, age }
+const _hdF = new THREE.Vector3();
+function hitDirAngle(src) { // 카메라 앞(위)=0, 시계 방향 +. 플레이어 바로 위 폭발처럼 방향이 없으면 null
+  const sx = src.x - player.pos.x, sz = src.z - player.pos.z;
+  if (sx * sx + sz * sz < 0.09) return null;
+  camera.getWorldDirection(_hdF); let fx = _hdF.x, fz = _hdF.z;
+  if (fx * fx + fz * fz < 1e-4) { fx = Math.sin(player.yaw || 0); fz = Math.cos(player.yaw || 0); } // 거의 수직으로 보면 몸 방향
+  const fl = Math.hypot(fx, fz); fx /= fl; fz /= fl;
+  return Math.atan2(sx * -fz + sz * fx, sx * fx + sz * fz); // 오른쪽 축 (−fz, fx)
+}
+function showHitDir(src) {
+  if (hitDirAngle(src) === null) return;
+  const wb = Math.atan2(src.x - player.pos.x, src.z - player.pos.z);
+  let it = hitDirs.find((h) => { const b = Math.atan2(h.src.x - player.pos.x, h.src.z - player.pos.z); return Math.abs(Math.atan2(Math.sin(b - wb), Math.cos(b - wb))) < 0.35; });
+  if (it) { it.src.copy(src); it.age = 0; return; }
+  if (hitDirs.length >= HD_MAX) { const o = hitDirs.shift(); o.el.remove(); }
+  const el = document.createElement('div'); el.className = 'hd'; dom.hitDir.appendChild(el);
+  hitDirs.push({ el, src: src.clone(), age: 0 });
+  updateHitDir(0);
+}
+function updateHitDir(dt) {
+  for (let i = hitDirs.length - 1; i >= 0; i--) {
+    const h = hitDirs[i]; h.age += dt;
+    const a = hitDirAngle(h.src);
+    if (h.age >= HD_LIFE || a === null) { h.el.remove(); hitDirs.splice(i, 1); continue; }
+    const f = h.age < 0.15 ? 1 : 1 - (h.age - 0.15) / (HD_LIFE - 0.15);
+    h.el.style.transform = `translate(-50%, -50%) rotate(${a}rad)`; h.el.style.opacity = (f * f).toFixed(3);
+  }
+}
+function clearHitDir() { for (const h of hitDirs) h.el.remove(); hitDirs.length = 0; }
 function updateProjectiles(dt) {
   if (!projectiles.length) return;
   const targets = [...obstacleMeshes, ...propMeshes];
@@ -4811,6 +4894,7 @@ function updateProjectiles(dt) {
     const hits = _shootRay.intersectObjects(pr.enemy ? targetsE : targets, false);
     let done = false;
     if (hits.length) { if (resolveBulletHit(hits[0], _pDir, pr)) anyHit = true; _pNext.copy(hits[0].point); done = true; }
+    if (pr.enemy && !pr.whizzed && !pr.hitPlayer && state.phase === 'raid') checkWhizz(pr, _pNext);
     pr.pos.copy(_pNext); pr.dist += seg; pr.t += dt;
     if (pr.line) { const a = pr.line.geometry.attributes.position; a.setXYZ(1, pr.pos.x, pr.pos.y, pr.pos.z); a.needsUpdate = true; pr.line.geometry.computeBoundingSphere(); }
     if (done || pr.dist >= pr.range || pr.t > BALLISTICS.maxTime || pr.pos.y < -5) {
@@ -4824,7 +4908,7 @@ function updateProjectiles(dt) {
 function resolveBulletHit(h, dir, pr) {
   const ud = h.object.userData;
   if (ud && ud.playerHit) { // 적 탄 → 플레이어 (#316): 피격점 부위 → damagePlayer(헬멧/방탄복/부위 풀은 기존 경로)
-    if (pr.enemy && state.phase === 'raid') { const part = playerHitPart(ud.part, h.point); pr.result = part; damagePlayer(pr.dmgBody, part === 'head', part); }
+    if (pr.enemy && state.phase === 'raid') { const part = playerHitPart(ud.part, h.point); pr.result = part; pr.hitPlayer = true; damagePlayer(pr.dmgBody, part === 'head', part, pr.origin); }
     return false;
   }
   if (ud && ud.enemy && !ud.enemy.dead) {
@@ -4853,7 +4937,7 @@ function resolveBulletHit(h, dir, pr) {
     return true;
   }
   if (h.face) { _decalN.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize(); spawnDecal(h.point, _decalN); } // 환경 탄흔 (#208)
-  if (pr.enemy) pr.result = 'env';
+  if (pr.enemy) { pr.result = 'env'; lastEnvHit = h; }
   return false;
 }
 
@@ -5013,7 +5097,7 @@ function explodeAt(pos, { radius = 6.5, damage = 95, force = 30 } = {}) {
     }
   }
   const pd = player.pos.distanceTo(pos);
-  if (pd < radius && state.phase === 'raid') damagePlayer(damage * (1 - pd / radius) * 0.85, false, Math.random() < 0.55 ? 'legs' : Math.random() < 0.5 ? 'stomach' : 'thorax'); // 폭발은 다리/복부 위주 (#304)
+  if (pd < radius && state.phase === 'raid') damagePlayer(damage * (1 - pd / radius) * 0.85, false, Math.random() < 0.55 ? 'legs' : Math.random() < 0.5 ? 'stomach' : 'thorax', pos); // 폭발은 다리/복부 위주 (#304), 방향 표시는 폭심 기준 (#343)
 }
 
 // 폭발로 사살된 적 → 물리 바디로 날려버림 (스티프 래그돌)
@@ -7662,6 +7746,7 @@ async function beginRaid(key) {
 function startRaid(mapKey) {
   if (!assetsReady) return;
   clearRaidObjects();
+  clearHitDir(); whizzCount = 0; lastWhizz = null;
   applyMap(mapKey || currentMapKey); // 선택 맵 구성 (전환 시 이전 맵 teardown)
   const isRange = !!(MAPS[currentMapKey] && MAPS[currentMapKey].range); // 사격 연습장 모드 (#209)
   state.range = isRange;
@@ -7778,6 +7863,7 @@ function summaryHTML() {
 function endRaid(result, cause) {
   if (state.phase !== 'raid') return;
   state.phase = result === 'extract' ? 'extracted' : 'dead';
+  clearHitDir();
   ambientStop();
   document.exitPointerLock?.(); // iOS Safari 는 Pointer Lock API 자체가 없음
   dom.hud.style.display = 'none';
@@ -8333,6 +8419,7 @@ function loop() {
     updateExtraction(dt);
     updateEvents(dt);
     updateAcoustics(dt);
+    updateHitDir(dt); // 피격 방향 표시 수명·회전 (#343)
     updateHUD();
   }
   updateEffects(dt);
@@ -8384,7 +8471,8 @@ window.__ex = {
   _enemyAcc(i, dist) { return enemyAccuracy(enemies[i], dist); }, _stepEnemy(i, dt) { updateEnemy(enemies[i], dt); },
   // 적 발사체 (#316) QA: 적 i 가 현재 거리로 1발 → 발사체 객체(rolled/result), 플레이어 히트박스 판정
   _enemyShoot(i) { const e = enemies[i]; const d = Math.hypot(player.pos.x - e.pos.x, player.pos.z - e.pos.z); return enemyShoot(e, d); },
-  get lastEnemyShot() { return lastEnemyShot; }, playerHit, _playerPart(x, y, z) { syncPlayerHit(); return playerHitPart('body', new THREE.Vector3(x, y, z)); },
+  get lastEnemyShot() { return lastEnemyShot; }, get lastEnvHit() { return lastEnvHit; }, _hurtDir(x, z) { showHitDir(new THREE.Vector3(x, 0, z)); }, _hdTick(dt) { updateHitDir(dt); }, // (#343) QA: 피격 방향 표시·휘파람
+  get hitDirs() { return hitDirs.map((h) => ({ ang: +(hitDirAngle(h.src) ?? NaN).toFixed(3), age: +h.age.toFixed(2), op: h.el.style.opacity, tf: h.el.style.transform })); }, get whizz() { return { count: whizzCount, last: lastWhizz }; }, _whizzGraph: whizzGraph, _checkWhizz: checkWhizz, playerHit, _playerPart(x, y, z) { syncPlayerHit(); return playerHitPart('body', new THREE.Vector3(x, y, z)); },
   _rayHit(ox, oy, oz, dx, dy, dz, far = 200) { _shootRay.set(new THREE.Vector3(ox, oy, oz), new THREE.Vector3(dx, dy, dz).normalize()); _shootRay.far = far; const h = _shootRay.intersectObjects([...obstacleMeshes, ...propMeshes], false)[0]; return h ? { name: h.object.name, type: h.object.type, ud: Object.keys(h.object.userData || {}), d: +h.distance.toFixed(2), p: h.point.toArray().map(v => +v.toFixed(2)) } : null; },
   _los(a, b) { return hasLineOfSight(new THREE.Vector3(...a), new THREE.Vector3(...b)); }, _openPoint() { return randomOpenPoint(); },
   hurt(n, hs = false, part = null) { damagePlayer(n, hs, part); }, get parts() { return player.parts; }, get bleeds() { return player.bleeds; }, get inventory() { return inventory; }, carryWeight, CARRY, _stepPlayer(dt) { updatePlayer(dt); }, _hud() { updateHUD(); }, _useMed() { useMed(); }, // (#304/#307) QA
