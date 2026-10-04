@@ -3373,10 +3373,14 @@ const ENEMY_PARTS = {
   arms: { max: 40, mul: 0.65, name: '팔' }, legs: { max: 45, mul: 0.65, name: '다리' },
 };
 const ENEMY_BLEED = 1.5; // 복부 파괴 출혈 HP/s
+const ENEMY_VEST_DUR = 60, ENEMY_VEST_MUL = 0.55, ENEMY_HELMET_MUL = 0.3; // 적 방어구 (#334): 조끼 내구도·흉복부 경감 / 헬멧 첫 헤드샷 경감 (플레이어 #307 과 대칭)
 function initEnemyParts(e) {
   const k = (e.maxHp || ENEMY.hp) / ENEMY.hp; // 보스(300)는 풀 ×3
   e.parts = {}; for (const key of Object.keys(ENEMY_PARTS)) e.parts[key] = ENEMY_PARTS[key].max * k;
   e.bleed = 0; e.lastHitPart = null;
+  // 방어구 (#334): 장비가 보이는 만큼 실제로 막는다 — 조끼 내구도(보스는 풀과 같은 ×3)와 헬멧 1회 방어
+  e.armor = (e.gear && e.gear.vest) ? ENEMY_VEST_DUR * k : 0;
+  e.helmetOn = !!(e.gear && e.gear.helmet);
 }
 function enemyLegsOut(e) { return !!(e.parts && e.parts.legs <= 0); }
 function enemyArmsOut(e) { return !!(e.parts && e.parts.arms <= 0); }
@@ -3406,6 +3410,14 @@ function playerHitPart(hitboxPart, point) { // 적 탄 피격점 → 플레이�
 function damageEnemyPart(e, part, dmg) {
   if (!e.parts) initEnemyParts(e);
   const P = ENEMY_PARTS[part] || ENEMY_PARTS.thorax;
+  if ((part === 'thorax' || part === 'stomach') && e.armor > 0) { // 조끼: 흉부·복부만 경감, 내구도는 받은 피해만큼 소모 (#334)
+    e.armor = Math.max(0, e.armor - dmg); dmg *= ENEMY_VEST_MUL;
+    if (e.armor <= 0) { if (e.gear && e.gear.vest) e.gear.vest.visible = false; addFeed(e.boss ? '보스 방탄복 파손' : '적 방탄복 파손'); }
+  } else if (part === 'head' && e.helmetOn) { // 헬멧: 첫 헤드샷만 크게 경감하고 파손 (#334)
+    e.helmetOn = false; dmg *= ENEMY_HELMET_MUL;
+    if (e.gear && e.gear.helmet) e.gear.helmet.visible = false;
+    addFeed(e.boss ? '보스 헬멧이 헤드샷을 막았습니다 (파손)' : '적 헬멧이 헤드샷을 막았습니다 (파손)');
+  }
   const before = e.parts[part];
   e.parts[part] = Math.max(0, before - dmg);
   e.hp -= dmg * P.mul;
