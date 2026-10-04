@@ -2875,6 +2875,104 @@ function attachGear(model, g, key, style) {
   }
   return out;
 }
+
+// ── 스프링 본 (#340 캐릭터 개편 3단계): VRoid 보조 뼈(HairJoint·J_Sec_*_Skirt*)는 애니메이션에서 휴식 자세로 고정돼 달려도 굳어 있었다.
+// VRM 스프링 본 알고리즘을 월드 공간 베를레로 구현 — 꼬리(tail) 위치가 관성(+드래그)·복원력(애니메이션 자세 방향)·중력으로 움직이고, 뼈 길이를 유지하며,
+// 최대각을 넘지 않고, 몸 충돌체(머리 구·몸통/허벅지 캡슐)에서 밀려난다. 매 프레임 꼬리 방향으로 뼈 회전을 덮어쓴다.
+// 주의: three.js PropertyMixer 는 블렌드 결과가 전 프레임과 같으면 본 쓰기를 생략하므로(#31) 상수 트랙인 보조 뼈의 휴식 회전은
+// 초기화(바인드 포즈) 시점에 직접 저장해 쓴다 — 매 프레임 bone.quaternion 을 휴식값으로 읽으면 직전에 쓴 시뮬 회전이 섞인다.
+// follow = 캐릭터 이동분을 꼬리가 같이 따라가는 비율(VRM 센터 공간의 부분 적용): 0 이면 월드 관성 100% — 달릴 때 꼬리가 몸 이동만큼 뒤처져 뼈 길이만큼 벌어짐
+const SPRING_P = { hair: { stiff: 1.8, drag: 0.5, grav: 0.12, maxDeg: 40, follow: 0.7 }, skirt: { stiff: 3.0, drag: 0.45, grav: 0.3, maxDeg: 28, follow: 0.75 } };
+// 임시 객체는 용도별로 분리 — 한 벡터를 여러 용도로 돌려 쓰면 값이 서로 덮어씌워진다(첫 구현의 버그).
+const _spHead = new THREE.Vector3(), _spBScale = new THREE.Vector3(), _spPPos = new THREE.Vector3(), _spPScale = new THREE.Vector3(), _spBQ = new THREE.Quaternion();
+const _spPQ = new THREE.Quaternion(), _spRestW = new THREE.Quaternion(), _spRot = new THREE.Quaternion(), _spClampA = new THREE.Quaternion(), _spClampB = new THREE.Quaternion(), _spIdent = new THREE.Quaternion();
+const _spVel = new THREE.Vector3(), _spHD = new THREE.Vector3(), _spRestDir = new THREE.Vector3(), _spNext = new THREE.Vector3(), _spDir = new THREE.Vector3(), _spTmp = new THREE.Vector3(), _spNear = new THREE.Vector3(), _spSegA = new THREE.Vector3(), _spSegB = new THREE.Vector3(), _spSegD = new THREE.Vector3(), _spGrav = new THREE.Vector3(0, -1, 0);
+function makeSpring(model, g, key) {
+  const F = gearFit(model, g, key);
+  model.updateMatrixWorld(true);
+  const isMember = (o) => o.isBone && /^(HairJoint|J_Sec_[LR]_Skirt)/.test(o.name);
+  const list = [];
+  model.traverse((o) => { // traverse 는 부모 먼저 — 체인을 위에서 아래로 처리
+    if (!isMember(o) || /_end$/.test(o.name)) return;
+    const child = o.children.find(isMember);
+    const local = child ? child.position.clone() : o.position.clone().normalize().multiplyScalar(0.07);
+    if (local.lengthSq() < 1e-10) return;
+    list.push({ bone: o, parent: o.parent, local, axis: local.clone().normalize(), len: local.length(), rest: o.quaternion.clone(), prm: o.name.startsWith('HairJoint') ? SPRING_P.hair : SPRING_P.skirt,
+      curr: new THREE.Vector3(), prev: new THREE.Vector3(), head: new THREE.Vector3(), tail0: new THREE.Vector3(), ready: false });
+  });
+  // 충돌체: {a:{bone,local}, b:{bone,local}|null, r}. 반지름은 휴식 자세 꼬리의 최근접 거리로 적응(휴식에서 파묻혀 튕기지 않게)
+  const bn = (n) => model.getObjectByName(n);
+  const H = F.head, headBone = bn('Head');
+  const headC = headBone ? headBone.worldToLocal(g.localToWorld(new THREE.Vector3(H.cx, H.top - H.fh * 0.5, H.cz))) : null;
+  const cols = [];
+  if (headBone) cols.push({ a: { bone: headBone, local: headC }, b: null, r: Math.max(H.fw, H.fd) * 0.5 });
+  if (bn('Hips') && bn('UpperChest')) cols.push({ a: { bone: bn('Hips'), local: new THREE.Vector3() }, b: { bone: bn('UpperChest'), local: new THREE.Vector3() }, r: F.wx + 0.01 });
+  for (const sd of ['Left', 'Right']) if (bn(sd + 'UpLeg') && bn(sd + 'Leg')) cols.push({ a: { bone: bn(sd + 'UpLeg'), local: new THREE.Vector3() }, b: { bone: bn(sd + 'Leg'), local: new THREE.Vector3() }, r: 0.088 });
+  const colPt = (c, out) => out.copy(c.local).applyMatrix4(c.bone.matrixWorld);
+  const nearest = (col, p, out) => { // 점 p 에서 충돌체 축(점/선분)의 최근접점 → out
+    colPt(col.a, out); if (!col.b) return out;
+    colPt(col.b, _spSegB); _spSegD.copy(_spSegB).sub(out);
+    const t = THREE.MathUtils.clamp(_spSegA.copy(p).sub(out).dot(_spSegD) / Math.max(1e-9, _spSegD.lengthSq()), 0, 1);
+    return out.addScaledVector(_spSegD, t);
+  };
+  for (const s of list) s.tail0.copy(s.local).applyMatrix4(s.bone.matrixWorld);   // 휴식(바인드) 꼬리 월드 위치
+  for (const col of cols) {
+    let mind = 1e9; for (const s of list) { nearest(col, s.tail0, _spNear); mind = Math.min(mind, _spNear.distanceTo(s.tail0)); }
+    col.r = THREE.MathUtils.clamp(mind * 0.92, col.r * 0.4, col.r);
+  }
+  let sim = 0;
+  return {
+    count: list.length, cols: cols.map((c) => +c.r.toFixed(3)),
+    update(dt) {
+      dt = Math.min(dt, 1 / 30);
+      if (dt <= 0) return;
+      if (!g.visible) { for (const s of list) s.ready = false; return; }
+      model.updateMatrixWorld(true);
+      for (const s of list) {
+        const b = s.bone, prm = s.prm;
+        b.matrixWorld.decompose(_spHead, _spBQ, _spBScale);              // 뼈 월드 위치·스케일
+        s.parent.matrixWorld.decompose(_spPPos, _spPQ, _spPScale);        // 부모 월드 회전
+        const blen = s.len * _spBScale.x;
+        _spRestW.copy(_spPQ).multiply(s.rest);                            // 휴식 월드 회전(초기화 시 저장한 rest 로)
+        _spRestDir.copy(s.axis).applyQuaternion(_spRestW);                // 휴식 꼬리 방향(월드)
+        if (!s.ready || _spHead.distanceToSquared(s.head) > 4) { s.curr.copy(_spHead).addScaledVector(_spRestDir, blen); s.prev.copy(s.curr); s.head.copy(_spHead); s.ready = true; }
+        _spHD.copy(_spHead).sub(s.head).multiplyScalar(prm.follow);       // 이번 프레임 몸 이동분 중 꼬리가 따라가는 몫
+        s.head.copy(_spHead);
+        // 베를레: 이동분 추종 + 나머지 관성(드래그) + 복원력(애니메이션 자세 방향) + 중력
+        _spVel.copy(s.curr).sub(s.prev).sub(_spHD).multiplyScalar(1 - prm.drag);
+        _spNext.copy(s.curr).add(_spHD).add(_spVel).addScaledVector(_spRestDir, prm.stiff * dt).addScaledVector(_spGrav, prm.grav * dt);
+        // 방향 = 머리→다음 꼬리. 휴식 방향에서 최대각을 넘지 않게 제한(slerp 는 서로 다른 객체로)
+        _spDir.copy(_spNext).sub(_spHead).normalize();
+        _spClampA.setFromUnitVectors(_spRestDir, _spDir);
+        const ang = 2 * Math.acos(Math.min(1, Math.abs(_spClampA.w))), maxRad = THREE.MathUtils.degToRad(prm.maxDeg);
+        if (ang > maxRad) { _spClampB.copy(_spIdent.identity()).slerp(_spClampA, maxRad / ang); _spDir.copy(_spRestDir).applyQuaternion(_spClampB); }
+        _spNext.copy(_spHead).addScaledVector(_spDir, blen);              // 뼈 길이 유지
+        // 충돌: 반지름 밖으로 밀어낸 뒤 길이 재투영
+        for (const col of cols) {
+          nearest(col, _spNext, _spNear);
+          _spTmp.copy(_spNext).sub(_spNear); const dl = _spTmp.length();
+          if (dl < col.r) {
+            if (dl < 1e-6) _spTmp.set(0, 1, 0); else _spTmp.divideScalar(dl);
+            _spNext.copy(_spNear).addScaledVector(_spTmp, col.r);
+            _spDir.copy(_spNext).sub(_spHead).normalize(); _spNext.copy(_spHead).addScaledVector(_spDir, blen);
+          }
+        }
+        s.prev.copy(s.curr); s.curr.copy(_spNext);
+        // 회전 적용: 휴식 꼬리 방향 → 시뮬 꼬리 방향
+        _spDir.copy(_spNext).sub(_spHead).normalize();
+        _spRot.setFromUnitVectors(_spRestDir, _spDir).multiply(_spRestW);   // 월드 회전
+        b.quaternion.copy(_spPQ).invert().multiply(_spRot);
+        b.updateWorldMatrix(false, true);                                   // 자식(다음 뼈)이 갱신된 부모 행렬을 쓰도록
+      }
+      sim++;
+    },
+    reset() { for (const s of list) s.ready = false; },
+    // QA: 뼈 로컬 회전의 휴식 대비 편차(도) 평균·최대 — 최대각 제한이 지켜지는지
+    devDeg() { let sum = 0, mx = 0; for (const s of list) { const d = 2 * Math.acos(Math.min(1, Math.abs(s.bone.quaternion.dot(s.rest)))) * 180 / Math.PI; sum += d; if (d > mx) mx = d; } return { mean: +(sum / list.length).toFixed(1), max: +mx.toFixed(1) }; },
+    worst(n = 3) { return list.map((s) => ({ name: s.bone.name.replace(/-[0-9a-f]{8}.*$/, '').slice(0, 24) + '#' + list.indexOf(s), deg: +(2 * Math.acos(Math.min(1, Math.abs(s.bone.quaternion.dot(s.rest)))) * 180 / Math.PI).toFixed(1), speed: +s.curr.distanceTo(s.prev).toFixed(4) })).sort((a, b) => b.deg - a.deg).slice(0, n); },
+    get frames() { return sim; },
+  };
+}
 function randomGearStyle(boss) {
   if (boss) return { helmet: 'boss', nvg: true, vest: 'boss', pack: 'boss', heavy: true };
   const keys = ['olive', 'tan', 'black', 'gray'], pk = () => keys[Math.floor(Math.random() * keys.length)], base = pk();
@@ -2908,6 +3006,7 @@ function makeEnemyMesh(boss = false) {
   });
   g.add(model);
   const gear = attachGear(model, g, key, randomGearStyle(boss)); // 장비 부착 — 믹서 전(바인드 포즈)에서 (#331)
+  const spring = makeSpring(model, g, key); // 머리카락·치마 스프링 본 (#340)
 
   const clips = CHAR_CLIPS[key];
   const mixer = new THREE.AnimationMixer(model);
@@ -2984,7 +3083,7 @@ function makeEnemyMesh(boss = false) {
   // 상체 본 — 피격 flinch / 전투 조준 자세용 (mixer 갱신 후 오프셋 적용)
   const spine = model.getObjectByName('Spine') || null;
   return {
-    group: g, body, head, flash, model, mixer, gear, actIdle, actRun, actBack,
+    group: g, body, head, flash, model, mixer, gear, spring, actIdle, actRun, actBack,
     actDeath, actHitChest, actHitHead, actShoot, actReload, actHitDir, actDeathDir,
     actRoll, actCrouch, actAimUp, actAimDown, actWalk, actLimp, actAlert,
     running: false, crouched: false, baseAct: actIdle, spine,
@@ -3367,6 +3466,7 @@ function updateEnemy(e, dt) {
       e.spine.rotation.z += f * 0.1 * (e.flinchSide || 1);
     }
   }
+  if (e.spring && dist < 45) e.spring.update(dt); // 머리카락·치마 (#340) — 45m 밖은 생략
 }
 
 // ── 적 부위 체력 (#313): 플레이어 부위 시스템(#304)의 대칭. 총 HP(e.hp) 사망 모델은 유지하고 부위 풀을 따로 깎는다.
@@ -3959,6 +4059,7 @@ function buildPlayerChar() {
   const g = new THREE.Group();
   g.add(model);
   const gear = attachGear(model, g, PC_KEY, { helmet: 'olive', nvg: true, vest: 'olive', pack: 'tan', heavy: false }); // 전부 만들고 상태별 표시 (#331)
+  const spring = makeSpring(model, g, PC_KEY); // 머리카락·치마 스프링 본 (#340)
   g.visible = false;
   scene.add(g);
 
@@ -4030,7 +4131,7 @@ function buildPlayerChar() {
 
   const spine = model.getObjectByName('Spine') || null;
   pc = {
-    group: g, model, mixer, gear, handR, handL, lArm, lFore, gunPivot, spine, spinePose: null,
+    group: g, model, mixer, gear, spring, handR, handL, lArm, lFore, gunPivot, spine, spinePose: null,
     ikBlend: 0, leftGrip: new THREE.Vector3(),
     actIdleLower, actWalkLower, actRunLower, upperReady, upperRun, upperAimAdd,
     aimBody, aimLegs, walkLegsAim, loco: (loco && loco.walkLo && loco.jogLo && loco.walkLg && loco.jogLg) ? loco : null,
@@ -4342,6 +4443,7 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
     pc.gunKick = Math.max(0, (pc.gunKick || 0) - dt * 3.2);
     updateGunHold();
     updateLeftHandIK(dt);
+    pc.spring.update(dt); // (#340)
     return;
   }
 
@@ -4398,6 +4500,7 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   pc.gunKick = Math.max(0, (pc.gunKick || 0) - dt * 3.2);
   updateGunHold();
   updateLeftHandIK(dt);
+  pc.spring.update(dt); // 머리카락·치마 (#340)
 }
 
 // 3인칭 오버숄더 카메라 — 궤도 + 벽 충돌 당김 (#116)
