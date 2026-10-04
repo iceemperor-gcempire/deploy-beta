@@ -761,7 +761,8 @@ async function loadAssets() {
       if (aimUpRaw) aimUp = THREE.AnimationUtils.makeClipAdditive(aimUpRaw.clone(), 0, aimNeutral);
       if (aimDownRaw) aimDown = THREE.AnimationUtils.makeClipAdditive(aimDownRaw.clone(), 0, aimNeutral);
     }
-    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown, walk: walkC, limp, alert, aim: aimPose, aimNeutral, idleGun, readyGun };
+    const k = {}; for (const c of clips) if (/^K[A-Z]/.test(c.name)) k[c.name] = c; // Kimodo 모션 (#328): KWalkF/B/L/R·KJog*·KHit*·KDeath*·KTurn*·KIdle·KPatrol
+    CHAR_CLIPS[key] = { idle, run, death, hitChest, hitHead, shoot, reload, crouchIdle, roll, aimUp, aimDown, walk: walkC, limp, alert, aim: aimPose, aimNeutral, idleGun, readyGun, k };
   }
 
   buildViewmodel();
@@ -2834,6 +2835,9 @@ function makeEnemyMesh() {
   const actReload = mkOnce(clips.reload);
   const actRoll = mkOnce(clips.roll);
   const actAlert = mkOnce(clips.alert);
+  const kc = clips.k || {}; // Kimodo 방향 피격·사망 변주 (#328)
+  const actHitDir = { F: mkOnce(kc.KHitF), B: mkOnce(kc.KHitB), L: mkOnce(kc.KHitL), R: mkOnce(kc.KHitR) };
+  const actDeathDir = { B: mkOnce(kc.KDeathB), F: mkOnce(kc.KDeathF), K: mkOnce(kc.KDeathK) };
   const actCrouch = clips.crouchIdle ? mixer.clipAction(clips.crouchIdle) : null;
   // additive 조준 포즈 — 항상 재생, 가중치로만 제어
   const mkAim = (clip) => {
@@ -2883,7 +2887,7 @@ function makeEnemyMesh() {
   const spine = model.getObjectByName('Spine') || null;
   return {
     group: g, body, head, flash, model, mixer, actIdle, actRun,
-    actDeath, actHitChest, actHitHead, actShoot, actReload,
+    actDeath, actHitChest, actHitHead, actShoot, actReload, actHitDir, actDeathDir,
     actRoll, actCrouch, actAimUp, actAimDown, actWalk, actLimp, actAlert,
     running: false, crouched: false, baseAct: actIdle, spine,
     flinch: 0, aimBlend: 0, oneShot: null, deathDone: false,
@@ -3432,7 +3436,15 @@ function playEnemyOneShot(e, act, fade = 0.06) {
 
 // 피격 반응: 서서 교전 중이면 가끔 측면 회피 구르기, 아니면 부위별 Hit 원샷,
 // 이동/앉은 상태면 절차 flinch
-function enemyHitReact(e, headshot) {
+// 탄 진행 방향(dir, 월드) → 적 기준 피격 방향 (#328): 'F' 정면에서 맞음 / 'B' 등 / 'L' 왼쪽에서 / 'R' 오른쪽에서
+function enemyHitSide(e, dir) {
+  if (!dir) return null;
+  const y = e.group.rotation.y, fx = Math.sin(y), fz = Math.cos(y), f = dir.x * fx + dir.z * fz, r = -dir.x * Math.cos(y) + dir.z * Math.sin(y);
+  if (f < -0.55) return 'F';
+  if (f > 0.55) return 'B';
+  return r < 0 ? 'R' : 'L'; // 탄이 적의 왼쪽으로 진행 = 오른쪽에서 날아옴
+}
+function enemyHitReact(e, headshot, dir = null) {
   if (e.state === 'combat' && e.rollT <= 0 && !enemyLegsOut(e) && Math.random() < 0.3 && // 다리 파괴 시 회피 불가 (#313)
       playEnemyOneShot(e, e.actRoll, 0.08)) {
     const toP = player.pos.clone().sub(e.pos); toP.y = 0; toP.normalize();
@@ -3441,18 +3453,25 @@ function enemyHitReact(e, headshot) {
     e.rollT = e.actRoll.getClip().duration * 0.9; // 마무리 프레임은 정지 동작
     return;
   }
-  if (!playEnemyOneShot(e, headshot ? e.actHitHead : e.actHitChest)) {
+  const side = !headshot && e.actHitDir ? enemyHitSide(e, dir) : null; // 방향 피격 반응 (#328, 머리는 기존 클립)
+  const hitAct = (side && e.actHitDir[side]) || (headshot ? e.actHitHead : e.actHitChest);
+  if (!playEnemyOneShot(e, hitAct)) {
     e.flinch = 1;
     e.flinchSide = Math.random() < 0.5 ? -1 : 1;
   }
 }
 
-function killEnemy(e) {
+function killEnemy(e, dir = null) {
   e.dead = true;
+  if (e.actDeathDir) { // 방향별 사망 (#328): 정면 피격=뒤로 넘어짐 / 등=앞으로 / 옆·불명=무릎 꿇고 옆으로 또는 기존
+    const side = enemyHitSide(e, dir), D = e.actDeathDir;
+    const pick = side === 'F' ? D.B : side === 'B' ? D.F : (Math.random() < 0.5 ? D.K : null);
+    if (pick) e.actDeath = pick; // finished 리스너는 e.actDeath 를 비교하므로 교체만 하면 됨
+  }
   if (e.actDeath) {
     // UAL Death01 모션캡처 재생 (Hips 이동 포함 — 바닥까지 모션이 표현)
     for (const a of [e.actIdle, e.actRun, e.actWalk, e.actLimp, e.actCrouch, e.actHitChest, e.actHitHead,
-      e.actShoot, e.actReload, e.actRoll, e.actAlert]) {
+      e.actShoot, e.actReload, e.actRoll, e.actAlert, ...Object.values(e.actHitDir || {})]) {
       if (a && a.isRunning()) a.fadeOut(0.1);
     }
     if (e.actAimUp) e.actAimUp.setEffectiveWeight(0);
@@ -3869,6 +3888,17 @@ function buildPlayerChar() {
   const aimBody = splitByLeg(clips.aim, false);   // 상체+골반(견착)
   const aimLegs = splitByLeg(clips.aim, true);    // 견착 다리 스탠스(정지)
   const walkLegsAim = splitByLeg(clips.walk, true) || splitByLeg(clips.run, true); // 이동 다리
+  // 방향 로코모션 (#328, Kimodo): 걷기·조깅 × 앞/뒤/왼/오 — 몸 기준 이동 방향으로 가중, 공유 위상 시계로 동기 재생.
+  //  lower = Hips+다리(레이어 경로), legs = 다리만(견착 경로 — 골반은 aimBody 가 소유)
+  const kc = clips.k || {};
+  const mkLoco = (pref, splitter) => { const cl = ['F', 'B', 'L', 'R'].map((d) => kc[pref + d]); if (cl.some((c) => !c)) return null; return cl.map((c) => { const a = splitter(c); a.play(); a.setEffectiveWeight(0); a.timeScale = 0; return a; }); };
+  const loco = (kc.KWalkF && kc.KJogF) ? {
+    walkLo: mkLoco('KWalk', (c) => splitAct(c, true)), jogLo: mkLoco('KJog', (c) => splitAct(c, true)),
+    walkLg: mkLoco('KWalk', (c) => splitByLeg(c, true)), jogLg: mkLoco('KJog', (c) => splitByLeg(c, true)),
+    walkDur: ['F', 'B', 'L', 'R'].map((d) => kc['KWalk' + d].duration), jogDur: ['F', 'B', 'L', 'R'].map((d) => kc['KJog' + d].duration),
+    p: 0, m: 0, j: 0,
+  } : null;
+  if (loco && (!loco.walkLo || !loco.jogLo || !loco.walkLg || !loco.jogLg)) console.warn('[loco] Kimodo 방향 세트 불완전 — 기존 걷기/달리기 사용');
   const actReload = (() => { const a = splitAct(clips.reload, false); if (a) { a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; } return a; })() || mkOnce(clips.reload);
   const actAim = clips.aim ? mixer.clipAction(clips.aim) : null; // 캘리브레이션용 전체 견착 클립
   const actDeath = mkOnce(clips.death);
@@ -3890,7 +3920,7 @@ function buildPlayerChar() {
     group: g, model, mixer, handR, handL, lArm, lFore, gunPivot, spine, spinePose: null,
     ikBlend: 0, leftGrip: new THREE.Vector3(),
     actIdleLower, actWalkLower, actRunLower, upperReady, upperRun, upperAimAdd,
-    aimBody, aimLegs, walkLegsAim,
+    aimBody, aimLegs, walkLegsAim, loco: (loco && loco.walkLo && loco.jogLo && loco.walkLg && loco.jogLg) ? loco : null,
     actReload, actAim, actDeath, actAimUp, actAimDown,
     lowerAct: null, upperAct: null, upperShot: null, lowerSwT: 0, upperSwT: 0,
     aimBlend: 0, fireHold: 0, gunAim: 0, aimWorld: null, faceYaw: 0, curGun: null,
@@ -4106,6 +4136,27 @@ function pcMuzzle() {
 }
 
 // 3인칭 캐릭터 갱신 — 위치/회전/애니메이션
+// 방향 로코모션 구동 (#328): which='Lo'(골반+다리) | 'Lg'(다리만). target = 이동 가중 목표(0~1).
+// 몸 기준 이동 방향 → 앞/뒤/왼/오 가중(대각은 두 클립 혼합), 걷기↔조깅은 속도로 혼합. 네 클립 모두 왼발 뒤꿈치 접지에서 잘려
+// 위상 0 이 같다 → 공유 위상 p 로 time 을 직접 지정(timeScale 0)해 대각 혼합에서도 다리가 엉키지 않는다.
+const LOCO_SPEED = { walk: [1.41, 1.09, 1.18, 1.30], jog: [2.78, 2.30, 2.28, 1.80] }; // 클립 원속 m/s [F,B,L,R] — kimodo_pick.py 측정 (picks.json speed)
+function driveLoco(L, which, target, dt, hSpeed, lf, lr) {
+  L.m += (target - L.m) * Math.min(1, dt * 9);
+  L.j += (THREE.MathUtils.smoothstep(hSpeed, 2.0, 3.6) - L.j) * Math.min(1, dt * 6);
+  const n = Math.hypot(lf, lr) || 1, f = lf / n, r = lr / n;
+  const w = [Math.max(0, f), Math.max(0, -f), Math.max(0, -r), Math.max(0, r)], ws = w[0] + w[1] + w[2] + w[3] || 1;
+  for (let i = 0; i < 4; i++) w[i] /= ws;
+  const v = Math.max(0.4, hSpeed);
+  let D = 0; for (let i = 0; i < 4; i++) D += w[i] * ((1 - L.j) * L.walkDur[i] * LOCO_SPEED.walk[i] + L.j * L.jogDur[i] * LOCO_SPEED.jog[i]) / v; // 현재 속도에서 한 보폭 주기
+  L.p = (L.p + dt / Math.max(0.2, D)) % 1;
+  const W = L['walk' + which], J = L['jog' + which], other = which === 'Lo' ? 'Lg' : 'Lo';
+  for (let i = 0; i < 4; i++) {
+    for (const a of [W[i], J[i], L['walk' + other][i], L['jog' + other][i]]) { a.play(); a.timeScale = 0; } // stopAllAction(레이드 시작·그립 캡처) 뒤에도 재활성 — 활성 중엔 no-op
+    W[i].time = L.p * L.walkDur[i]; W[i].setEffectiveWeight(L.m * (1 - L.j) * w[i]);
+    J[i].time = L.p * L.jogDur[i]; J[i].setEffectiveWeight(L.m * L.j * w[i]);
+    L['walk' + other][i].setEffectiveWeight(0); L['jog' + other][i].setEffectiveWeight(0);
+  }
+}
 function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   if (!pc) return;
   pc.group.visible = state.phase === 'raid' && !scopeShown && viewMode === 'tps'; // FPS 는 캐릭터 숨김 (#145)
@@ -4132,6 +4183,7 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   const turn = combat ? dt * 30 : dt * 11;            // 사격 시 즉시 몸 정렬
   pc.faceYaw += THREE.MathUtils.clamp(dy, -turn, turn);
   pc.group.rotation.y = pc.faceYaw;
+  const mvn = Math.hypot(moveDirX, moveDirZ) || 1, lf = (moveDirX * Math.sin(pc.faceYaw) + moveDirZ * Math.cos(pc.faceYaw)) / mvn, lr = (-moveDirX * Math.cos(pc.faceYaw) + moveDirZ * Math.sin(pc.faceYaw)) / mvn; // 몸 기준 앞/오른쪽 성분 (#328)
 
   // ── 견착 모드 (#203/#206): 조준 시 aim 상체(견착) + 다리는 정지=aim스탠스/이동=걷기 크로스페이드.
   //    질주는 조준 중 불가(wantSprint 게이팅)라 조준하면 걷기까지만. aimBody 없으면 전신 actAim 폴백. ──
@@ -4157,8 +4209,14 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
     if (useSplit) {
       pc.aimBody.setEffectiveWeight(1);
       const mv = moving ? 1 : 0;                        // 다리: 정지=견착 스탠스 / 이동=걷기
-      pc.aimLegs.setEffectiveWeight(1 - mv);
-      if (pc.walkLegsAim) { pc.walkLegsAim.setEffectiveWeight(mv); if (moving) pc.walkLegsAim.timeScale = THREE.MathUtils.clamp(hSpeed / 1.0, 0.7, 1.8); }
+      if (pc.loco) { // 방향 다리 (#328): 옆걸음·뒷걸음이 실제 옆·뒤 스텝으로
+        driveLoco(pc.loco, 'Lg', mv, dt, hSpeed, lf, lr);
+        pc.aimLegs.setEffectiveWeight(1 - pc.loco.m);
+        if (pc.walkLegsAim) pc.walkLegsAim.setEffectiveWeight(0);
+      } else {
+        pc.aimLegs.setEffectiveWeight(1 - mv);
+        if (pc.walkLegsAim) { pc.walkLegsAim.setEffectiveWeight(mv); if (moving) pc.walkLegsAim.timeScale = THREE.MathUtils.clamp(hSpeed / 1.0, 0.7, 1.8); }
+      }
     } else pc.actAim.setEffectiveWeight(1);
     pc.aimBlend += (1 - pc.aimBlend) * Math.min(1, dt * 6);
     pc.gunAim = (pc.gunAim || 0) + (1 - (pc.gunAim || 0)) * Math.min(1, dt * 14);
@@ -4174,11 +4232,16 @@ function updatePlayerChar(dt, hSpeed, moveDirX, moveDirZ) {
   }
 
   // ── 하체 레이어: 로코모션 (조준/사격/재장전 중에도 항상 다리 구동 → 조준 이동 시 다리 이동) ──
-  const lowerDesired = !moving ? pc.actIdleLower : (jog ? pc.actRunLower : pc.actWalkLower);
+  const locoOn = !!pc.loco && !sprintingNow;           // 방향 로코모션 (#328) — 질주는 기존 달리기 클립
+  const lowerDesired = (!moving || locoOn) ? pc.actIdleLower : (jog ? pc.actRunLower : pc.actWalkLower);
   pc.lowerSwT = (lowerDesired === pc.lowerAct) ? 0 : pc.lowerSwT + dt;
   if (lowerDesired && lowerDesired !== pc.lowerAct && pc.lowerSwT > 0.1) {
     pc.lowerSwT = 0; if (pc.lowerAct) pc.lowerAct.fadeOut(0.15);
     lowerDesired.reset().fadeIn(0.15).play(); pc.lowerAct = lowerDesired;
+  }
+  if (pc.loco) {
+    driveLoco(pc.loco, 'Lo', locoOn && moving ? 1 : 0, dt, hSpeed, lf, lr);
+    if (locoOn && pc.lowerAct === pc.actIdleLower) pc.actIdleLower.setEffectiveWeight(1 - pc.loco.m); // 정지 자세 ↔ 이동 가중 보완
   }
   if (moving && pc.lowerAct === pc.actWalkLower) pc.actWalkLower.timeScale = THREE.MathUtils.clamp(hSpeed / 1.0, 0.7, 1.7);
   else if (moving && pc.lowerAct === pc.actRunLower) pc.actRunLower.timeScale = THREE.MathUtils.clamp(hSpeed / 3.4, 0.9, 2.1);
@@ -4551,9 +4614,9 @@ function resolveBulletHit(h, dir, pr) {
     const part = enemyHitPart(ud.enemy, ud.part, h.point); // 피격점 → 부위 (#313)
     const dmg = part === 'head' ? pr.dmgHead : pr.dmgBody;
     damageEnemyPart(ud.enemy, part, dmg);
-    if (ud.enemy.hp > 0) enemyHitReact(ud.enemy, part === 'head');
+    if (ud.enemy.hp > 0) enemyHitReact(ud.enemy, part === 'head', dir);
     ud.enemy.lastKnown.copy(player.pos); // 피격당한 적은 즉시 교전 상태
-    if (ud.enemy.hp <= 0) killEnemy(ud.enemy);
+    if (ud.enemy.hp <= 0) killEnemy(ud.enemy, dir);
     else ud.enemy.state = 'combat';
     return true;
   }
@@ -8120,7 +8183,9 @@ window.__ex = {
     const m = pcMuzzle();
     return { muzzle: m.toArray().map((v) => +v.toFixed(2)), gunPivot: pc ? pc.gunPivot.position.toArray().map((v) => +v.toFixed(2)) : null, gunLen: pc && pc.gunLen, handR: !!(pc && pc.handR), handL: !!(pc && pc.handL), curGun: !!(pc && pc.curGun) };
   },
-  _startRaid(k) { startRaid(k); }, _beginRaid(k) { return beginRaid(k); }, _loadBaked(k) { return loadBaked(k); }, get bakeInfo() { return { hash: SRC_HASH, loaded: Object.keys(BAKED), last: lastBuildInfo }; },
+  _startRaid(k) { startRaid(k); }, keys, get pc() { return pc; }, // 모션 QA (#328): 키 주입·캐릭터 액션 가중치 확인
+  _hitDir(i, x, z) { const e = enemies[i]; if (!e || e.dead) return null; e.state = 'combat'; e.rollT = 1; enemyHitReact(e, false, new THREE.Vector3(x, 0, z)); e.rollT = 0; return { side: enemyHitSide(e, new THREE.Vector3(x, 0, z)), clip: e.oneShot ? e.oneShot.getClip().name : null }; },
+  _killDir(i, x, z) { const e = enemies[i]; if (!e || e.dead) return null; killEnemy(e, new THREE.Vector3(x, 0, z)); return { side: enemyHitSide(e, new THREE.Vector3(x, 0, z)), clip: e.actDeath ? e.actDeath.getClip().name : null }; }, _beginRaid(k) { return beginRaid(k); }, _loadBaked(k) { return loadBaked(k); }, get bakeInfo() { return { hash: SRC_HASH, loaded: Object.keys(BAKED), last: lastBuildInfo }; },
   _fire() { if (state.phase !== 'raid') return; if (gun.mag <= 0) gun.mag = GUN.magSize; fireShot(); }, // QA: 트리거 게이트(포인터락·raiseT 등) 우회 1발, 탄창 자동 보충 (#292)
   get rangeTargets() { return rangeTargets; }, get drill() { return drill; }, _startDrill() { startDrill(); }, _rangeTick(dt) { updateRangeTargets(dt); }, _cycleDrillMode() { cycleDrillMode(); }, get recoilPat() { return recoilPat; }, // QA (#295/#298)
   _flushProjectiles() { for (let k = 0; k < 200 && projectiles.length; k++) updateProjectiles(0.02); return projectiles.length; }, _stepProjectiles(dt) { updateProjectiles(dt); }, get projectiles() { return projectiles; }, // QA (#301): 발사체를 즉시 비행 완료 / 수동 스텝 — 자동화 탭은 rAF 가 느려 드릴/이동 표적 시간을 수동 진행
