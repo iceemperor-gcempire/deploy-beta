@@ -7730,7 +7730,7 @@ function clearRaidObjects() {
 let renderHold = false, raidLoadingEl = null;
 async function beginRaid(key) {
   if (!raidLoadingEl) { raidLoadingEl = document.createElement('div'); raidLoadingEl.style.cssText = 'position:fixed;inset:0;z-index:70;display:flex;align-items:center;justify-content:center;background:rgba(8,12,10,.86);color:#dfe8df;font-size:20px;letter-spacing:2px'; document.body.appendChild(raidLoadingEl); }
-  raidLoadingEl.textContent = '지역 불러오는 중…'; raidLoadingEl.hidden = false;
+  raidLoadingEl.textContent = '지역 불러오는 중…'; raidLoadingEl.style.display = 'flex'; // hidden 속성은 쓰지 않는다 — 인라인 display 가 UA [hidden]{display:none} 을 이겨 안 숨겨진다 (#346)
   try {
     await Promise.race([loadBaked(key), new Promise((r) => setTimeout(r, 20000))]);
     await Promise.race([new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))), new Promise((r) => setTimeout(r, 120))]); // 오버레이를 먼저 그린 뒤 동기 빌드 (탭이 백그라운드면 rAF 가 멈추므로 타임아웃 병행)
@@ -7741,7 +7741,7 @@ async function beginRaid(key) {
       await Promise.race([renderer.compileAsync(scene, camera).catch(() => {}), new Promise((r) => setTimeout(r, 8000))]);
       console.info(`[raid] 셰이더 선컴파일 ${Math.round(performance.now() - t0)}ms`);
     }
-  } finally { renderHold = false; raidLoadingEl.hidden = true; }
+  } finally { renderHold = false; raidLoadingEl.style.display = 'none'; }
 }
 function startRaid(mapKey) {
   if (!assetsReady) return;
@@ -8404,7 +8404,7 @@ function loop() {
   const dt = Math.min(0.05, (now - lastT) / 1000);
   lastT = now;
 
-  if (state.phase === 'raid' && !state.paused) {
+  if (state.phase === 'raid' && !state.paused && !renderHold) { // 셰이더 선컴파일 중엔 시뮬 정지 — 준비 중인 화면 뒤에서 맞지 않게 (#346)
     state.raidTime -= dt;
     if (state.raidTime <= 0) {
       state.raidTime = 0;
@@ -8471,7 +8471,8 @@ window.__ex = {
   _enemyAcc(i, dist) { return enemyAccuracy(enemies[i], dist); }, _stepEnemy(i, dt) { updateEnemy(enemies[i], dt); },
   // 적 발사체 (#316) QA: 적 i 가 현재 거리로 1발 → 발사체 객체(rolled/result), 플레이어 히트박스 판정
   _enemyShoot(i) { const e = enemies[i]; const d = Math.hypot(player.pos.x - e.pos.x, player.pos.z - e.pos.z); return enemyShoot(e, d); },
-  get lastEnemyShot() { return lastEnemyShot; }, get lastEnvHit() { return lastEnvHit; }, _hurtDir(x, z) { showHitDir(new THREE.Vector3(x, 0, z)); }, _hdTick(dt) { updateHitDir(dt); }, // (#343) QA: 피격 방향 표시·휘파람
+  get lastEnemyShot() { return lastEnemyShot; }, get lastEnvHit() { return lastEnvHit; }, get loadingVisible() { return !!raidLoadingEl && getComputedStyle(raidLoadingEl).display !== 'none'; }, get renderHold() { return renderHold; }, // (#346) QA: 로딩 오버레이가 실제로 보이는지(계산된 display)
+  _hurtDir(x, z) { showHitDir(new THREE.Vector3(x, 0, z)); }, _hdTick(dt) { updateHitDir(dt); }, // (#343) QA: 피격 방향 표시·휘파람
   get hitDirs() { return hitDirs.map((h) => ({ ang: +(hitDirAngle(h.src) ?? NaN).toFixed(3), age: +h.age.toFixed(2), op: h.el.style.opacity, tf: h.el.style.transform })); }, get whizz() { return { count: whizzCount, last: lastWhizz }; }, _whizzGraph: whizzGraph, _checkWhizz: checkWhizz, playerHit, _playerPart(x, y, z) { syncPlayerHit(); return playerHitPart('body', new THREE.Vector3(x, y, z)); },
   _rayHit(ox, oy, oz, dx, dy, dz, far = 200) { _shootRay.set(new THREE.Vector3(ox, oy, oz), new THREE.Vector3(dx, dy, dz).normalize()); _shootRay.far = far; const h = _shootRay.intersectObjects([...obstacleMeshes, ...propMeshes], false)[0]; return h ? { name: h.object.name, type: h.object.type, ud: Object.keys(h.object.userData || {}), d: +h.distance.toFixed(2), p: h.point.toArray().map(v => +v.toFixed(2)) } : null; },
   _los(a, b) { return hasLineOfSight(new THREE.Vector3(...a), new THREE.Vector3(...b)); }, _openPoint() { return randomOpenPoint(); },
