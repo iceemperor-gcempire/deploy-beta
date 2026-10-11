@@ -3257,6 +3257,158 @@ function playerEyePos() {
   return new THREE.Vector3(player.pos.x, player.pos.y + PLAYER.eye, player.pos.z);
 }
 
+// ── 적 엄폐(팝업 사격) + 제압 (#352) ──
+// 낮은 엄폐물 뒤에서 앉으면 LOS 가 막히고 서면 열리는 지점(앉은 눈 1.05 m 차단 / 선 눈 1.6 m 개방)을 찾아 달려가 웅크려 숨고(hide),
+// 시간이 지나면 일어서서 점사(pop) 후 다시 숨는다. 재장전은 숨어서. 제압: 플레이어 탄이 곁(2.5 m)을 스치거나 맞히면 오르고 시간에 따라 감쇠,
+// 높으면 엄폐로 가고(주눅) 명중률이 깎인다. 높은 엄폐(서도 안 보이는 곳)는 v1 범위 밖 — 옆으로 내다보는 피킹이 필요.
+const COVER = { minPlayerDist: 7, giveUpDist: 5, decay: 0.45, trigger: 0.6, hideAbove: 0.9, popBelow: 0.5, hideMin: 1.4, hideVar: 1.8, maxSup: 1.5, suppressR: 2.5 };
+const _cvA = new THREE.Vector3(), _cvB = new THREE.Vector3(), _cvC = new THREE.Vector3();
+let coverBudget = 1; // 프레임당 엄폐 탐색 횟수 상한 (loop 가 매 프레임 채움)
+let coverStats = { searches: 0, found: 0, rays: 0, cands: 0 }; // QA·로그 (0건도 남긴다)
+// 엄폐물이 근처에 있나 — 지면에서 1.1 m 이상 솟은 콜라이더(OBB)까지의 거리가 r 안인지. 레이 전에 거르는 싼 사전 필터이자, 적이 엄폐물에 붙어 서게 한다.
+function nearCoverObject(x, z, r) {
+  for (const b of colliders) {
+    if (b.maxY < 1.1 || b.minY > 0.5) continue;
+    const dx = x - b.cx, dz = z - b.cz, lx = b.c * dx - b.s * dz, lz = b.s * dx + b.c * dz;
+    if (Math.hypot(Math.max(0, Math.abs(lx) - b.hx), Math.max(0, Math.abs(lz) - b.hz)) < r) return true;
+  }
+  return false;
+}
+function ensureCoverState(e) {
+  if (e.suppress !== undefined) return;
+  e.suppress = 0; e.cover = null; e.coverCd = 0.5 + Math.random() * 1.5; e.exposeT = 0; e.exposeLimit = 6 + Math.random() * 5;
+  e.coverProne = !!e.actCrouch && Math.random() < (e.boss ? 0.3 : 0.65); // 모두가 숨는 건 아니다 — 일부는 계속 맞서 쏜다. 웅크리기 클립이 없는 모델은 서서 "숨게" 되므로 제외
+}
+function addSuppress(e, amt) { ensureCoverState(e); e.suppress = Math.min(COVER.maxSup, e.suppress + amt); }
+// 플레이어 탄이 적 곁(2.5 m)을 지나가면 제압 — 탄·적 쌍마다 한 번만
+function checkSuppress(pr, next) {
+  if (state.phase !== 'raid') return;
+  _cvA.subVectors(next, pr.pos); const l2 = _cvA.lengthSq(); if (l2 < 1e-9) return;
+  for (const e of enemies) {
+    if (e.dead || (pr.supp && pr.supp.has(e))) continue;
+    _cvB.set(e.pos.x, e.pos.y + (e.crouched ? 0.8 : 1.2), e.pos.z);
+    const t = THREE.MathUtils.clamp(_cvC.subVectors(_cvB, pr.pos).dot(_cvA) / l2, 0, 1);
+    _cvC.copy(pr.pos).addScaledVector(_cvA, t);
+    const d = _cvC.distanceTo(_cvB);
+    if (d < COVER.suppressR) { (pr.supp || (pr.supp = new Set())).add(e); addSuppress(e, 0.12 + 0.28 * (1 - d / COVER.suppressR)); }
+  }
+}
+// 원샷 모션(사격 반동·재장전)을 끊고 기본 자세로 — 기본 애니 전환(달리기·웅크리기)은 원샷 재생 중엔 막히므로, 안 끊으면 점사 뒤 약 1.5 s 동안 서 있는 채 숨는 중이 된다 (#352 시뮬에서 발견)
+function enemyCancelOneShot(e) {
+  const a = e.oneShot; if (!a || e.dead) return;
+  e.oneShot = null; a.fadeOut(0.1);
+  const base = e.baseAct || (e.running ? e.actRun : e.actIdle); if (base) base.reset().fadeIn(0.1).play();
+}
+function dropCover(e, cd) { e.cover = null; e.coverGen = null; e.coverCd = cd; e.stance = e.actCrouch && Math.random() < 0.3 ? 'crouch' : 'stand'; }
+function enemyStartReload(e) {
+  e.burstLeft = 0;
+  e.reloadT = (e.actReload ? e.actReload.getClip().duration : 1.7) * (enemyArmsOut(e) ? 1.4 : 1); // 팔 파괴 (#313)
+  playEnemyOneShot(e, e.actReload, 0.1);
+}
+// 적 e 의 엄폐 지점 탐색 — 가까운 후보부터: ① 앉은 눈(1.05 m)이 플레이어에게 안 보이는 지점 C ② C 에서 쏠 자리 Q = C(낮은 엄폐: 서면 보임) 또는
+// C 에서 옆으로 1.3/2.4 m 나간 자리(높은 엄폐: 내다보기)로 선 눈(1.6 m)이 보이는 곳 ③ 적→C 이동 경로(허리 높이) 개방. 못 찾으면 null.
+// 레이 한 번이 ~0.25 ms(병합 메시) 라 **제너레이터로 프레임당 12 레이씩 나눠 실행**한다(통째로 하면 최대 ~20 ms 끊김). 공유 임시 벡터는 프레임 사이에
+// 다른 코드가 덮어쓰므로 안에서 자체 벡터를 쓴다.
+const COVER_RAYS_PER_STEP = 12;
+function* coverSearch(e, dNow) {
+  const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3(), cands = [];
+  let rays = 0, chunk = 0, pe = playerEyePos();
+  const los = (from, to) => { rays++; chunk++; return hasLineOfSight(from, to); };
+  for (const r of [3, 5.5, 8.5, 12]) for (let k = 0; k < 10; k++) {
+    const a = (k / 10 + r * 0.137) * Math.PI * 2, x = e.pos.x + Math.sin(a) * r, z = e.pos.z + Math.cos(a) * r;
+    if (Math.abs(x) > WORLD_HALF - 3 || Math.abs(z) > WORLD_HALF - 3) continue;
+    const dp = Math.hypot(x - player.pos.x, z - player.pos.z);
+    if (dp < COVER.minPlayerDist || dp > ENEMY.fireRange * 0.9 || dp < dNow - 4) continue; // 너무 가깝거나 멀거나 플레이어 쪽으로 4 m 넘게 전진
+    const gy = terrainH(x, z);
+    if (gy < -0.3 || !isPointOpen(x, z, 0.6) || !nearCoverObject(x, z, 2.2)) continue; // 엄폐물 곁만
+    cands.push({ x, z, gy });
+  }
+  coverStats.cands += cands.length;
+  for (const c of cands) {
+    if (chunk >= COVER_RAYS_PER_STEP) { chunk = 0; yield; pe = playerEyePos(); } // 이번 프레임 몫 끝 — 다음 프레임에 이어서
+    if (rays >= 60) break; // 총 레이 상한
+    if (los(A.set(c.x, c.gy + 1.05, c.z), pe)) continue; // 앉아도 보임 = 엄폐 아님
+    const px = player.pos.x - c.x, pz = player.pos.z - c.z, pl = Math.hypot(px, pz) || 1, lx = -pz / pl, lz = px / pl; // 플레이어 방향의 수직(옆) 축
+    let q = null;
+    for (const off of [0, 1.3, -1.3, 2.4, -2.4]) {
+      const qx = c.x + lx * off, qz = c.z + lz * off, qy = off === 0 ? c.gy : terrainH(qx, qz);
+      if (off !== 0 && (qy < -0.3 || !isPointOpen(qx, qz, 0.5))) continue;
+      if (!los(B.set(qx, qy + 1.6, qz), pe)) continue; // 그 자리에서 서도 안 보임
+      if (off !== 0 && !los(A.set(c.x, c.gy + 0.6, c.z), C.set(qx, qy + 0.6, qz))) continue; // C→Q 길이 막힘
+      q = { x: qx, y: qy, z: qz }; break;
+    }
+    if (!q) continue;
+    if (!los(A.set(e.pos.x, e.pos.y + 0.6, e.pos.z), B.set(c.x, c.gy + 0.6, c.z))) continue; // 가는 길이 막힘
+    coverStats.rays += rays; return { x: c.x, z: c.z, gy: c.gy, qx: q.x, qy: q.y, qz: q.z, peek: q.x !== c.x || q.z !== c.z };
+  }
+  coverStats.rays += rays; return null;
+}
+function findCoverNow(e, dNow) { const g = coverSearch(e, dNow); for (let r = g.next(); ; r = g.next()) if (r.done) return r.value; } // QA 용 — 동기 완주
+// 교전 중 엄폐 상태기계. 엄폐 행동이 이동/사격을 정하면 { moveDir, speed, faceMove, noFire }, 평소대로면 null.
+// 모드: move(C 로 달림) → hide(웅크려 숨음, 재장전) → [out(Q 로 나감, 높은 엄폐만)] → pop(서서 점사) → move(C 로 복귀)/hide
+function coverMoveTo(e, tx, tz, dcv, speed) { return { moveDir: new THREE.Vector3((tx - e.pos.x) / dcv, 0, (tz - e.pos.z) / dcv), speed, faceMove: true, noFire: true }; }
+function coverTick(e, dt, dist) {
+  ensureCoverState(e);
+  e.suppress = Math.max(0, e.suppress - dt * COVER.decay);
+  e.coverCd -= dt;
+  let cv = e.cover;
+  if (!cv) {
+    e.exposeT += dt;
+    if (!e.coverProne || e.coverCd > 0 || dist < COVER.minPlayerDist || enemyLegsOut(e)) return null;
+    if (!e.coverGen && !(e.suppress > COVER.trigger || e.reloadT > 0.3 || e.exposeT > e.exposeLimit)) return null;
+    if (!e.coverGen) { e.coverGen = coverSearch(e, dist); e.coverGenT = performance.now(); coverStats.searches++; }
+    if (coverBudget <= 0) return null; // 이번 프레임 탐색 몫은 다른 적이 썼다 — 다음 프레임에 이어서
+    coverBudget--;
+    const step = e.coverGen.next();
+    if (!step.done) return null; // 아직 탐색 중 — 그동안은 평소대로 교전
+    e.coverGen = null;
+    const c = step.value;
+    if (!c || performance.now() - e.coverGenT > 2500) { e.coverCd = 2.5; return null; } // 못 찾았거나 결과가 낡았다
+    coverStats.found++; if (c.peek) coverStats.peek = (coverStats.peek || 0) + 1;
+    e.cover = cv = { x: c.x, z: c.z, qx: c.qx, qz: c.qz, peek: c.peek, mode: 'move', t: 0, hideT: 0, bursts: 0, maxBursts: Math.random() < 0.4 ? 2 : 1, firing: false, check: 0.5 };
+    e.exposeT = 0; e.combatMove = null;
+  }
+  if (dist < COVER.giveUpDist) { dropCover(e, 5); return null; } // 코앞까지 오면 엄폐를 버리고 거리 두기
+  cv.t += dt;
+  if (e.oneShot && cv.mode !== 'pop') enemyCancelOneShot(e); // 이동·숨기·내다보기 중엔 원샷이 전환을 막지 않게
+  const atQ = cv.mode === 'out' || cv.mode === 'pop', tx = atQ ? cv.qx : cv.x, tz = atQ ? cv.qz : cv.z;
+  const dcv = Math.hypot(tx - e.pos.x, tz - e.pos.z);
+  if ((cv.mode === 'hide' || cv.mode === 'pop') && dcv > 1.4) { cv.mode = 'move'; cv.t = 0; cv.firing = false; e.burstLeft = 0; return coverMoveTo(e, cv.x, cv.z, Math.max(0.01, Math.hypot(cv.x - e.pos.x, cv.z - e.pos.z)), ENEMY.runSpeed); } // 구르기 등으로 밀려남 → 복귀
+  if (cv.mode === 'move') {
+    if (dcv < 0.3) { cv.mode = 'hide'; cv.t = 0; cv.hideT = COVER.hideMin + Math.random() * COVER.hideVar + e.suppress * 1.5; cv.check = 0.5; e.stance = 'crouch'; }
+    else if (cv.t > 7) { dropCover(e, 3); return null; } // 못 간다 (끼임)
+    else return coverMoveTo(e, cv.x, cv.z, dcv, ENEMY.runSpeed);
+  }
+  if (cv.mode === 'hide') {
+    e.stance = 'crouch';
+    if (e.mag < ENEMY.magSize * 0.5 && e.reloadT <= 0) enemyStartReload(e); // 숨어서 재장전
+    cv.hideT -= dt; cv.check -= dt;
+    if (cv.check <= 0) { // 엄폐 유효성 재점검: 앉은 눈이 플레이어에게 보이면 무력화 → 즉시 재탐색
+      cv.check = 0.5;
+      if (hasLineOfSight(_cvA.set(cv.x, terrainH(cv.x, cv.z) + 1.05, cv.z), playerEyePos())) { dropCover(e, 0); e.exposeT = 99; return null; }
+    }
+    if (cv.hideT <= 0 && e.reloadT <= 0 && e.suppress < COVER.popBelow) {
+      cv.mode = cv.peek ? 'out' : 'pop'; cv.t = 0; cv.bursts = 0; cv.firing = false; e.stance = 'stand'; e.burstLeft = 0; e.fireTimer = 0.45;
+      if (cv.peek) return coverMoveTo(e, cv.qx, cv.qz, Math.max(0.01, Math.hypot(cv.qx - e.pos.x, cv.qz - e.pos.z)), ENEMY.runSpeed); // dcv 는 C 까지의 거리라 쓰지 않는다 — Q 로 바로 나간다
+    } else return { moveDir: null, speed: 0, faceMove: false, noFire: true };
+  }
+  if (cv.mode === 'out') { // 높은 엄폐: 옆으로 나가 쏠 자리로
+    if (dcv < 0.4) { cv.mode = 'pop'; cv.t = 0; }
+    else if (cv.t > 3 || e.suppress > COVER.hideAbove) { cv.mode = 'move'; cv.t = 0; }
+    else return coverMoveTo(e, cv.qx, cv.qz, dcv, ENEMY.runSpeed);
+    if (cv.mode === 'move') return coverMoveTo(e, cv.x, cv.z, Math.max(0.01, Math.hypot(cv.x - e.pos.x, cv.z - e.pos.z)), ENEMY.runSpeed);
+  }
+  // pop: 일어서서 쏜다 — 평소 사격 로직이 LOS 를 보고 점사. 점사가 끝났거나 오래 걸리거나 제압당하면 숨는 자리로 돌아간다.
+  e.stance = 'stand';
+  if (e.burstLeft > 0) cv.firing = true; else if (cv.firing) { cv.firing = false; cv.bursts++; }
+  if (cv.bursts === 0 && !cv.firing && cv.t > 2.2) { dropCover(e, 0); e.exposeT = 99; return null; } // 서도 안 보임/못 쏨 → 다른 엄폐
+  if ((cv.bursts >= cv.maxBursts && !cv.firing) || cv.t > 5.5 || e.suppress > COVER.hideAbove) {
+    cv.hideT = COVER.hideMin + Math.random() * COVER.hideVar + e.suppress * 1.5; cv.check = 0.5; cv.firing = false; cv.t = 0; e.burstLeft = 0;
+    if (cv.peek) { cv.mode = 'move'; return coverMoveTo(e, cv.x, cv.z, Math.max(0.01, Math.hypot(cv.x - e.pos.x, cv.z - e.pos.z)), ENEMY.runSpeed); } // 내다본 자리에서 숨는 자리로 복귀
+    cv.mode = 'hide'; e.stance = 'crouch';
+  }
+  return { moveDir: null, speed: 0, faceMove: false, noFire: false };
+}
 function updateEnemy(e, dt) {
   if (e.dead) {
     if (e.actDeath) {
@@ -3281,6 +3433,7 @@ function updateEnemy(e, dt) {
   }
   const eyeH = e.crouched ? 1.05 : 1.6;
   const eyePos = new THREE.Vector3(e.pos.x, e.pos.y + eyeH, e.pos.z);
+  const detectEye = e.cover ? new THREE.Vector3(e.cover.qx, e.pos.y + 1.6, e.cover.qz) : eyePos; // 엄폐 중 탐지는 쏠 자리(Q)의 선 눈높이 — 숨어 있다고 "놓쳤다"며 추격으로 풀리지 않게 (#352)
   const toPlayer = player.pos.clone().sub(e.pos); toPlayer.y = 0;
   const dist = toPlayer.length();
 
@@ -3292,7 +3445,7 @@ function updateEnemy(e, dt) {
     if (dist < ENEMY.sightRange) {
       const dirN = toPlayer.clone().normalize();
       const inFov = enemyForward(e).dot(dirN) > ENEMY.fovCos || dist < ENEMY.hearRange;
-      if (inFov && hasLineOfSight(eyePos, playerEyePos())) seen = true;
+      if (inFov && hasLineOfSight(detectEye, playerEyePos())) seen = true;
     }
     if (seen) {
       e.lastKnown.copy(player.pos);
@@ -3305,7 +3458,7 @@ function updateEnemy(e, dt) {
       }
     } else if (e.state === 'combat') {
       e.lostTimer += 0.15;
-      if (e.lostTimer > 3.5) { e.state = 'chase'; }
+      if (e.lostTimer > 3.5) { e.state = 'chase'; e.cover = null; e.coverGen = null; }
     }
   }
 
@@ -3332,30 +3485,35 @@ function updateEnemy(e, dt) {
     while (dyr < -Math.PI) dyr += Math.PI * 2;
     e.group.rotation.y += THREE.MathUtils.clamp(dyr, -dt * 14, dt * 14);
   } else if (e.state === 'combat') {
-    // 플레이어를 향해 회전
-    const targetYaw = Math.atan2(toPlayer.x, toPlayer.z);
+    const cvo = coverTick(e, dt, dist); // 엄폐 행동 (#352) — 이동/사격을 정하면 객체, 평소대로면 null
+    // 플레이어를 향해 회전 (엄폐로 달려가는 동안엔 이동 방향을 본다)
+    const faceDir = cvo && cvo.faceMove ? cvo.moveDir : toPlayer;
+    const targetYaw = Math.atan2(faceDir.x, faceDir.z);
     let dy = targetYaw - e.group.rotation.y;
     while (dy > Math.PI) dy -= Math.PI * 2;
     while (dy < -Math.PI) dy += Math.PI * 2;
-    e.group.rotation.y += THREE.MathUtils.clamp(dy, -dt * 6, dt * 6);
+    e.group.rotation.y += THREE.MathUtils.clamp(dy, -dt * (cvo && cvo.faceMove ? 10 : 6), dt * (cvo && cvo.faceMove ? 10 : 6));
 
-    // 거리 유지 (히스테리시스 — 경계에서 이동/정지 토글 방지)
-    if (e.combatMove === 'approach') {
-      if (dist < ENEMY.fireRange * 0.6) e.combatMove = null;
-    } else if (e.combatMove === 'retreat') {
-      if (dist > 9) e.combatMove = null;
-    } else {
-      if (dist > ENEMY.fireRange * 0.85) e.combatMove = 'approach';
-      else if (dist < 5) e.combatMove = 'retreat';
+    // 거리 유지 (히스테리시스 — 경계에서 이동/정지 토글 방지) — 엄폐 중엔 하지 않는다
+    if (cvo) { moveDir = cvo.moveDir; speed = cvo.speed; }
+    else {
+      if (e.combatMove === 'approach') {
+        if (dist < ENEMY.fireRange * 0.6) e.combatMove = null;
+      } else if (e.combatMove === 'retreat') {
+        if (dist > 9) e.combatMove = null;
+      } else {
+        if (dist > ENEMY.fireRange * 0.85) e.combatMove = 'approach';
+        else if (dist < 5) e.combatMove = 'retreat';
+      }
+      if (e.combatMove === 'approach') { moveDir = toPlayer.clone().normalize(); speed = ENEMY.runSpeed; }
+      else if (e.combatMove === 'retreat') { moveDir = toPlayer.clone().normalize().negate(); speed = ENEMY.walkSpeed; }
     }
-    if (e.combatMove === 'approach') { moveDir = toPlayer.clone().normalize(); speed = ENEMY.runSpeed; }
-    else if (e.combatMove === 'retreat') { moveDir = toPlayer.clone().normalize().negate(); speed = ENEMY.walkSpeed; }
 
     // --- 사격 / 재장전 ---
     if (e.reloadT > 0) {
       e.reloadT -= dt;
       if (e.reloadT <= 0) e.mag = e.boss ? 15 : ENEMY.magSize;
-    } else {
+    } else if (!(cvo && cvo.noFire)) { // 숨어 있거나 달려가는 중엔 쏘지 않는다 (#352)
       e.fireTimer -= dt;
       if (e.fireTimer <= 0) {
         if (e.burstLeft > 0) {
@@ -3364,15 +3522,10 @@ function updateEnemy(e, dt) {
           e.fireTimer = ENEMY.shotInterval;
           enemyShoot(e, dist);
           playEnemyOneShot(e, e.actShoot); // 사격 반동 (서 있을 때만)
-          if (e.mag <= 0) {
-            // 탄창 소진 → 재장전 (모션 시간만큼 사격 불가)
-            e.burstLeft = 0;
-            e.reloadT = (e.actReload ? e.actReload.getClip().duration : 1.7) * (enemyArmsOut(e) ? 1.4 : 1); // 팔 파괴 (#313)
-            playEnemyOneShot(e, e.actReload, 0.1);
-          }
+          if (e.mag <= 0) enemyStartReload(e); // 탄창 소진 → 재장전 (모션 시간만큼 사격 불가)
         } else if (dist < ENEMY.fireRange && hasLineOfSight(eyePos, playerEyePos())) {
           e.burstLeft = e.boss ? 5 : ENEMY.burstShots;
-          e.fireTimer = 0.9 + Math.random() * 0.9;
+          e.fireTimer = e.cover && e.cover.mode === 'pop' ? 0.25 + Math.random() * 0.25 : 0.9 + Math.random() * 0.9; // 팝업은 바로 쏜다 — 오래 서 있으면 엄폐 의미가 없다 (#352)
         } else {
           e.fireTimer = 0.4;
         }
@@ -3566,6 +3719,7 @@ function enemyAccuracy(e, dist) {
   let acc = 0.62 - dist * 0.011 - (moving ? 0.14 : 0) - (player.sprinting ? 0.08 : 0) + (e.crouched ? 0.06 : 0) + (e.boss ? 0.1 : 0);
   acc = THREE.MathUtils.clamp(acc, 0.06, 0.8);
   if (enemyArmsOut(e)) acc *= 0.5; // 팔 파괴 (#313)
+  acc *= 1 - 0.35 * Math.min(1, e.suppress || 0); // 제압당하면 조준이 흔들린다 (#352)
   return acc;
 }
 
@@ -4895,6 +5049,7 @@ function updateProjectiles(dt) {
     let done = false;
     if (hits.length) { if (resolveBulletHit(hits[0], _pDir, pr)) anyHit = true; _pNext.copy(hits[0].point); done = true; }
     if (pr.enemy && !pr.whizzed && !pr.hitPlayer && state.phase === 'raid') checkWhizz(pr, _pNext);
+    else if (!pr.enemy) checkSuppress(pr, _pNext); // 플레이어 탄이 적 곁을 스치면 제압 (#352)
     pr.pos.copy(_pNext); pr.dist += seg; pr.t += dt;
     if (pr.line) { const a = pr.line.geometry.attributes.position; a.setXYZ(1, pr.pos.x, pr.pos.y, pr.pos.z); a.needsUpdate = true; pr.line.geometry.computeBoundingSphere(); }
     if (done || pr.dist >= pr.range || pr.t > BALLISTICS.maxTime || pr.pos.y < -5) {
@@ -4915,7 +5070,7 @@ function resolveBulletHit(h, dir, pr) {
     const part = enemyHitPart(ud.enemy, ud.part, h.point); // 피격점 → 부위 (#313)
     const dmg = part === 'head' ? pr.dmgHead : pr.dmgBody;
     damageEnemyPart(ud.enemy, part, dmg);
-    if (ud.enemy.hp > 0) enemyHitReact(ud.enemy, part === 'head', dir);
+    if (ud.enemy.hp > 0) { addSuppress(ud.enemy, 0.8); enemyHitReact(ud.enemy, part === 'head', dir); } // 맞으면 주눅 (#352)
     ud.enemy.lastKnown.copy(player.pos); // 피격당한 적은 즉시 교전 상태
     if (ud.enemy.hp <= 0) killEnemy(ud.enemy, dir);
     else ud.enemy.state = 'combat';
@@ -7746,7 +7901,7 @@ async function beginRaid(key) {
 function startRaid(mapKey) {
   if (!assetsReady) return;
   clearRaidObjects();
-  clearHitDir(); whizzCount = 0; lastWhizz = null;
+  clearHitDir(); whizzCount = 0; lastWhizz = null; coverStats = { searches: 0, found: 0, rays: 0, cands: 0 };
   applyMap(mapKey || currentMapKey); // 선택 맵 구성 (전환 시 이전 맵 teardown)
   const isRange = !!(MAPS[currentMapKey] && MAPS[currentMapKey].range); // 사격 연습장 모드 (#209)
   state.range = isRange;
@@ -7864,6 +8019,7 @@ function endRaid(result, cause) {
   if (state.phase !== 'raid') return;
   state.phase = result === 'extract' ? 'extracted' : 'dead';
   clearHitDir();
+  console.info(`[cover] 탐색 ${coverStats.searches} · 성공 ${coverStats.found}(내다보기 ${coverStats.peek || 0}) · 후보 ${coverStats.cands} · 레이 ${coverStats.rays}`); // 0건이어도 남긴다 — 안 돈 건지 못 찾은 건지 구분 (#352)
   ambientStop();
   document.exitPointerLock?.(); // iOS Safari 는 Pointer Lock API 자체가 없음
   dom.hud.style.display = 'none';
@@ -8400,6 +8556,7 @@ function updateHUD() {
 let lastT = performance.now();
 function loop() {
   requestAnimationFrame(loop);
+  coverBudget = 1; // 엄폐 탐색 프레임 예산 (#352)
   const now = performance.now();
   const dt = Math.min(0.05, (now - lastT) / 1000);
   lastT = now;
@@ -8471,7 +8628,7 @@ window.__ex = {
   _enemyAcc(i, dist) { return enemyAccuracy(enemies[i], dist); }, _stepEnemy(i, dt) { updateEnemy(enemies[i], dt); },
   // 적 발사체 (#316) QA: 적 i 가 현재 거리로 1발 → 발사체 객체(rolled/result), 플레이어 히트박스 판정
   _enemyShoot(i) { const e = enemies[i]; const d = Math.hypot(player.pos.x - e.pos.x, player.pos.z - e.pos.z); return enemyShoot(e, d); },
-  get lastEnemyShot() { return lastEnemyShot; }, get lastEnvHit() { return lastEnvHit; }, _hold(on = true) { renderHold = !!on; }, get loadingVisible() { return !!raidLoadingEl && getComputedStyle(raidLoadingEl).display !== 'none'; }, get renderHold() { return renderHold; }, // (#346) QA: 로딩 오버레이가 실제로 보이는지(계산된 display)
+  get lastEnemyShot() { return lastEnemyShot; }, get lastEnvHit() { return lastEnvHit; }, get coverStats() { return coverStats; }, _findCover(i) { const e = enemies[i]; ensureCoverState(e); return findCoverNow(e, Math.hypot(player.pos.x - e.pos.x, player.pos.z - e.pos.z)); }, _addSuppress(i, a) { addSuppress(enemies[i], a); }, _checkSuppress: checkSuppress, set _coverBudget(n) { coverBudget = n; }, _hold(on = true) { renderHold = !!on; }, get loadingVisible() { return !!raidLoadingEl && getComputedStyle(raidLoadingEl).display !== 'none'; }, get renderHold() { return renderHold; }, // (#346) QA: 로딩 오버레이가 실제로 보이는지(계산된 display)
   _hurtDir(x, z) { showHitDir(new THREE.Vector3(x, 0, z)); }, _hdTick(dt) { updateHitDir(dt); }, // (#343) QA: 피격 방향 표시·휘파람
   get hitDirs() { return hitDirs.map((h) => ({ ang: +(hitDirAngle(h.src) ?? NaN).toFixed(3), age: +h.age.toFixed(2), op: h.el.style.opacity, tf: h.el.style.transform })); }, get whizz() { return { count: whizzCount, last: lastWhizz }; }, _whizzGraph: whizzGraph, _checkWhizz: checkWhizz, playerHit, _playerPart(x, y, z) { syncPlayerHit(); return playerHitPart('body', new THREE.Vector3(x, y, z)); },
   _rayHit(ox, oy, oz, dx, dy, dz, far = 200) { _shootRay.set(new THREE.Vector3(ox, oy, oz), new THREE.Vector3(dx, dy, dz).normalize()); _shootRay.far = far; const h = _shootRay.intersectObjects([...obstacleMeshes, ...propMeshes], false)[0]; return h ? { name: h.object.name, type: h.object.type, ud: Object.keys(h.object.userData || {}), d: +h.distance.toFixed(2), p: h.point.toArray().map(v => +v.toFixed(2)) } : null; },
