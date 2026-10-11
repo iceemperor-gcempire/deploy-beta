@@ -672,6 +672,7 @@
     }
   }
   </script>
-  <script type="module" src="./src/main.js?v=d57e041"></script>
+  <script>if (new URLSearchParams(location.search).has('smoke')) import('./src/smoke.js'); // 스모크 테스트 페이지 (#349, scripts/smoke_test.py)</script>
+  <script type="module" src="./src/main.js?v=400006c"></script>
 </body>
 </html>
