@@ -39,7 +39,7 @@ async function run() {
   const start = document.getElementById('btn-start');
   if (!(await waitFor(() => !!window.__ex && start && !start.disabled, 120000, 100))) { bad('에셋 로딩이 끝나지 않음(시작 버튼 비활성)'); return res; }
   const x = window.__ex;
-  for (const h of ['loadingVisible', 'renderHold', '_hold', 'bakeInfo', 'projectiles']) if (!(h in x)) { bad(`QA 훅 __ex.${h} 없음 — 훅이 빠지면 검사가 조용히 통과하므로 실패로 본다`); return res; }
+  for (const h of ['loadingVisible', 'renderHold', '_hold', 'bakeInfo', 'projectiles', '_los', '_openPoint', 'raySplit']) if (!(h in x)) { bad(`QA 훅 __ex.${h} 없음 — 훅이 빠지면 검사가 조용히 통과하므로 실패로 본다`); return res; }
   start.click();
   const ms = document.getElementById('mapselect');
   const cards = ms ? [...ms.querySelectorAll('button')].slice(0, -1) : []; // 마지막은 '취소'
@@ -88,6 +88,14 @@ async function run() {
   if (x.state.phase !== 'raid') bad(`3초 뒤 phase=${x.state.phase}`);
   const bl2 = blockers(); if (bl2.length) bad('3초 뒤 화면을 덮는 막: ' + bl2.join(' | '));
   res.info.enemies = x.enemies.length; res.info.hp = x.player.hp;
+
+  // 레이캐스트 비용 가드 (#355): 병합된 큰 메시는 three 의 Mesh.raycast 가 삼각형을 전부 검사해 벚꽃 동네에서 레이 하나가 27 ms 였고 총알 1발이 프레임을 33 ms 로 만들었다.
+  // 적 시야·총알·카메라 레이가 모두 이 비용을 낸다 — 무작위 10~45 m 쌍의 시야 레이 평균·p90 으로 회귀를 막는다(이 값은 GPU 가 아니라 JS 속도라 헤드리스에서도 유효).
+  { const ts = []; for (let i = 0; i < 40; i++) { const a = x._openPoint(); let b = null; for (let k = 0; k < 30; k++) { const q = x._openPoint(); const d = Math.hypot(q.x - a.x, q.z - a.z); if (d >= 10 && d <= 45) { b = q; break; } } if (!b) continue; const t = performance.now(); x._los([a.x, 1.6, a.z], [b.x, 1.6, b.z]); ts.push(performance.now() - t); }
+    if (ts.length >= 10) { ts.sort((p, q) => p - q); const mean = ts.reduce((p, q) => p + q, 0) / ts.length, p90 = ts[Math.floor(ts.length * 0.9)];
+      res.info.losMs = +mean.toFixed(2); res.info.losP90 = +p90.toFixed(2); res.info.rayProxies = x.raySplit ? x.raySplit.proxies : 0;
+      if (mean > 2.5 || p90 > 8) bad(`시야(LOS) 레이 평균 ${mean.toFixed(1)} ms · p90 ${p90.toFixed(1)} ms — 병합 메시 레이캐스트 비용 회귀 (#355: 가속 전 벚꽃 동네 27 ms)`); }
+    else res.warn.push('시야 레이 비용 표본이 부족함(열린 지점 쌍을 못 찾음)'); }
 
   // 셰이더 준비(renderHold) 중 시뮬 정지 게이트 — 실제 컴파일은 메인 스레드를 막아 중간 관측이 안 되므로 훅으로 보류를 강제한다.
   // 루프(rAF)는 도는데(렌더만 건너뜀) 타이머·이동·발사체는 멈춰 있어야 하고, 풀리면 다시 진행해야 한다.

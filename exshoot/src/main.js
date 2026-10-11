@@ -3307,32 +3307,34 @@ function enemyStartReload(e) {
 }
 // 적 e 의 엄폐 지점 탐색 — 가까운 후보부터: ① 앉은 눈(1.05 m)이 플레이어에게 안 보이는 지점 C ② C 에서 쏠 자리 Q = C(낮은 엄폐: 서면 보임) 또는
 // C 에서 옆으로 1.3/2.4 m 나간 자리(높은 엄폐: 내다보기)로 선 눈(1.6 m)이 보이는 곳 ③ 적→C 이동 경로(허리 높이) 개방. 못 찾으면 null.
-// 레이 한 번이 ~0.25 ms(병합 메시) 라 **제너레이터로 프레임당 12 레이씩 나눠 실행**한다(통째로 하면 최대 ~20 ms 끊김). 공유 임시 벡터는 프레임 사이에
+// 레이 비용이 0.1~1 ms 로 들쭉날쭉해 **제너레이터로 프레임당 3 ms 예산씩 나눠 실행**한다(통째로 하면 최대 수백 ms 끊김). 공유 임시 벡터는 프레임 사이에
 // 다른 코드가 덮어쓰므로 안에서 자체 벡터를 쓴다.
-const COVER_RAYS_PER_STEP = 12;
-function* coverSearch(e, dNow) {
+const COVER_STEP_MS = 3; // 프레임당 탐색 시간 예산 — 레이 비용이 맵·위치마다 0.1~1 ms 로 달라 개수가 아니라 시간으로 자른다
+function* coverSearch(e, dNow, avoid = null) {
   const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3(), cands = [];
-  let rays = 0, chunk = 0, pe = playerEyePos();
-  const los = (from, to) => { rays++; chunk++; return hasLineOfSight(from, to); };
-  for (const r of [3, 5.5, 8.5, 12]) for (let k = 0; k < 10; k++) {
-    const a = (k / 10 + r * 0.137) * Math.PI * 2, x = e.pos.x + Math.sin(a) * r, z = e.pos.z + Math.cos(a) * r;
+  let rays = 0, tStep = performance.now(), pe = playerEyePos();
+  const los = (from, to) => { rays++; return hasLineOfSight(from, to); };
+  for (const r of [3, 5.5, 8.5, 12, 16]) for (let k = 0; k < 12; k++) {
+    const a = (k / 12 + r * 0.137) * Math.PI * 2, x = e.pos.x + Math.sin(a) * r, z = e.pos.z + Math.cos(a) * r;
+    if (avoid && Math.hypot(x - avoid.x, z - avoid.z) < avoid.r) continue; // 재배치: 지금 숨은 자리 근처는 제외
     if (Math.abs(x) > WORLD_HALF - 3 || Math.abs(z) > WORLD_HALF - 3) continue;
     const dp = Math.hypot(x - player.pos.x, z - player.pos.z);
     if (dp < COVER.minPlayerDist || dp > ENEMY.fireRange * 0.9 || dp < dNow - 4) continue; // 너무 가깝거나 멀거나 플레이어 쪽으로 4 m 넘게 전진
     const gy = terrainH(x, z);
-    if (gy < -0.3 || !isPointOpen(x, z, 0.6) || !nearCoverObject(x, z, 2.2)) continue; // 엄폐물 곁만
+    if (gy < -0.3 || !isPointOpen(x, z, 0.6) || !nearCoverObject(x, z, 2.6)) continue; // 엄폐물 곁만
     cands.push({ x, z, gy });
   }
   coverStats.cands += cands.length;
   for (const c of cands) {
-    if (chunk >= COVER_RAYS_PER_STEP) { chunk = 0; yield; pe = playerEyePos(); } // 이번 프레임 몫 끝 — 다음 프레임에 이어서
-    if (rays >= 60) break; // 총 레이 상한
+    if (performance.now() - tStep > COVER_STEP_MS) { yield; tStep = performance.now(); pe = playerEyePos(); } // 이번 프레임 몫 끝 — 다음 프레임에 이어서
+    if (rays >= 120) break; // 총 레이 상한 (병합 메시 가속 #355 뒤 레이 ~0.3 ms)
     if (los(A.set(c.x, c.gy + 1.05, c.z), pe)) continue; // 앉아도 보임 = 엄폐 아님
     const px = player.pos.x - c.x, pz = player.pos.z - c.z, pl = Math.hypot(px, pz) || 1, lx = -pz / pl, lz = px / pl; // 플레이어 방향의 수직(옆) 축
     let q = null;
-    for (const off of [0, 1.3, -1.3, 2.4, -2.4]) {
+    for (const off of [0, 1.0, -1.0, 1.8, -1.8, 2.8, -2.8]) {
       const qx = c.x + lx * off, qz = c.z + lz * off, qy = off === 0 ? c.gy : terrainH(qx, qz);
       if (off !== 0 && (qy < -0.3 || !isPointOpen(qx, qz, 0.5))) continue;
+      if (performance.now() - tStep > COVER_STEP_MS) { yield; tStep = performance.now(); pe = playerEyePos(); } // 후보 하나가 내다보기 7자리×2레이 = 최대 15레이라 안에서도 끊는다
       if (!los(B.set(qx, qy + 1.6, qz), pe)) continue; // 그 자리에서 서도 안 보임
       if (off !== 0 && !los(A.set(c.x, c.gy + 0.6, c.z), C.set(qx, qy + 0.6, qz))) continue; // C→Q 길이 막힘
       q = { x: qx, y: qy, z: qz }; break;
@@ -3343,7 +3345,7 @@ function* coverSearch(e, dNow) {
   }
   coverStats.rays += rays; return null;
 }
-function findCoverNow(e, dNow) { const g = coverSearch(e, dNow); for (let r = g.next(); ; r = g.next()) if (r.done) return r.value; } // QA 용 — 동기 완주
+function findCoverNow(e, dNow, avoid = null) { const g = coverSearch(e, dNow, avoid); for (let r = g.next(); ; r = g.next()) if (r.done) return r.value; } // QA 용 — 동기 완주
 // 교전 중 엄폐 상태기계. 엄폐 행동이 이동/사격을 정하면 { moveDir, speed, faceMove, noFire }, 평소대로면 null.
 // 모드: move(C 로 달림) → hide(웅크려 숨음, 재장전) → [out(Q 로 나감, 높은 엄폐만)] → pop(서서 점사) → move(C 로 복귀)/hide
 function coverMoveTo(e, tx, tz, dcv, speed) { return { moveDir: new THREE.Vector3((tx - e.pos.x) / dcv, 0, (tz - e.pos.z) / dcv), speed, faceMove: true, noFire: true }; }
@@ -3365,7 +3367,7 @@ function coverTick(e, dt, dist) {
     const c = step.value;
     if (!c || performance.now() - e.coverGenT > 2500) { e.coverCd = 2.5; return null; } // 못 찾았거나 결과가 낡았다
     coverStats.found++; if (c.peek) coverStats.peek = (coverStats.peek || 0) + 1;
-    e.cover = cv = { x: c.x, z: c.z, qx: c.qx, qz: c.qz, peek: c.peek, mode: 'move', t: 0, hideT: 0, bursts: 0, maxBursts: Math.random() < 0.4 ? 2 : 1, firing: false, check: 0.5 };
+    e.cover = cv = { x: c.x, z: c.z, qx: c.qx, qz: c.qz, peek: c.peek, mode: 'move', t: 0, hideT: 0, bursts: 0, maxBursts: Math.random() < 0.4 ? 2 : 1, firing: false, check: 0.5, cycles: 0, relocateAt: 2 + Math.floor(Math.random() * 3), relocTried: false };
     e.exposeT = 0; e.combatMove = null;
   }
   if (dist < COVER.giveUpDist) { dropCover(e, 5); return null; } // 코앞까지 오면 엄폐를 버리고 거리 두기
@@ -3387,6 +3389,23 @@ function coverTick(e, dt, dist) {
       cv.check = 0.5;
       if (hasLineOfSight(_cvA.set(cv.x, terrainH(cv.x, cv.z) + 1.05, cv.z), playerEyePos())) { dropCover(e, 0); e.exposeT = 99; return null; }
     }
+    // 재배치(엄폐→엄폐): 2~4번 순환하면 다른 엄폐를 찾는다 — 한 자리에서 계속 숨고 나오면 플레이어가 그 자리만 쏘면 된다 (#355). 찾는 동안은 계속 숨어 있다.
+    if (cv.hideT <= 0 && cv.cycles >= cv.relocateAt && !cv.relocTried) { cv.relocTried = true; e.coverGen = coverSearch(e, dist, { x: cv.x, z: cv.z, r: 4 }); e.coverGenT = performance.now(); coverStats.relocSearches = (coverStats.relocSearches || 0) + 1; }
+    if (e.coverGen && cv.relocTried) {
+      if (coverBudget > 0) {
+        coverBudget--; const st = e.coverGen.next();
+        if (st.done) {
+          e.coverGen = null; const c = st.value;
+          if (c && performance.now() - e.coverGenT < 2500) { // 옮긴다
+            coverStats.relocated = (coverStats.relocated || 0) + 1;
+            cv.x = c.x; cv.z = c.z; cv.qx = c.qx; cv.qz = c.qz; cv.peek = c.peek; cv.mode = 'move'; cv.t = 0; cv.cycles = 0; cv.relocateAt = 2 + Math.floor(Math.random() * 3); cv.relocTried = false; cv.bursts = 0; cv.firing = false;
+            return coverMoveTo(e, cv.x, cv.z, Math.max(0.01, Math.hypot(cv.x - e.pos.x, cv.z - e.pos.z)), ENEMY.runSpeed);
+          }
+          cv.relocateAt = cv.cycles + 2; cv.relocTried = false; // 못 찾음 — 두 순환 뒤 다시
+        }
+      }
+      if (e.coverGen) return { moveDir: null, speed: 0, faceMove: false, noFire: true }; // 탐색 중엔 계속 숨는다
+    }
     if (cv.hideT <= 0 && e.reloadT <= 0 && e.suppress < COVER.popBelow) {
       cv.mode = cv.peek ? 'out' : 'pop'; cv.t = 0; cv.bursts = 0; cv.firing = false; e.stance = 'stand'; e.burstLeft = 0; e.fireTimer = 0.45;
       if (cv.peek) return coverMoveTo(e, cv.qx, cv.qz, Math.max(0.01, Math.hypot(cv.qx - e.pos.x, cv.qz - e.pos.z)), ENEMY.runSpeed); // dcv 는 C 까지의 거리라 쓰지 않는다 — Q 로 바로 나간다
@@ -3403,7 +3422,7 @@ function coverTick(e, dt, dist) {
   if (e.burstLeft > 0) cv.firing = true; else if (cv.firing) { cv.firing = false; cv.bursts++; }
   if (cv.bursts === 0 && !cv.firing && cv.t > 2.2) { dropCover(e, 0); e.exposeT = 99; return null; } // 서도 안 보임/못 쏨 → 다른 엄폐
   if ((cv.bursts >= cv.maxBursts && !cv.firing) || cv.t > 5.5 || e.suppress > COVER.hideAbove) {
-    cv.hideT = COVER.hideMin + Math.random() * COVER.hideVar + e.suppress * 1.5; cv.check = 0.5; cv.firing = false; cv.t = 0; e.burstLeft = 0;
+    cv.hideT = COVER.hideMin + Math.random() * COVER.hideVar + e.suppress * 1.5; cv.check = 0.5; cv.firing = false; cv.t = 0; e.burstLeft = 0; cv.cycles++;
     if (cv.peek) { cv.mode = 'move'; return coverMoveTo(e, cv.x, cv.z, Math.max(0.01, Math.hypot(cv.x - e.pos.x, cv.z - e.pos.z)), ENEMY.runSpeed); } // 내다본 자리에서 숨는 자리로 복귀
     cv.mode = 'hide'; e.stance = 'crouch';
   }
@@ -7854,10 +7873,86 @@ function applyMap(key) {
   lastBuildInfo = { key, ms: Math.round(performance.now() - t0), baked: !!bk && !!BAKED[key] };
   console.info(`[map] ${key} 빌드 ${lastBuildInfo.ms}ms (${lastBuildInfo.baked ? '구운 형상' : '절차 생성'})`);
   for (const c of scene.children) if (!before.has(c)) staticObjects.push(c);
+  if (!new URLSearchParams(location.search).has('bake')) splitHeavyRaycastMeshes(); // 굽기 페이지는 형상만 만든다 (#355)
   buildPhysicsStatics();
   checkMapOverlaps(); // 배치 겹침 진단 (#215) — 겹침 있으면 console.warn + mapOverlaps 에 저장
   builtMapKey = key;
   currentMapKey = key;
+}
+
+// ── 레이캐스트 가속 (#355) ──
+// 병합된 큰 정적 메시(벚꽃 동네 90 m 청크: 경계 구 반경 ~52 m)는 three 의 Mesh.raycast 가 경계 구에 걸리기만 하면 삼각형을 전부 검사해 레이 하나가
+// 수십만 삼각형 = ~40 ms 였다(적 시야·총알·카메라·조준 레이 전부 — 총알 1발이 날아다니는 프레임이 33 ms, 연사하면 10~15 fps).
+// ① 공간 범위가 큰(경계 반경 > RAY_CELL×0.75) 정적 메시를 셀(RAY_CELL m, 로컬 xz)로 쪼갠 "레이캐스트 전용 프록시"(렌더 안 함, position 공유 + 셀별 index,
+//    경계 상자·구는 셀 삼각형 정점으로 직접 지정)로 만들고 ② 프록시를 월드 xz 격자에 등록해 레이가 지나는 셀만 훑는 가속 객체(DDA) 하나로 감싸 obstacleMeshes 에 넣는다.
+// 렌더 메시는 그대로 장면에 남고, 히트의 object 는 프록시(userData·material·matrixWorld 는 원본과 같음)라 히트 처리는 변함없다.
+// 주의: computeBoundingSphere 는 인덱스가 아니라 position 전체로 계산 → 직접 지정하지 않으면 프록시가 원본과 같은 큰 구를 가져 가지치기가 안 된다.
+const RAY_CELL = parseFloat(new URLSearchParams(location.search).get('raycell')) || 8, RAY_SPLIT_MIN_TRIS = 60; // 8 m: 벚꽃 동네 실측 5 m 0.20 ms / 8 m 0.36 ms / 10 m 0.45 ms (프록시 9.9k/6.2k/5.1k) — 원래 27 ms
+let raySplit = null; // { originals, ms, heavy, proxies, tris, meshes } — QA·로그
+function makeRayAccel(proxies, userData) {
+  const grid = new Map(), C = RAY_CELL, box = new THREE.Box3(), K = (ix, iz) => (ix + 4096) * 8192 + iz + 4096;
+  for (const p of proxies) {
+    box.copy(p.geometry.boundingBox).applyMatrix4(p.matrixWorld);
+    for (let ix = Math.floor(box.min.x / C); ix <= Math.floor(box.max.x / C); ix++) for (let iz = Math.floor(box.min.z / C); iz <= Math.floor(box.max.z / C); iz++) {
+      const k = K(ix, iz); let a = grid.get(k); if (!a) grid.set(k, a = []); a.push(p);
+    }
+  }
+  let stamp = 0;
+  return {
+    isRayAccel: true, name: 'rayaccel', userData, layers: new THREE.Layers(), children: [], cells: grid.size, proxies: proxies.length,
+    raycast(raycaster, intersects) { // 레이가 지나는 xz 셀을 DDA 로 훑으며 셀의 프록시를 한 번씩만 레이캐스트 (결과 정렬은 intersectObjects 가 한다)
+      const o = raycaster.ray.origin, d = raycaster.ray.direction, far = Math.min(raycaster.far, 900), id = ++stamp;
+      let ix = Math.floor(o.x / C), iz = Math.floor(o.z / C);
+      const sx = d.x > 0 ? 1 : -1, sz = d.z > 0 ? 1 : -1, tdx = d.x !== 0 ? Math.abs(C / d.x) : Infinity, tdz = d.z !== 0 ? Math.abs(C / d.z) : Infinity;
+      let tx = d.x !== 0 ? ((d.x > 0 ? (ix + 1) * C - o.x : o.x - ix * C) / Math.abs(d.x)) : Infinity, tz = d.z !== 0 ? ((d.z > 0 ? (iz + 1) * C - o.z : o.z - iz * C) / Math.abs(d.z)) : Infinity, t = 0;
+      for (let n = 0; n < 600 && t <= far; n++) {
+        const cell = grid.get(K(ix, iz));
+        if (cell) for (let i = 0; i < cell.length; i++) { const p = cell[i]; if (p._rs !== id) { p._rs = id; p.raycast(raycaster, intersects); } }
+        if (tx < tz) { t = tx; tx += tdx; ix += sx; } else { t = tz; tz += tdz; iz += sz; }
+        if (t === Infinity) break; // 수직 레이
+      }
+    },
+  };
+}
+function splitHeavyRaycastMeshes() {
+  const t0 = performance.now(), out = [], originals = [], pStatic = [], pTerrain = [];
+  let trisIn = 0;
+  for (const m of obstacleMeshes) {
+    const g = m.geometry, pos = g && g.attributes && g.attributes.position;
+    const tris = pos && !pos.isInterleavedBufferAttribute ? (g.index ? g.index.count : pos.count) / 3 : 0;
+    if (tris < RAY_SPLIT_MIN_TRIS || m.isInstancedMesh || m.isSkinnedMesh || m.parent !== scene || Array.isArray(m.material) || !(pos.array instanceof Float32Array)) { out.push(m); continue; }
+    if (!g.boundingSphere) g.computeBoundingSphere();
+    if (g.boundingSphere.radius * Math.max(m.scale.x, m.scale.z) <= RAY_CELL * 0.75) { out.push(m); continue; } // 작은 메시는 그대로 (레이마다 경계 구 검사만)
+    m.updateMatrixWorld(true);
+    originals.push(m); trisIn += tris;
+    const idx = g.index ? g.index.array : null, pa = pos.array, cells = new Map(), dest = m.userData.terrainTile ? pTerrain : pStatic;
+    for (let t = 0; t < tris; t++) {
+      const i0 = idx ? idx[t * 3] : t * 3, i1 = idx ? idx[t * 3 + 1] : t * 3 + 1, i2 = idx ? idx[t * 3 + 2] : t * 3 + 2;
+      const x0 = pa[i0 * 3], y0 = pa[i0 * 3 + 1], z0 = pa[i0 * 3 + 2], x1 = pa[i1 * 3], y1 = pa[i1 * 3 + 1], z1 = pa[i1 * 3 + 2], x2 = pa[i2 * 3], y2 = pa[i2 * 3 + 1], z2 = pa[i2 * 3 + 2];
+      const key = (Math.floor((x0 + x1 + x2) / 3 / RAY_CELL) + 4096) * 8192 + Math.floor((z0 + z1 + z2) / 3 / RAY_CELL) + 4096;
+      let c = cells.get(key);
+      if (!c) { c = { ids: [], mn: [Infinity, Infinity, Infinity], mx: [-Infinity, -Infinity, -Infinity] }; cells.set(key, c); }
+      c.ids.push(i0, i1, i2);
+      c.mn[0] = Math.min(c.mn[0], x0, x1, x2); c.mn[1] = Math.min(c.mn[1], y0, y1, y2); c.mn[2] = Math.min(c.mn[2], z0, z1, z2);
+      c.mx[0] = Math.max(c.mx[0], x0, x1, x2); c.mx[1] = Math.max(c.mx[1], y0, y1, y2); c.mx[2] = Math.max(c.mx[2], z0, z1, z2);
+    }
+    for (const c of cells.values()) {
+      const pg = new THREE.BufferGeometry();
+      pg.setAttribute('position', pos);
+      pg.setIndex(new THREE.BufferAttribute(Uint32Array.from(c.ids), 1));
+      pg.boundingBox = new THREE.Box3(new THREE.Vector3(...c.mn), new THREE.Vector3(...c.mx));
+      pg.boundingSphere = new THREE.Sphere(); pg.boundingBox.getBoundingSphere(pg.boundingSphere);
+      const pm = new THREE.Mesh(pg, m.material);
+      pm.matrixAutoUpdate = false; pm.matrix.copy(m.matrix); pm.matrixWorld.copy(m.matrixWorld);
+      pm.userData = m.userData; pm.name = 'rayproxy';
+      dest.push(pm);
+    }
+  }
+  const accS = pStatic.length ? makeRayAccel(pStatic, {}) : null, accT = pTerrain.length ? makeRayAccel(pTerrain, { terrainTile: true }) : null; // 지형 타일은 LOS 에서 제외돼야 하므로 따로
+  if (accS) out.push(accS); if (accT) out.push(accT);
+  obstacleMeshes = out; losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile);
+  raySplit = { originals, ms: Math.round(performance.now() - t0), heavy: originals.length, proxies: pStatic.length + pTerrain.length, tris: Math.round(trisIn), meshes: out.length, cells: (accS ? accS.cells : 0) + (accT ? accT.cells : 0) };
+  console.info(`[ray] 레이캐스트 가속: 큰 메시 ${raySplit.heavy}개(삼각형 ${raySplit.tris}) → 프록시 ${raySplit.proxies}개·격자 셀 ${raySplit.cells}개, 레이 대상 ${out.length}개, ${raySplit.ms}ms (셀 ${RAY_CELL} m)`); // 0개여도 남긴다
 }
 
 function clearRaidObjects() {
@@ -8019,7 +8114,7 @@ function endRaid(result, cause) {
   if (state.phase !== 'raid') return;
   state.phase = result === 'extract' ? 'extracted' : 'dead';
   clearHitDir();
-  console.info(`[cover] 탐색 ${coverStats.searches} · 성공 ${coverStats.found}(내다보기 ${coverStats.peek || 0}) · 후보 ${coverStats.cands} · 레이 ${coverStats.rays}`); // 0건이어도 남긴다 — 안 돈 건지 못 찾은 건지 구분 (#352)
+  console.info(`[cover] 탐색 ${coverStats.searches} · 성공 ${coverStats.found}(내다보기 ${coverStats.peek || 0}) · 재배치 ${coverStats.relocated || 0}/${coverStats.relocSearches || 0} · 후보 ${coverStats.cands} · 레이 ${coverStats.rays}`); // 0건이어도 남긴다 — 안 돈 건지 못 찾은 건지 구분 (#352)
   ambientStop();
   document.exitPointerLock?.(); // iOS Safari 는 Pointer Lock API 자체가 없음
   dom.hud.style.display = 'none';
@@ -8628,7 +8723,20 @@ window.__ex = {
   _enemyAcc(i, dist) { return enemyAccuracy(enemies[i], dist); }, _stepEnemy(i, dt) { updateEnemy(enemies[i], dt); },
   // 적 발사체 (#316) QA: 적 i 가 현재 거리로 1발 → 발사체 객체(rolled/result), 플레이어 히트박스 판정
   _enemyShoot(i) { const e = enemies[i]; const d = Math.hypot(player.pos.x - e.pos.x, player.pos.z - e.pos.z); return enemyShoot(e, d); },
-  get lastEnemyShot() { return lastEnemyShot; }, get lastEnvHit() { return lastEnvHit; }, get coverStats() { return coverStats; }, _findCover(i) { const e = enemies[i]; ensureCoverState(e); return findCoverNow(e, Math.hypot(player.pos.x - e.pos.x, player.pos.z - e.pos.z)); }, _addSuppress(i, a) { addSuppress(enemies[i], a); }, _checkSuppress: checkSuppress, set _coverBudget(n) { coverBudget = n; }, _hold(on = true) { renderHold = !!on; }, get loadingVisible() { return !!raidLoadingEl && getComputedStyle(raidLoadingEl).display !== 'none'; }, get renderHold() { return renderHold; }, // (#346) QA: 로딩 오버레이가 실제로 보이는지(계산된 display)
+  get lastEnemyShot() { return lastEnemyShot; }, get lastEnvHit() { return lastEnvHit; }, get coverStats() { return coverStats; },
+  // (#355) QA: LOS 비용 분해 — 지형 샘플링 vs 메시 레이캐스트, 그리고 losMeshes 규모(상위 메시 삼각형 수·경계 반경)
+  get losInfo() { const rows = losMeshes.map((m) => { const g = m.geometry; if (!g.boundingSphere) g.computeBoundingSphere(); return { tris: Math.round((g.index ? g.index.count : g.attributes.position.count) / 3), r: +g.boundingSphere.radius.toFixed(1), inst: !!m.isInstancedMesh }; }); rows.sort((a, b) => b.tris - a.tris); return { meshes: rows.length, tris: rows.reduce((s, r) => s + r.tris, 0), top: rows.slice(0, 6) }; },
+  get raySplit() { return raySplit; },
+  // (#355) QA: 프록시 대상과 원본(쪼개기 전) 대상으로 같은 레이를 쏴 최근접 히트(거리·객체 userData·면 법선)가 같은지
+  _rayCompare(n = 200, far = 60) { if (!raySplit) return null; const proxyList = obstacleMeshes, origList = [...obstacleMeshes.filter((o) => !o.isRayAccel), ...raySplit.originals];
+    let same = 0, diff = 0, bothMiss = 0, tp = 0, to = 0; const bad = [];
+    for (let i = 0; i < n; i++) { const p = randomOpenPoint(), a = Math.random() * Math.PI * 2, e = (Math.random() - 0.5) * 0.4; const o = new THREE.Vector3(p.x, 0.3 + Math.random() * 2.5, p.z), d = new THREE.Vector3(Math.sin(a) * Math.cos(e), Math.sin(e), Math.cos(a) * Math.cos(e)).normalize();
+      _shootRay.set(o, d); _shootRay.far = far; let t = performance.now(); const hp = _shootRay.intersectObjects(proxyList, false)[0]; tp += performance.now() - t; t = performance.now(); const ho = _shootRay.intersectObjects(origList, false)[0]; to += performance.now() - t;
+      if (!hp && !ho) { bothMiss++; continue; } if (!hp || !ho) { diff++; if (bad.length < 4) bad.push({ miss: hp ? 'orig' : 'proxy', d: (hp || ho).distance }); continue; }
+      const ok = Math.abs(hp.distance - ho.distance) < 1e-3 && hp.object.userData === ho.object.userData && (!hp.face || !ho.face || hp.face.normal.distanceTo(ho.face.normal) < 1e-4);
+      if (ok) same++; else { diff++; if (bad.length < 4) bad.push({ dp: +hp.distance.toFixed(3), do: +ho.distance.toFixed(3), sameUD: hp.object.userData === ho.object.userData }); } }
+    return { n, same, diff, bothMiss, bad, proxyMsPerRay: +(tp / n).toFixed(3), origMsPerRay: +(to / n).toFixed(3) }; },
+  _losParts(a, b) { const f = new THREE.Vector3(...a), t = new THREE.Vector3(...b); const t0 = performance.now(); const tb = terrainBlocks(f, t); const t1 = performance.now(); const d = t.clone().sub(f), dist = d.length(); d.normalize(); _ray.set(f, d); _ray.far = dist - 0.3; const h = _ray.intersectObjects(losMeshes, false); return { terrainMs: +(t1 - t0).toFixed(3), rayMs: +(performance.now() - t1).toFixed(3), terrainBlocked: tb, hits: h.length }; }, _findCover(i, avoid = null) { const e = enemies[i]; ensureCoverState(e); return findCoverNow(e, Math.hypot(player.pos.x - e.pos.x, player.pos.z - e.pos.z), avoid); }, _addSuppress(i, a) { addSuppress(enemies[i], a); }, _checkSuppress: checkSuppress, set _coverBudget(n) { coverBudget = n; }, _hold(on = true) { renderHold = !!on; }, get loadingVisible() { return !!raidLoadingEl && getComputedStyle(raidLoadingEl).display !== 'none'; }, get renderHold() { return renderHold; }, // (#346) QA: 로딩 오버레이가 실제로 보이는지(계산된 display)
   _hurtDir(x, z) { showHitDir(new THREE.Vector3(x, 0, z)); }, _hdTick(dt) { updateHitDir(dt); }, // (#343) QA: 피격 방향 표시·휘파람
   get hitDirs() { return hitDirs.map((h) => ({ ang: +(hitDirAngle(h.src) ?? NaN).toFixed(3), age: +h.age.toFixed(2), op: h.el.style.opacity, tf: h.el.style.transform })); }, get whizz() { return { count: whizzCount, last: lastWhizz }; }, _whizzGraph: whizzGraph, _checkWhizz: checkWhizz, playerHit, _playerPart(x, y, z) { syncPlayerHit(); return playerHitPart('body', new THREE.Vector3(x, y, z)); },
   _rayHit(ox, oy, oz, dx, dy, dz, far = 200) { _shootRay.set(new THREE.Vector3(ox, oy, oz), new THREE.Vector3(dx, dy, dz).normalize()); _shootRay.far = far; const h = _shootRay.intersectObjects([...obstacleMeshes, ...propMeshes], false)[0]; return h ? { name: h.object.name, type: h.object.type, ud: Object.keys(h.object.userData || {}), d: +h.distance.toFixed(2), p: h.point.toArray().map(v => +v.toFixed(2)) } : null; },
