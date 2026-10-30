@@ -167,6 +167,7 @@ const ITEM_TABLE = [
   { name: '구급킷',          value: 14000, w: 7, kg: 0.8,  heal: 60, type: 'consumable' },
   { name: '진통제',          value: 6000,  w: 9, kg: 0.1,  use: 'painkiller', type: 'consumable' }, // 60s 부상 효과 억제 (#307)
   { name: '부목',            value: 5000,  w: 8, kg: 0.3,  use: 'splint', type: 'consumable' },     // 부상 부위(팔/다리) 30% 복구 (#307)
+  { name: '파편 수류탄',     value: 9000,  w: 6, kg: 0.45, use: 'grenade', type: 'consumable' },    // G: 던져서 엄폐한 적을 몰아낸다 (#359)
   { name: '손목시계',        value: 15000, w: 10, kg: 0.1 },
   { name: '위스키',          value: 22000, w: 8, kg: 1.2 },
   { name: '금목걸이',        value: 28000, w: 6, kg: 0.1 },
@@ -257,7 +258,7 @@ const dom = {
   rangeHud: $('range-hud'), rhShots: $('rh-shots'), rhHits: $('rh-hits'), rhAcc: $('rh-acc'), rhLast: $('rh-last'), rhGroup: $('rh-group'), // 사격 연습장 스코어 (#292)
   rhTitle: $('rh-title'), rhDrill: $('rh-drill'), rhBest: $('rh-best'), recoilTrace: $('recoil-trace'), // 무기별 통계·드릴·반동 궤적 (#295)
   rhHist: $('rh-hist'), rhPat: $('rh-pat'), rhDist: $('rh-dist'), // 최근 기록·반동 패턴·거리계 (#298)
-  bodyHud: $('body-hud'), painHint: $('pain-hint'), // 신체 HUD (#304), 부상 처치 힌트 (#307)
+  bodyHud: $('body-hud'), painHint: $('pain-hint'), grenHint: $('gren-hint'), // 신체 HUD (#304), 부상 처치 힌트 (#307)
   weight: $('weight'), // 무게계 (#310)
 };
 
@@ -1095,6 +1096,7 @@ let RAPIER = null, physWorld = null, physReady = false;
 const physProps = [];     // { body, holder, mesh, halfH, explosive, exploded, mCol }
 const propMeshes = [];    // 총알 레이 타겟 (physProp 참조 userData)
 const ragdolls = [];      // { e, body, offset }
+let grenades = [];        // 날아가거나 구르는 중인 수류탄 (#359) — 정의·갱신은 아래 '수류탄' 구역
 let pendingExplosions = [];// { pos, opts } — 연쇄 폭발 프레임 분산
 let explosionsFX = [];    // { light, sphere, life, max }
 let flashes = [];         // {light, sprite?, life}
@@ -1194,7 +1196,7 @@ function renderInventoryScreen() {
   const vals = st.valuables || []; const vgz = groupValuables(vals);
   const gunTag = (k) => k === equipped ? '장착 중' : '';
   const moveBtn = (label, attr) => `<button class="ld-btn" ${attr}>${label}</button>`;
-  const healTag = (x) => x.heal ? `+${x.heal} HP` : x.use === 'painkiller' ? '진통 60s' : x.use === 'splint' ? '부목' : ''; // (#307)
+  const healTag = (x) => x.heal ? `+${x.heal} HP` : x.use === 'painkiller' ? '진통 60s' : x.use === 'splint' ? '부목' : x.use === 'grenade' ? '투척 G' : ''; // (#307, #359)
   // 방어구/헬멧 보유·반입 여부
   const hasArmor = (st.armorDur || 0) > 0, hasHelmet = !!st.helmet;
   const brArmor = st.loadoutArmor !== false, brHelmet = st.loadoutHelmet !== false;
@@ -1299,7 +1301,7 @@ function renderShop() {
   const consN = (s.consumables || []).length;
   html += `<h3 style="margin-top:14px">소모품 <span style="color:#6f8f6f;font-weight:normal">(보유 ${consN})</span></h3>`;
   for (const c of CONSUMABLE_SHOP) {
-    html += `<div class="shop-row"><div><div class="w-name">${c.name}</div><div class="w-desc">${c.heal ? `+${c.heal} HP` : c.use === 'painkiller' ? '부상 효과 60초 억제 (X)' : '부상 부위 복구 — 팔/다리 30% (X)'} · 레이드 반입</div></div>`
+    html += `<div class="shop-row"><div><div class="w-name">${c.name}</div><div class="w-desc">${c.heal ? `+${c.heal} HP` : c.use === 'painkiller' ? '부상 효과 60초 억제 (X)' : c.use === 'grenade' ? '반경 7 m 폭발·엄폐물 뒤는 피해 감소, 엄폐한 적을 몰아냄 (G)' : '부상 부위 복구 — 팔/다리 30% (X)'} · 레이드 반입</div></div>`
       + `<button data-buycons="${encodeURIComponent(c.name)}" ${roubles < c.value ? 'disabled' : ''}>구매 ₽${c.value.toLocaleString('ko-KR')}</button></div>`;
   }
   // 총기 부품 (#186) — 구매 시 인벤토리(총기 부품)에 쌓임. 차후 총기 커스텀에 사용.
@@ -3483,7 +3485,16 @@ function updateEnemy(e, dt) {
 
   // --- 상태별 행동 ---
   let moveDir = null, speed = 0;
-  if (e.state === 'patrol') {
+  const gf = (grenades.length || e.gDir || e.gReact != null) ? grenadeFlee(e, dt) : null; // 수류탄 회피 (#359) — 어느 상태든 엄폐·교전보다 우선
+  if (gf) {
+    moveDir = gf.moveDir; speed = gf.speed; e.combatMove = null;
+    if (moveDir) { // 달리는 방향을 본다
+      let dyg = Math.atan2(moveDir.x, moveDir.z) - e.group.rotation.y;
+      while (dyg > Math.PI) dyg -= Math.PI * 2;
+      while (dyg < -Math.PI) dyg += Math.PI * 2;
+      e.group.rotation.y += THREE.MathUtils.clamp(dyg, -dt * 10, dt * 10);
+    }
+  } else if (e.state === 'patrol') {
     const d = e.waypoint.clone().sub(e.pos); d.y = 0;
     if (d.length() < 1.6) {
       e.idleTimer -= dt;
@@ -5242,10 +5253,13 @@ const _v3 = new THREE.Vector3();
 function propWorldPos(p) { const t = p.body.translation(); return _v3.set(t.x, t.y, t.z); }
 
 // 폭발: VFX + 범위 데미지(적/플레이어) + 동적 바디 임펄스 + 폭발통 연쇄
-function explodeAt(pos, { radius = 6.5, damage = 95, force = 30 } = {}) {
+const _exA = new THREE.Vector3(), _exB = new THREE.Vector3();
+// grenade: 파편이 시야 밖 대상엔 닿지 않는다 — 엄폐가 폭발도 막는다(피해 GRENADE.shield 배), 살아남은 적은 제압된다 (#359). 폭발통은 기존대로(벽 투과).
+function explodeAt(pos, { radius = 6.5, damage = 95, force = 30, grenade = false } = {}) {
   spawnExplosionFX(pos);
   playBuf('deathBoom', { vol: 0.85, rate: 0.9 + Math.random() * 0.2 });
   alertEnemiesAround(pos, 45);
+  const shield = (x, y, z) => (grenade && !hasLineOfSight(_exA.set(pos.x, pos.y + 0.35, pos.z), _exB.set(x, y, z))) ? GRENADE.shield : 1;
   for (const p of physProps) {
     const t = p.body.translation();
     const d = Math.hypot(t.x - pos.x, t.y - pos.y, t.z - pos.z);
@@ -5258,20 +5272,21 @@ function explodeAt(pos, { radius = 6.5, damage = 95, force = 30 } = {}) {
     p.body.applyTorqueImpulse({ x: (Math.random() - 0.5) * k * m * 0.4, y: (Math.random() - 0.5) * k * m * 0.4, z: (Math.random() - 0.5) * k * m * 0.4 }, true);
     if (p.explosive && !p.exploded && d < radius * 0.85) {
       p.exploded = true; blackenProp(p); removeMovementCollider(p);
-      pendingExplosions.push({ pos: new THREE.Vector3(t.x, t.y, t.z), opts: { radius, damage, force } });
+      pendingExplosions.push({ pos: new THREE.Vector3(t.x, t.y, t.z), opts: {} }); // 연쇄는 폭발통 기본 수치 — 수류탄 수치를 물려받지 않는다
     }
   }
   for (const e of enemies) {
     if (e.dead) continue;
     const d = e.pos.distanceTo(pos);
     if (d < radius) {
-      e.hp -= damage * (1 - d / radius);
+      e.hp -= damage * (1 - d / radius) * shield(e.pos.x, e.pos.y + (e.crouched ? 0.8 : 1.2), e.pos.z);
       if (e.hp <= 0) { killEnemy(e); launchRagdoll(e, pos, force); }
       else e.state = 'combat';
     }
+    if (grenade && !e.dead && d < radius * GRENADE.suppressReach) addSuppress(e, GRENADE.suppress * (1 - d / (radius * GRENADE.suppressReach))); // 반경 밖 가까이도 움츠러든다
   }
   const pd = player.pos.distanceTo(pos);
-  if (pd < radius && state.phase === 'raid') damagePlayer(damage * (1 - pd / radius) * 0.85, false, Math.random() < 0.55 ? 'legs' : Math.random() < 0.5 ? 'stomach' : 'thorax', pos); // 폭발은 다리/복부 위주 (#304), 방향 표시는 폭심 기준 (#343)
+  if (pd < radius && state.phase === 'raid') damagePlayer(damage * (1 - pd / radius) * 0.85 * shield(player.pos.x, player.pos.y + 1.0, player.pos.z), false, Math.random() < 0.55 ? 'legs' : Math.random() < 0.5 ? 'stomach' : 'thorax', pos); // 폭발은 다리/복부 위주 (#304), 방향 표시는 폭심 기준 (#343)
 }
 
 // 폭발로 사살된 적 → 물리 바디로 날려버림 (스티프 래그돌)
@@ -5377,6 +5392,132 @@ function updateEffects(dt) {
     if (e.flash.intensity > 0) e.flash.intensity *= Math.pow(0.001, dt * 5);
   }
 }
+
+// ============================================================
+// 수류탄 (#359)
+// ============================================================
+// G: 조준점으로 호를 그려 던진다(최대 30 m). Rapier 바디가 아니라 직접 적분한다 — 물리 월드는 지형 높이장뿐이고 맵에 따라 꺼져 있다. 구조물은 정적 메시 레이
+// (가속 #355) 로 튕기고 지면은 terrainH. 퓨즈 3.4 s 뒤 explodeAt(grenade) — 시야가 막힌 대상은 피해 30%(엄폐가 폭발도 막는다), 살아남은 적은 제압.
+// 살아 있는 수류탄 반경 안의 적은 반응 시간 뒤 엄폐·점사를 접고 밖으로 달린다(updateEnemy → grenadeFlee) — 엄폐한 적을 끌어내는 수단.
+const GRENADE = { fuse: 3.4, maxThrow: 30, speed: 14, minT: 0.5, maxT: 2.0, radius: 7, damage: 180, force: 26, rest: 0.34, tangent: 0.75, skid: 0.25, rollFric: 5, cd: 0.9, r: 0.07,
+  fleeR: 9, fleeHold: 2, reactMin: 0.35, reactVar: 0.45, shield: 0.3, suppress: 1.2, suppressReach: 1.5 };
+let grenadeCd = 0;
+const grenadeStats = { thrown: 0, detonated: 0, fled: 0 }; // QA·로그
+const _grRay = new THREE.Raycaster(), _grN = new THREE.Vector3(), _grNext = new THREE.Vector3(), _grDir = new THREE.Vector3(), _grT = new THREE.Vector3();
+let _grGeo = null;
+const grenadeCount = () => inventory.reduce((n, i) => n + (i.use === 'grenade' ? 1 : 0), 0);
+// fireShot 과 같은 수렴점(TPS 는 총열이 맞춰 둔 pc.aimWorld, 그 외는 화면 중앙 레이)
+function aimPointNow(far) {
+  if (viewMode === 'tps' && pc && pc.aimWorld) return pc.aimWorld.clone();
+  const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
+  const targets = [...obstacleMeshes, ...propMeshes]; for (const e of enemies) if (!e.dead) targets.push(e.body, e.head);
+  _aimRay.set(camera.position, camDir); _aimRay.far = far;
+  const hits = _aimRay.intersectObjects(targets, false);
+  return hits.length ? hits[0].point.clone() : camera.position.clone().addScaledVector(camDir, far);
+}
+// target: 월드 좌표(QA 훅) — 없으면 조준점. 던졌으면 true
+function throwGrenade(target = null) {
+  if (state.phase !== 'raid' || state.paused || grenadeCd > 0) return false;
+  const idx = inventory.findIndex((i) => i.use === 'grenade');
+  if (idx === -1) { addFeed('수류탄 없음'); return false; }
+  inventory.splice(idx, 1);
+  const eye = playerEyePos();
+  const aim = target ? target.clone() : aimPointNow(GRENADE.maxThrow * 1.5);
+  // 손 위치: 눈 앞 0.4 m·조금 아래. 그 사이에 벽이 있으면(벽에 붙어 서서 던질 때) 눈에서 그대로 시작해 벽 앞면에서 튕기게 한다
+  _grDir.set(aim.x - eye.x, 0, aim.z - eye.z); if (_grDir.lengthSq() > 1e-6) _grDir.normalize();
+  const S = eye.clone().addScaledVector(_grDir, 0.4); S.y -= 0.25;
+  _grT.subVectors(S, eye); const sl = _grT.length(); _grRay.set(eye, _grT.divideScalar(sl)); _grRay.far = sl;
+  if (_grRay.intersectObjects(losMeshes, false).length) S.copy(eye);
+  let dx = aim.x - S.x, dy = aim.y - S.y, dz = aim.z - S.z, D = Math.hypot(dx, dz);
+  if (D > GRENADE.maxThrow) { const k = GRENADE.maxThrow / D; dx *= k; dy *= k; dz *= k; D = GRENADE.maxThrow; } // 더 먼 곳은 최대 사거리까지만
+  const t = THREE.MathUtils.clamp(D / GRENADE.speed, GRENADE.minT, GRENADE.maxT); // 비행 시간 — 가까우면 낮게 빨리, 멀면 높게
+  const vel = new THREE.Vector3(dx / t, (dy + 0.5 * BALLISTICS.g * t * t) / t, dz / t); // 조준점에 t 초 뒤 도달(구조물에 막히지 않으면)
+  if (!_grGeo) _grGeo = new THREE.SphereGeometry(GRENADE.r, 10, 8);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x4d5b34, roughness: 0.6, metalness: 0.3, emissive: 0x000000 });
+  const mesh = new THREE.Mesh(_grGeo, mat); mesh.scale.set(1, 1.3, 1); mesh.frustumCulled = false; mesh.position.copy(S); scene.add(mesh);
+  grenades.push({ pos: S.clone(), vel, fuse: GRENADE.fuse, mesh, mat, rolling: false, contactT: 0, bounces: 0, blink: false, dead: false });
+  grenadeCd = GRENADE.cd; grenadeStats.thrown++;
+  playBuf('click', { vol: 0.5, rate: 0.9 });
+  if (pc) pc.fireFaceT = 0.5; // 던지는 방향으로 몸을 돌린다(사격과 같은 정렬)
+  addFeed(`수류탄 투척 (남은 ${grenadeCount()})`);
+  refreshInventoryUI();
+  return true;
+}
+function grenadeBounceSfx(g) { playBuf('click', { vol: Math.max(0.04, 0.45 - g.pos.distanceTo(player.pos) * 0.015), rate: 0.7 + Math.random() * 0.2, lp: 3000 }); }
+function grenadeStep(g, h) {
+  g.fuse -= h;
+  const v = g.vel;
+  if (!g.rolling) v.y -= BALLISTICS.g * h;
+  _grNext.copy(g.pos).addScaledVector(v, h);
+  _grDir.subVectors(_grNext, g.pos); const seg = _grDir.length();
+  if (seg > 1e-6) {
+    _grRay.set(g.pos, _grDir.divideScalar(seg)); _grRay.far = seg + GRENADE.r;
+    const hit = _grRay.intersectObjects(losMeshes, false)[0]; // 지형 타일 제외 차폐물(가속) — 지면은 아래에서 terrainH 로
+    if (hit) { // 벽·구조물: 법선 성분은 반발계수로 되튀기고 접선 성분은 마찰로 줄인다
+      if (hit.face) _grN.copy(hit.face.normal).transformDirection(hit.object.matrixWorld).normalize(); else _grN.copy(_grDir).negate();
+      if (_grN.dot(_grDir) > 0) _grN.negate(); // 늘 날아온 쪽을 향한 법선
+      const vn = v.dot(_grN), up = _grN.y > 0.7; // 위를 향한 면(보도·도로·상자 윗면 — 도시 맵의 바닥은 지형이 아니라 메시다)은 지면과 같게: 착지 시 크게 감속, 느리게 닿으면 구르며 마찰
+      if (vn < 0) {
+        if (-vn > 2.5) grenadeBounceSfx(g);
+        if (up && -vn <= 1.6) { v.addScaledVector(_grN, -vn); g.contactT = 0.1; } // 굴러 닿음: 법선 성분만 없앤다
+        else {
+          _grT.copy(v).addScaledVector(_grN, -vn).multiplyScalar(up ? GRENADE.skid : GRENADE.tangent);
+          v.copy(_grT).addScaledVector(_grN, -vn * GRENADE.rest);
+          if (up) g.contactT = 0.1;
+          g.bounces++;
+        }
+      }
+      g.pos.copy(hit.point).addScaledVector(_grN, GRENADE.r + 0.02);
+    } else g.pos.copy(_grNext);
+  }
+  if (g.contactT > 0) { g.contactT -= h; const k = Math.exp(-GRENADE.rollFric * h); v.x *= k; v.z *= k; } // 메시 바닥 위를 구르는 중 마찰
+  const gy = terrainH(g.pos.x, g.pos.z) + GRENADE.r;
+  if (g.pos.y <= gy) {
+    g.pos.y = gy;
+    if (v.y < -1.6) { if (-v.y > 2.5) grenadeBounceSfx(g); v.y = -v.y * GRENADE.rest; v.x *= GRENADE.skid; v.z *= GRENADE.skid; g.bounces++; g.rolling = false; }
+    else { v.y = 0; g.rolling = true; const k = Math.exp(-GRENADE.rollFric * h); v.x *= k; v.z *= k; if (Math.hypot(v.x, v.z) < 0.08) { v.x = 0; v.z = 0; } }
+  } else g.rolling = false;
+}
+function detonateGrenade(g) {
+  g.dead = true; scene.remove(g.mesh); g.mat.dispose();
+  const i = grenades.indexOf(g); if (i >= 0) grenades.splice(i, 1); // 폭발 전에 목록에서 뺀다 — 적 회피가 끝나고, 폭발 중 사망으로 clearRaidObjects 가 돌아도 이중 처리가 없다
+  grenadeStats.detonated++;
+  explodeAt(g.pos.clone(), { radius: GRENADE.radius, damage: GRENADE.damage, force: GRENADE.force, grenade: true });
+}
+function updateGrenades(dt) {
+  grenadeCd = Math.max(0, grenadeCd - dt);
+  for (const g of grenades.slice()) { // 복사본 순회 — 폭발이 목록을 바꾼다
+    if (g.dead) continue;
+    for (let left = dt; left > 1e-6 && g.fuse > 0; ) { const h = Math.min(left, 1 / 60); left -= h; grenadeStep(g, h); } // 최대 1/60 s 로 쪼개 얇은 벽을 터널링하지 않게
+    g.mesh.position.copy(g.pos);
+    if (g.fuse <= 0) { detonateGrenade(g); continue; }
+    const blink = g.fuse < 1 && Math.floor(g.fuse * 10) % 2 === 0; // 마지막 1 s 는 붉게 깜빡인다
+    if (blink !== g.blink) { g.blink = blink; g.mat.emissive.setHex(blink ? 0xff2200 : 0x000000); }
+  }
+}
+// 적의 수류탄 회피: 반경(+여유) 안의 살아 있는 수류탄을 알아채고(반응 시간) 엄폐·점사를 접은 뒤, 5 m 앞까지 열려 있고 수류탄에서 가장 멀어지는 방향으로 달린다.
+// 이미 뛰는 중이면 반경을 fleeHold 만큼 넓혀 경계에서 들락날락하지 않게 한다. 위협이 없으면 null.
+const _fleeDirs = Array.from({ length: 12 }, (_, k) => new THREE.Vector3(Math.sin(k / 12 * Math.PI * 2), 0, Math.cos(k / 12 * Math.PI * 2)));
+function grenadeFlee(e, dt) {
+  let g = null, gd = GRENADE.fleeR + (e.gDir ? GRENADE.fleeHold : 0);
+  for (const q of grenades) { const d = Math.hypot(q.pos.x - e.pos.x, q.pos.z - e.pos.z); if (d < gd) { gd = d; g = q; } }
+  if (!g) { e.gReact = null; e.gDir = null; return null; }
+  if (e.gReact == null) e.gReact = GRENADE.reactMin + Math.random() * GRENADE.reactVar; // 처음 알아챘다 — 반응 시간 동안은 하던 대로
+  if (e.gReact > 0) { e.gReact -= dt; return null; }
+  if (!e.gDir || (e.gDirT -= dt) <= 0) {
+    if (!e.gDir) { grenadeStats.fled++; if (e.cover) dropCover(e, 2.5); e.coverGen = null; e.burstLeft = 0; enemyCancelOneShot(e); } // 뛰기 시작: 엄폐·점사 중단
+    let best = null, bestD = -1;
+    for (const dir of _fleeDirs) {
+      const x2 = e.pos.x + dir.x * 2.5, z2 = e.pos.z + dir.z * 2.5, x5 = e.pos.x + dir.x * 5, z5 = e.pos.z + dir.z * 5;
+      if (!isPointOpen(x2, z2, 0.45) || !isPointOpen(x5, z5, 0.45)) continue;
+      const dd = Math.hypot(x5 - g.pos.x, z5 - g.pos.z);
+      if (dd > bestD) { bestD = dd; best = dir; }
+    }
+    e.gDir = best || _grZero; e.gDirT = 0.4; // 갈 곳이 없으면(막다른 곳) 제자리
+  }
+  return { moveDir: e.gDir === _grZero ? null : e.gDir, speed: ENEMY.runSpeed };
+}
+const _grZero = new THREE.Vector3();
 
 // ============================================================
 // 상호작용 / 인벤토리
@@ -7968,6 +8109,7 @@ function clearRaidObjects() {
   if (airdropBeacon) { scene.remove(airdropBeacon.beam); scene.remove(airdropBeacon.ring); scene.remove(airdropBeacon.light); airdropBeacon = null; } // (#197)
   for (const t of tracers) scene.remove(t.line);
   for (const pr of projectiles) if (pr.line) scene.remove(pr.line); projectiles = []; // 발사체 정리 (#301)
+  for (const g of grenades) if (!g.dead) { g.dead = true; scene.remove(g.mesh); g.mat.dispose(); } grenades = []; grenadeCd = 0; // 수류탄 정리 (#359)
   tracers = [];
   for (const d of decals) scene.remove(d); // 탄흔 데칼 정리 (#208)
   decals = [];
@@ -8307,6 +8449,7 @@ if (IS_MOBILE) {
   onHold('tb-weapon', () => { if (inRaid()) cycleWeapon(); });
   onHold('tb-heal', () => { if (inRaid()) useHeal(); });
   onHold('tb-med', () => { if (inRaid()) useMed(); }); // 부상 처치 (#307)
+  onHold('tb-gren', () => { if (inRaid()) throwGrenade(); }); // 수류탄 (#359)
   onHold('tb-reset', () => { if (inRaid() && state.range) resetRange(); }); // 연습장 (#295)
   onHold('tb-drill', () => { if (inRaid() && state.range) startDrill(); });
   onHold('tb-mode', () => { if (inRaid() && state.range) cycleDrillMode(); }); // (#298)
@@ -8522,6 +8665,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'KeyU' && state.range) cycleDrillMode(); // 드릴 모드 전환 (#298)
   if (e.code === 'KeyQ') useHeal();
   if (e.code === 'KeyX') useMed(); // 부상 처치 (#307)
+  if (e.code === 'KeyG') throwGrenade(); // 수류탄 (#359)
   if (e.code === 'KeyV') toggleViewMode();
   if (e.code === 'KeyE') {
     const it = nearestInteractable();
@@ -8597,6 +8741,12 @@ function updateHUD() {
     const tb = document.getElementById('tb-heal');
     if (tb) tb.classList.toggle('urgent', !!item);
   }
+  { // 수류탄 개수 힌트 (#359): 있을 때만 — 데스크톱은 키 안내, 모바일은 버튼 라벨·표시
+    const n = state.phase === 'raid' ? grenadeCount() : 0, gt = n ? `G — 수류탄 ×${n}` : '';
+    if (dom.grenHint && dom.grenHint.textContent !== gt) { dom.grenHint.textContent = gt; dom.grenHint.style.display = n ? 'block' : 'none'; }
+    const gb = document.getElementById('tb-gren');
+    if (gb && gb.dataset.n !== String(n)) { gb.dataset.n = String(n); gb.textContent = n > 1 ? `수류탄 ×${n}` : '수류탄'; gb.style.display = n ? 'flex' : 'none'; }
+  }
   dom.hpFill.style.width = `${player.hp}%`;
   dom.stamFill.style.width = `${player.stamina}%`;
   if (dom.weight && state.phase === 'raid') { const cw = carryWeight(), t = weightTier(cw); const txt = `⚖ ${cw.toFixed(1)} / ${CARRY.over} kg`; if (dom.weight.textContent !== txt) dom.weight.textContent = txt; dom.weight.className = t === 2 ? 'w-max' : t === 1 ? 'w-over' : ''; } // (#310)
@@ -8665,6 +8815,7 @@ function loop() {
     updatePlayer(dt);
     updateGun(dt);
     updateProjectiles(dt); // 발사체 비행·명중 (#301)
+    updateGrenades(dt); // 수류탄 비행·퓨즈 (#359) — 적 회피가 이번 프레임 위치를 보도록 적 갱신 앞
     for (const e of enemies) updateEnemy(e, dt);
     updatePhysics(dt); // Rapier 스텝 + 소품/래그돌 동기화 (#119)
     if (state.range) updateRangeTargets(dt); // 스틸 공 흔들림 (#292)
@@ -8759,6 +8910,9 @@ window.__ex = {
   _killDir(i, x, z) { const e = enemies[i]; if (!e || e.dead) return null; killEnemy(e, new THREE.Vector3(x, 0, z)); return { side: enemyHitSide(e, new THREE.Vector3(x, 0, z)), clip: e.actDeath ? e.actDeath.getClip().name : null }; }, _beginRaid(k) { return beginRaid(k); }, _loadBaked(k) { return loadBaked(k); }, get bakeInfo() { return { hash: SRC_HASH, loaded: Object.keys(BAKED), last: lastBuildInfo }; },
   _fire() { if (state.phase !== 'raid') return; if (gun.mag <= 0) gun.mag = GUN.magSize; fireShot(); }, // QA: 트리거 게이트(포인터락·raiseT 등) 우회 1발, 탄창 자동 보충 (#292)
   get rangeTargets() { return rangeTargets; }, get drill() { return drill; }, _startDrill() { startDrill(); }, _rangeTick(dt) { updateRangeTargets(dt); }, _cycleDrillMode() { cycleDrillMode(); }, get recoilPat() { return recoilPat; }, // QA (#295/#298)
+  get grenades() { return grenades; }, get grenadeStats() { return grenadeStats; }, GRENADE, grenadeCount, _terrainH(x, z) { return terrainH(x, z); }, _isOpen(x, z, r = 0.8) { return isPointOpen(x, z, r); }, // QA (#359): 수류탄
+  _giveGrenade(n = 1) { for (let k = 0; k < n; k++) inventory.push({ name: '파편 수류탄', value: 9000, use: 'grenade', type: 'consumable' }); refreshInventoryUI(); return grenadeCount(); },
+  _throwGrenade(x, y, z) { grenadeCd = 0; return throwGrenade(x == null ? null : new THREE.Vector3(x, y, z)); }, _stepGrenades(dt) { updateGrenades(dt); return grenades.length; }, _discardGrenades() { for (const g of grenades) if (!g.dead) { g.dead = true; scene.remove(g.mesh); g.mat.dispose(); } grenades = []; }, _grenadeFlee(i, dt) { return grenadeFlee(enemies[i], dt); },
   _flushProjectiles() { for (let k = 0; k < 200 && projectiles.length; k++) updateProjectiles(0.02); return projectiles.length; }, _stepProjectiles(dt) { updateProjectiles(dt); }, get projectiles() { return projectiles; }, // QA (#301): 발사체를 즉시 비행 완료 / 수동 스텝 — 자동화 탭은 rAF 가 느려 드릴/이동 표적 시간을 수동 진행
   // 성능 QA (#280): _perfBegin() … (프레임 진행) … _perfEnd() → 그 사이 누적 draw call/삼각형의 프레임당 평균. renderer.info 는 프레임마다
   // 리셋되므로 autoReset 을 잠시 끈다. 두 호출로 나눈 이유: 자동화 탭에서는 JS 실행 중 rAF 가 멈춰 한 호출 안의 await 로는 프레임이 안 흐른다.

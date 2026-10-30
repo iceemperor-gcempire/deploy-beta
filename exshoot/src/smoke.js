@@ -39,7 +39,7 @@ async function run() {
   const start = document.getElementById('btn-start');
   if (!(await waitFor(() => !!window.__ex && start && !start.disabled, 120000, 100))) { bad('에셋 로딩이 끝나지 않음(시작 버튼 비활성)'); return res; }
   const x = window.__ex;
-  for (const h of ['loadingVisible', 'renderHold', '_hold', 'bakeInfo', 'projectiles', '_los', '_openPoint', 'raySplit']) if (!(h in x)) { bad(`QA 훅 __ex.${h} 없음 — 훅이 빠지면 검사가 조용히 통과하므로 실패로 본다`); return res; }
+  for (const h of ['loadingVisible', 'renderHold', '_hold', 'bakeInfo', 'projectiles', '_los', '_openPoint', 'raySplit', 'grenades', 'grenadeStats', '_giveGrenade', '_throwGrenade', '_stepGrenades', '_terrainH']) if (!(h in x)) { bad(`QA 훅 __ex.${h} 없음 — 훅이 빠지면 검사가 조용히 통과하므로 실패로 본다`); return res; }
   start.click();
   const ms = document.getElementById('mapselect');
   const cards = ms ? [...ms.querySelectorAll('button')].slice(0, -1) : []; // 마지막은 '취소'
@@ -108,6 +108,37 @@ async function run() {
     x._hold(false); const c = x.state.raidTime, f1 = fr;
     const resumed = await waitFor(() => fr - f1 >= 3 && x.state.raidTime < c, 40000, 50); go = false;   // 풀린 뒤 3프레임 안에 시뮬 재개
     if (!resumed) bad('보류가 풀린 뒤 시뮬이 재개되지 않음'); }
+
+  // 수류탄 경로 (#359): 인벤토리 → 투척 → 비행·바운스 → 퓨즈 폭발 → 정리가 오류 없이 한 바퀴 돌아야 한다. 정확도·차폐·회피는 이 검사의 범위 밖(전투 QA, docs/grenade.md).
+  // 호는 직선 시야보다 높아(25 m 에서 정점 약 4 m) 수관·처마에 걸려 되튀면 던진 사람이 맞는다(벚꽃 동네에서 100→69) — 직선 시야만 보고 던지면 게이트가 무작위로 실패한다.
+  // 그래서 던지는 자리·목표를 모두 열린 점에서 고르고 게임과 같은 식으로 호를 샘플링해 열린 쌍만 쓴다. 이 시점엔 다른 검사가 끝났으므로 플레이어를 그 자리로 옮겨도 된다.
+  // 시뮬은 훅으로 직접 스텝한다 — 헤드리스 ~1 fps 라 실시간을 기다릴 수 없다. 쌍을 못 찾으면 건너뛰되 info 에 남긴다(경고로 올리면 --strict 가 막는다).
+  { x._hold(true); const G = x.GRENADE, pp = x.player.pos, gyOf = (a, b) => x._terrainH(a, b);
+    const arcClear = (px, pz, T) => { // 게임과 같은 식(손 위치·비행 시간·속도). 마지막 10%(착지 직전)는 지형 샘플링이 섞이므로 뺀다
+      const e = [px, gyOf(px, pz) + 1.62, pz]; let hx = T.x - e[0], hz = T.z - e[2]; const hl = Math.hypot(hx, hz) || 1; hx /= hl; hz /= hl;
+      const S = [e[0] + hx * 0.4, e[1] - 0.25, e[2] + hz * 0.4], ty = gyOf(T.x, T.z), dx = T.x - S[0], dy = ty - S[1], dz = T.z - S[2];
+      const t = Math.min(G.maxT, Math.max(G.minT, Math.hypot(dx, dz) / G.speed)), v = [dx / t, (dy + 0.5 * 9.8 * t * t) / t, dz / t];
+      const at = (u) => [S[0] + v[0] * u, S[1] + v[1] * u - 0.5 * 9.8 * u * u, S[2] + v[2] * u];
+      if (!x._los(e, [T.x, ty + 1.0, T.z])) return false;
+      let prev = S; for (let k = 1; k <= 12; k++) { const c = at(t * 0.9 * k / 12); if (!x._los(prev, c)) return false; prev = c; } return true; };
+    let from = null, T = null;
+    for (let k = 0; k < 400 && !T; k++) { const a = x._openPoint(), q = x._openPoint(), d = Math.hypot(q.x - a.x, q.z - a.z); if (d >= 12 && d <= 25 && arcClear(a.x, a.z, q)) { from = a; T = q; } }
+    if (!T) res.info.gren = 'skip(호가 열린 12~25 m 쌍을 못 찾음)';
+    else {
+      pp.set(from.x, gyOf(from.x, from.z), from.z);
+      const det0 = x.grenadeStats.detonated, left0 = x.grenadeCount(); x._giveGrenade(1);
+      if (x.grenadeCount() !== left0 + 1) bad('수류탄 검사: 수류탄을 인벤토리에 못 넣음');
+      else if (!x._throwGrenade(T.x, gyOf(T.x, T.z), T.z)) bad('수류탄 검사: 투척 실패(레이드 중인데 던지지 못함)');
+      else {
+        if (x.grenades.length !== 1) bad(`수류탄 검사: 던진 뒤 비행 중 ${x.grenades.length}개`);
+        for (let i = 0; i < 400 && x.grenades.length; i++) x._stepGrenades(1 / 60);
+        if (x.grenades.length) bad('수류탄 검사: 퓨즈 3.4 s 가 지나도 안 터짐');
+        else if (x.grenadeStats.detonated !== det0 + 1) bad(`수류탄 검사: 폭발 횟수 ${det0}→${x.grenadeStats.detonated}`);
+        if (x.grenadeCount() !== left0) bad(`수류탄 검사: 던진 뒤 남은 수 ${x.grenadeCount()}(${left0} 이어야 함)`);
+        res.info.gren = x.grenadeStats.detonated - det0;
+      }
+    }
+    x._hold(false); }
 
   const bk = x.bakeInfo.last;
   res.info.baked = !!(bk && bk.baked); res.info.buildMs = bk && bk.ms;
