@@ -300,11 +300,14 @@ const skyUniforms = {
   // 맵별 하늘 팔레트 (#319 렌더 개편) — applyLook 이 교체. 기본값 = 기존 청회색 하늘
   uTop: { value: new THREE.Color(0.30, 0.41, 0.56) }, uMid: { value: new THREE.Color(0.60, 0.69, 0.78) }, uHor: { value: new THREE.Color(0.84, 0.85, 0.83) },
   uCloud: { value: 0.55 }, uCloudCol: { value: new THREE.Color(0.97, 0.96, 0.94) },
+  // (#362 그래픽 개편) 지평선 아래 = 지면 반사색(IBL 아래쪽 반구가 하늘색으로 빛나지 않게), 태양색, 환경맵 굽기 플래그(태양 원반 제외)
+  uGround: { value: new THREE.Color(0.30, 0.27, 0.23) }, uSunCol: { value: new THREE.Color(1.0, 0.9, 0.74) }, uEnv: { value: 0 },
 };
 const skyMat = new THREE.ShaderMaterial({
   side: THREE.BackSide,
   depthWrite: false,
   uniforms: skyUniforms,
+  defines: { SKY_OCT: IS_MOBILE ? 3 : 5 },
   vertexShader: /* glsl */`
     varying vec3 vDir;
     void main() {
@@ -314,37 +317,47 @@ const skyMat = new THREE.ShaderMaterial({
   fragmentShader: /* glsl */`
     varying vec3 vDir;
     uniform vec3 uSunDir;
-    uniform float uTime;
-    uniform vec3 uTop, uMid, uHor, uCloudCol;
-    uniform float uCloud;
-    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    uniform float uTime, uCloud, uEnv;
+    uniform vec3 uTop, uMid, uHor, uCloudCol, uGround, uSunCol;
+    float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
     float noise(vec2 p) {
       vec2 i = floor(p), f = fract(p);
       vec2 u = f * f * (3.0 - 2.0 * f);
       return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x),
                  mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
     }
-    float fbm(vec2 p) { return 0.65 * noise(p) + 0.35 * noise(p * 2.3 + 7.3); }
+    float fbm(vec2 p) { float a = 0.5, s = 0.0; for (int i = 0; i < SKY_OCT; i++) { s += a * noise(p); p = p * 2.03 + vec2(17.1, 9.2); a *= 0.5; } return s; }
+    // 구름 밀도: 저주파 왜곡을 얹은 fbm — 뭉게구름 덩어리
+    float cloudD(vec2 uv) { float w = fbm(uv * 0.55 + 3.1); return fbm(uv + (w - 0.5) * 1.3); }
     void main() {
       vec3 d = normalize(vDir);
-      float h = clamp(d.y, -0.05, 1.0);
-      // 상공 짙은 청회색 → 수평선 밝은 헤이즈
-      vec3 top = uTop, mid = uMid, hor = uHor;
-      vec3 col = mix(mid, top, smoothstep(0.08, 0.6, h));
-      col = mix(hor, col, smoothstep(0.0, 0.12, h));
-      // 태양 디스크 + 웜톤 할로 — 디스크는 또렷하게, 넓은 글로우는 억제해 과다 번짐 방지 (#179)
+      float h = d.y;
       float s = max(dot(d, uSunDir), 0.0);
-      col += vec3(1.0, 0.86, 0.62) * pow(s, 1400.0) * 2.4;
-      col += vec3(1.0, 0.78, 0.48) * pow(s, 90.0) * 0.28;
-      col += vec3(0.92, 0.70, 0.46) * pow(s, 12.0) * 0.06;
-      // 구름: 방향을 평면 투영해 fbm, 수평선 근처 감쇠, 천천히 드리프트
-      if (d.y > 0.02) {
-        vec2 uv = d.xz / (d.y + 0.18) * 0.9 + vec2(uTime * 0.004, uTime * 0.0016);
-        float c = fbm(uv);
-        float cov = smoothstep(0.52, 0.78, c) * smoothstep(0.02, 0.2, d.y);
-        vec3 cloudCol = uCloudCol * (0.8 + 0.2 * s);
-        col = mix(col, cloudCol, cov * uCloud);
+      // 상공 → 중간 → 수평선 헤이즈
+      vec3 col = mix(uMid, uTop, smoothstep(0.06, 0.62, h));
+      col = mix(uHor, col, smoothstep(-0.02, 0.17, h));
+      // 태양 쪽 산란: 수평선 근처일수록 따뜻하게 번진다
+      float hz = 1.0 - smoothstep(0.0, 0.4, h);
+      col += uSunCol * (pow(s, 5.0) * 0.07 + pow(s, 22.0) * 0.10) * (0.35 + 0.65 * hz);
+      // 구름: 방향을 평면 투영, 태양 쪽으로 한 번 더 샘플해 밝은 가장자리·어두운 밑면을 만든다
+      if (h > 0.012) {
+        vec2 uv = d.xz / (h + 0.13) * 0.5 + vec2(uTime * 0.0035, uTime * 0.0014);
+        float c = cloudD(uv);
+        float thr = mix(0.70, 0.40, uCloud);
+        float cov = smoothstep(thr, thr + 0.20, c);
+        if (cov > 0.001) {
+          vec2 ld = normalize(uSunDir.xz + vec2(1e-4)) * 0.09;
+          float shade = clamp((c - cloudD(uv + ld)) * 3.5 + 0.55, 0.0, 1.0);
+          vec3 lit = uCloudCol * (0.80 + 0.42 * shade) + uSunCol * pow(s, 4.0) * 0.22;
+          vec3 base = mix(uMid, uCloudCol, 0.5) * 0.78;
+          vec3 cc = mix(base, lit, clamp(shade * 0.75 + 0.4 - cov * 0.28, 0.0, 1.0));
+          col = mix(col, cc, cov * smoothstep(0.012, 0.17, h) * 0.94);
+        }
       }
+      // 태양 원반 + 할로 (환경맵을 구울 땐 제외 — PMREM 반딧불 방지)
+      col += uSunCol * (pow(s, 2600.0) * 5.0 + pow(s, 160.0) * 0.30) * (1.0 - uEnv);
+      // 지평선 아래: 지면 반사색
+      col = mix(uGround, col, smoothstep(-0.07, 0.0, h));
       gl_FragColor = vec4(col, 1.0);
       // 톤매핑/색공간은 포스트프로세싱 OutputPass 가 일괄 처리 (#139) — 여기서 이중 적용 금지
     }`,
@@ -356,11 +369,13 @@ scene.add(skyMesh);
 // 하늘 기반 환경맵(IBL) — 금속/표면에 은은한 반사·주변광
 // 맵별 하늘이 바뀌면(#319) 다시 구워 반사·주변광 색이 하늘과 맞게 한다
 let _envRT = null;
-function rebuildEnv(intensity = 0.22) {
+function rebuildEnv(intensity = 0.5) {
   const pmrem = new THREE.PMREMGenerator(renderer);
   const envScene = new THREE.Scene();
   envScene.add(new THREE.Mesh(new THREE.SphereGeometry(10, 24, 12), skyMat));
+  skyUniforms.uEnv.value = 1; // 태양 원반 제외 (#362)
   const rt = pmrem.fromScene(envScene, 0.04);
+  skyUniforms.uEnv.value = 0;
   if (_envRT) _envRT.dispose();
   _envRT = rt; scene.environment = rt.texture; scene.environmentIntensity = intensity;
   pmrem.dispose();
@@ -460,7 +475,7 @@ function setupPostFX() {
         float l = dot(c.rgb, vec3(0.299,0.587,0.114));
         c.rgb = mix(vec3(l), c.rgb, uSat);                       // 채도
         vec2 p = (vUv - 0.5) * uVig;                             // 비네트
-        c.rgb *= mix(0.72, 1.0, smoothstep(0.85, 0.28, length(p)));
+        c.rgb *= mix(0.84, 1.0, smoothstep(0.85, 0.28, length(p)));
         c.rgb += (hash(vUv * 1024.0 + fract(uTime) * 91.7) - 0.5) * uGrain * (1.0 - l); // 필름 그레인(어두운 곳 위주, 밴딩 완화)
         gl_FragColor = c;
       }`,
@@ -470,35 +485,45 @@ function setupPostFX() {
 setupPostFX();
 
 // ── 맵별 룩 (#319 렌더 개편): 하늘 팔레트·반구광·태양·필·노출·IBL·그레이딩을 한 벌로. applyMap 이 m.look 으로 적용 ──
+// (#362 그래픽 개편) 주변광을 하늘 IBL 중심으로 다시 잡았다: 전엔 IBL 0.22 + 지면색이 어두운 반구광이라 아래를 향한 면·그늘이 죽었다.
+//   ground = 지평선 아래 색(IBL 아래쪽 반구 = 지면 반사광), fog = [시작, 끝] 거리(색은 하늘 수평선색 hor 에서 가져와 원경이 하늘로 녹는다).
+//   톤매핑은 전 맵 Khronos PBR Neutral(채도 보존) — ACES 는 암부를 뭉개고 색을 탁하게 했다.
 const LOOKS = {
-  default: { top: [0.30, 0.41, 0.56], mid: [0.60, 0.69, 0.78], hor: [0.84, 0.85, 0.83], cloud: 0.55, cloudCol: [0.97, 0.96, 0.94],
-    hemi: [0xb8cbdc, 0x54483a, 0.55], sun: [0xffe0b0, 2.35], fill: [0x9fb6cc, 0.32], exposure: 0.95, env: 0.22, tone: 'aces',
-    grade: { contrast: 1.07, sat: 1.1, vig: 1.0, shadow: [0.975, 0.995, 1.035], high: [1.025, 1.0, 0.97], grain: 0.014 } },
-  // 봄 오전: 옅은 파랑 하늘 + 분홍빛 도는 수평 헤이즈, 밝은 반구광(벚꽃 그늘이 새까매지지 않게), 따뜻한 하이라이트·푸른 그늘
-  spring: { top: [0.34, 0.52, 0.80], mid: [0.64, 0.76, 0.90], hor: [0.92, 0.89, 0.91], cloud: 0.42, cloudCol: [1.0, 0.98, 0.98],
-    hemi: [0xd6e4f4, 0x8c7a68, 0.72], sun: [0xfff0d8, 2.55], fill: [0xc8d4ea, 0.38], exposure: 0.95, env: 0.32, tone: 'neutral', // Khronos PBR Neutral: 벚꽃 분홍·하늘 파랑 채도 보존(ACES 는 탁한 헤이즈, AgX 는 회색으로 바램 — 3종 비교)
-    grade: { contrast: 1.04, sat: 1.07, vig: 0.85, shadow: [0.965, 0.985, 1.05], high: [1.03, 1.0, 0.975], grain: 0.012 } },
-  // 숲(학교): 수평선을 안개(녹회색)에 맞추고 반구광을 올려 수관 그늘 바닥이 새까매지지 않게
-  forest: { top: [0.32, 0.44, 0.56], mid: [0.58, 0.66, 0.70], hor: [0.66, 0.72, 0.66], cloud: 0.5, cloudCol: [0.95, 0.96, 0.94],
-    hemi: [0xc4d6c8, 0x6a5a44, 0.72], sun: [0xffe6c0, 2.4], fill: [0xa9bfb0, 0.36], exposure: 1.0, env: 0.26, tone: 'aces',
-    grade: { contrast: 1.06, sat: 1.08, vig: 1.0, shadow: [0.97, 1.0, 1.02], high: [1.03, 1.0, 0.96], grain: 0.014 } },
-  // 도심 폐허: 회색 스모그 하늘(안개색과 이음), 낮은 채도·약간 차가운 그늘
-  smog: { top: [0.40, 0.44, 0.50], mid: [0.58, 0.60, 0.63], hor: [0.66, 0.67, 0.68], cloud: 0.62, cloudCol: [0.86, 0.86, 0.86],
-    hemi: [0xb5bec8, 0x5a5550, 0.62], sun: [0xffe2c0, 2.2], fill: [0xa0adba, 0.36], exposure: 0.97, env: 0.22, tone: 'aces',
-    grade: { contrast: 1.08, sat: 0.94, vig: 1.05, shadow: [0.96, 0.99, 1.04], high: [1.02, 1.0, 0.98], grain: 0.018 } },
+  default: { top: [0.20, 0.36, 0.62], mid: [0.48, 0.64, 0.84], hor: [0.80, 0.85, 0.88], cloud: 0.5, cloudCol: [1.0, 0.99, 0.97], ground: [0.34, 0.31, 0.26], fog: [60, 260],
+    hemi: [0xc6d8ee, 0x8f8473, 0.34], sun: [0xfff1dc, 3.0], fill: [0xa9bcd4, 0.14], exposure: 1.0, env: 0.72, tone: 'neutral',
+    grade: { contrast: 1.05, sat: 1.08, vig: 0.8, shadow: [0.975, 0.995, 1.04], high: [1.03, 1.0, 0.97], grain: 0.012 } },
+  // 봄 오전: 옅은 파랑 하늘 + 분홍빛 도는 수평 헤이즈, 따뜻한 하이라이트·푸른 그늘
+  spring: { top: [0.24, 0.45, 0.80], mid: [0.56, 0.72, 0.92], hor: [0.90, 0.88, 0.91], cloud: 0.42, cloudCol: [1.0, 0.98, 0.98], ground: [0.38, 0.35, 0.33], fog: [65, 250],
+    hemi: [0xd6e4f4, 0x9a8c7c, 0.36], sun: [0xfff0d8, 3.0], fill: [0xc8d4ea, 0.16], exposure: 1.0, env: 0.72, tone: 'neutral',
+    grade: { contrast: 1.04, sat: 1.07, vig: 0.75, shadow: [0.965, 0.985, 1.05], high: [1.03, 1.0, 0.975], grain: 0.01 } },
+  // 숲(학교): 녹색 기운의 수평 헤이즈, 수관 그늘 바닥이 새까매지지 않게 주변광을 넉넉히
+  forest: { top: [0.22, 0.38, 0.60], mid: [0.50, 0.64, 0.76], hor: [0.74, 0.80, 0.76], cloud: 0.5, cloudCol: [0.98, 0.99, 0.96], ground: [0.26, 0.28, 0.18], fog: [60, 230],
+    hemi: [0xc8dccc, 0x7c8460, 0.40], sun: [0xffeccc, 3.0], fill: [0xa9bfb0, 0.14], exposure: 1.04, env: 0.78, tone: 'neutral',
+    grade: { contrast: 1.05, sat: 1.08, vig: 0.85, shadow: [0.97, 1.0, 1.02], high: [1.03, 1.0, 0.96], grain: 0.012 } },
+  // 도심 폐허: 흐린 날 — 구름 많고 낮은 채도, 약한 태양·넓은 주변광
+  smog: { top: [0.34, 0.40, 0.50], mid: [0.56, 0.60, 0.66], hor: [0.74, 0.75, 0.76], cloud: 0.78, cloudCol: [0.90, 0.90, 0.91], ground: [0.30, 0.29, 0.28], fog: [45, 210],
+    hemi: [0xbcc6d2, 0x857f78, 0.42], sun: [0xffe6c8, 2.3], fill: [0xa0adba, 0.16], exposure: 1.02, env: 0.85, tone: 'neutral',
+    grade: { contrast: 1.07, sat: 0.96, vig: 0.9, shadow: [0.96, 0.99, 1.04], high: [1.02, 1.0, 0.98], grain: 0.016 } },
 };
 let currentLook = null;
+function setFog(near, far) { // 색 = 현재 룩의 수평선색(선형) — 원경이 하늘로 이어진다 (#362: 전엔 맵 빌드마다 16진 색을 따로 적어 하늘과 어긋났다)
+  const L = currentLook || LOOKS.default;
+  if (!scene.fog || !scene.fog.isFog) scene.fog = new THREE.Fog(0xffffff, near, far);
+  scene.fog.near = near ?? L.fog[0]; scene.fog.far = far ?? L.fog[1]; scene.fog.color.setRGB(...L.hor);
+}
 function applyLook(key) {
   const L = LOOKS[key] || LOOKS.default;
   if (currentLook === L) return;
   currentLook = L;
   skyUniforms.uTop.value.setRGB(...L.top); skyUniforms.uMid.value.setRGB(...L.mid); skyUniforms.uHor.value.setRGB(...L.hor);
-  skyUniforms.uCloud.value = L.cloud; skyUniforms.uCloudCol.value.setRGB(...L.cloudCol);
+  skyUniforms.uCloud.value = L.cloud; skyUniforms.uCloudCol.value.setRGB(...L.cloudCol); skyUniforms.uGround.value.setRGB(...L.ground);
   hemi.color.setHex(L.hemi[0]); hemi.groundColor.setHex(L.hemi[1]); hemi.intensity = L.hemi[2];
   sun.color.setHex(L.sun[0]); sun.intensity = L.sun[1]; fill.color.setHex(L.fill[0]); fill.intensity = L.fill[1];
+  skyUniforms.uSunCol.value.copy(sun.color);
   renderer.toneMappingExposure = L.exposure;
   renderer.toneMapping = L.tone === 'neutral' ? THREE.NeutralToneMapping : L.tone === 'agx' ? THREE.AgXToneMapping : THREE.ACESFilmicToneMapping;
   if (gradePass) { const g = gradePass.uniforms, G = L.grade; g.uContrast.value = G.contrast; g.uSat.value = G.sat; g.uVig.value = G.vig; g.uShadow.value.set(...G.shadow); g.uHigh.value.set(...G.high); g.uGrain.value = G.grain; }
+  setFog(L.fog[0], L.fog[1]);
   rebuildEnv(L.env);
 }
 applyLook('default');
@@ -660,6 +685,9 @@ async function loadAssets() {
             o.material.roughness = 1.0;
             o.material.metalness = 0.0;
             if ('envMapIntensity' in o.material) o.material.envMapIntensity = 0.2;
+          }
+          if (key.startsWith('rockReal')) { // (#362) 거칠기 맵이 0.3 대라 젖은 듯 번들거리고 붉게 보였다 → 무광 + 회색 기운
+            o.material.roughnessMap = null; o.material.metalnessMap = null; o.material.roughness = 0.96; o.material.metalness = 0; o.material.color.setRGB(1.2, 1.3, 1.42);
           }
           const mn = (o.material.name || '').toLowerCase();
           if (/leaf|leaves|foliage|bush|plant|grass|flower|petal|fern|shrub|ivy/.test(mn)) { // Poly Haven fern_02/shrub_03 도 alphaMode MASK 카드 (#283)
@@ -937,8 +965,13 @@ function weatherModel(m, mul = 0.66, rough = 0.92) {
 // 카드 텍스처는 scripts/assets/make_canopy_cards.py 가 ambientCG 잎 아틀라스(CC0)로 합성. 시드 결정론. 청크(44m)·재질별 mergeGeometries →
 // 숲 ~490그루가 ~100 draw call. 이동 콜라이더는 줄기만(서서 엄폐, 옛 placeTree 규약), 병합 메시는 obstacleMeshes(탄착/LOS). vertexColors 로 명도 변주.
 const CANOPY_MAT = {};
+// 카드 텍스처 반사율 보정 (#362): 침엽 0.06·풀 0.11 로 활엽(0.16)보다 훨씬 어두워 검게 보였다 → 재질 색(>1 배율)으로 맞춘다
+const CANOPY_GAIN = { canopy_pine: [2.0, 2.05, 1.8], grass_card: [1.5, 1.38, 1.25], canopy_broad_a: [1.12, 1.08, 1.0] };
 function canopyMat(key) {
-  if (!CANOPY_MAT[key]) CANOPY_MAT[key] = foliageNoFlip(new THREE.MeshStandardMaterial({ map: CANOPY_TEX[key] || null, color: CANOPY_TEX[key] ? 0xffffff : 0x4a6a35, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.95, metalness: 0, vertexColors: true }));
+  if (!CANOPY_MAT[key]) {
+    const m = CANOPY_MAT[key] = foliageNoFlip(new THREE.MeshStandardMaterial({ map: CANOPY_TEX[key] || null, color: CANOPY_TEX[key] ? 0xffffff : 0x4a6a35, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.95, metalness: 0, vertexColors: true }));
+    const gain = CANOPY_GAIN[key]; if (gain && CANOPY_TEX[key]) m.color.setRGB(...gain); // 어두운 카드 텍스처 보정 (#362)
+  }
   return CANOPY_MAT[key];
 }
 const FOREST_CHUNK = 44;
@@ -965,9 +998,10 @@ function barkSegRaw(p0, p1, r0, r1, radial = 7) { // 원뿔대 p0→p1 (반지�
   g.translate((p0.x + p1.x) / 2, (p0.y + p1.y) / 2, (p0.z + p1.z) / 2);
   return g;
 }
-function cardGeo(c, w, h, yaw, tilt, col, flipU) { // 알파 카드 1장 (vertexColors 명도)
+function cardGeo(c, w, h, yaw, tilt, col, flipU, topW = 1) { // 알파 카드 1장 (vertexColors 명도). topW<1 = 위가 좁은 사다리꼴(침엽 티어 #362)
   if (bakeReplay()) return null; // (#325)
   const g = new THREE.PlaneGeometry(w, h);
+  if (topW !== 1) { const p = g.attributes.position; for (let i = 0; i < p.count; i++) if (p.getY(i) > 0) p.setX(i, p.getX(i) * topW); }
   if (flipU) { const uv = g.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setX(i, 1 - uv.getX(i)); }
   g.rotateX(tilt); g.rotateY(yaw); g.translate(c.x, c.y, c.z);
   const n = g.attributes.position.count, cols = new Float32Array(n * 3);
@@ -986,7 +1020,8 @@ function placeCardTree(fb, kind, x, z, h, trunkR = 0.35, seed = 1) {
     const T = 5 + Math.floor(rnd() * 3), cm = canopyMat('canopy_pine');
     for (let i = 0; i < T; i++) {
       const f = i / (T - 1), y = h * (0.2 + 0.74 * f), w = (h * 0.34) * (1 - 0.78 * f) + 0.9, yaw0 = rnd() * Math.PI, c = tone * (0.6 + 0.4 * f);
-      for (let k = 0; k < 3; k++) fb.put(x, z, 'canopy_pine', cm, cardGeo(V(0, y - w * 0.22, 0), w, w * 0.5, yaw0 + k * Math.PI / 3, 0, [c * 0.95, c, c * 0.9], rnd() < 0.5));
+      // (#362) 티어 = 위가 좁은 사다리꼴 카드 3장 — 전엔 직사각형이라 판자를 쌓은 것처럼 보였고, 평면 노멀 + 뒷면 무반전이라 한쪽 면이 검었다
+      for (let k = 0; k < 3; k++) { const g = cardGeo(V(0, y - w * 0.2, 0), w, w * 0.62, yaw0 + k * Math.PI / 3, 0, [c * 0.95, c, c * 0.9], rnd() < 0.5, 0.16); sphereNormals(g, x, gy + y - w * 0.3, z); fb.put(x, z, 'canopy_pine', cm, g); }
     }
   } else if (kind === 'dead') {
     const r0 = 0.08 + h * 0.014, top = V((rnd() - 0.5) * 0.5, h * 0.78, (rnd() - 0.5) * 0.5);
@@ -1871,6 +1906,8 @@ const TEXMAT_DEF = {
   hedge: [0xffffff, 1.0, 1.2, 'leaf'],               // 절차 합성 생울타리
 };
 const TEXMAT = {};
+// 텍스처 반사율 보정 (#362): 아스팔트(선형 0.05)·기와(0.03)에 색조까지 곱해 0.015~0.02 — 그림자도 안 보이는 검정이었다. 재질 색에 배율을 곱해 낡은 아스팔트(0.07~0.11)·흑회색 기와(0.05) 수준으로.
+const TEX_GAIN = { asphalt: 3.6, kawara: 2.8, hedge: 1.5, woodfloor: 1.9 };
 function buildTexMats() {
   for (const [key, [tint, rough, tile, fb]] of Object.entries(TEXMAT_DEF)) {
     if (!BUILD_TEX[key]) { TEXMAT[key] = MAT[fb]; continue; }
@@ -1880,6 +1917,7 @@ function buildTexMats() {
     col.repeat.set(1 / tile, 1 / tile);
     nrm.repeat.set(1 / tile, 1 / tile);
     const m = new THREE.MeshStandardMaterial({ map: col, normalMap: nrm, color: tint, roughness: rough });
+    if (TEX_GAIN[key]) m.color.multiplyScalar(TEX_GAIN[key]);
     m.userData.worldUV = true;
     TEXMAT[key] = m;
   }
@@ -1887,6 +1925,7 @@ function buildTexMats() {
   const variant = (base, hex, rough) => {
     const src = TEXMAT[base] || MAT.concrete;
     const m = src.clone(); m.color.setHex(hex); if (rough != null) m.roughness = rough;
+    if (TEX_GAIN[base] && BUILD_TEX[base]) m.color.multiplyScalar(TEX_GAIN[base]); // 텍스처 로드 실패 폴백(단색)엔 적용하지 않는다
     m.userData = { worldUV: !!(src.userData && src.userData.worldUV) };
     return m;
   };
@@ -1904,9 +1943,9 @@ function buildTexMats() {
   TEXMAT.asphaltTown = variant('asphalt', 0xc9c6bf, 0.93); TEXMAT.asphaltPatch = variant('asphalt', 0x8a8884, 0.9); TEXMAT.canalStone = variant('concrete', 0x9d998d, 0.97); TEXMAT.barkSakura = variant('barkdark', 0x8a7470, 1.0);
   if (GROUND_TEX.ground) { // 흙 박스 재질(사격장 버름 #292) — 지면 컬러맵을 worldUV 박스에 4m 타일로
     const t = GROUND_TEX.ground.clone(); t.needsUpdate = true; t.repeat.set(1 / 4, 1 / 4);
-    TEXMAT.dirt = new THREE.MeshStandardMaterial({ map: t, color: 0xb8a88c, roughness: 1.0 }); TEXMAT.dirt.userData = { worldUV: true };
+    TEXMAT.dirt = new THREE.MeshStandardMaterial({ map: t, roughness: 1.0 }); TEXMAT.dirt.color.setRGB(2.7, 3.8, 3.9); TEXMAT.dirt.userData = { worldUV: true }; // (#362) 지면 텍스처 반사율 0.07 보정 → 마른 흙 0.25
     const t2 = GROUND_TEX.ground.clone(); t2.needsUpdate = true; t2.repeat.set(1 / 3, 1 / 3); // 정원 흙·공원 마당 (#319)
-    TEXMAT.gardenSoil = new THREE.MeshStandardMaterial({ map: t2, color: 0x9c8e76, roughness: 1.0 }); TEXMAT.gardenSoil.userData = { worldUV: true };
+    TEXMAT.gardenSoil = new THREE.MeshStandardMaterial({ map: t2, roughness: 1.0 }); TEXMAT.gardenSoil.color.setRGB(1.6, 2.0, 1.95); TEXMAT.gardenSoil.userData = { worldUV: true };
   }
   if (GROUND_TEX.gravel) { const t = GROUND_TEX.gravel.clone(); t.needsUpdate = true; t.repeat.set(1 / 2.5, 1 / 2.5); // 개천 바닥·신사 자갈 (#319)
     TEXMAT.gravelWet = new THREE.MeshStandardMaterial({ map: t, color: 0x86827a, roughness: 0.85 }); TEXMAT.gravelWet.userData = { worldUV: true }; }
@@ -2400,16 +2439,10 @@ function buildSilo(cx, cz, count = 3, { r = 2.6, h = 12 } = {}) {
 function buildIndustrialMap() {
   const irnd = mulberry32(2370); // 시드 고정 (#325): 굽기 재생과 콜라이더·풀 배치가 일치하도록 (전엔 로드마다 소품 위치가 바뀜)
   buildTexMats(); // 건축 PBR 재질 (#107) — 텍스처 로드 후 1회
-  scene.fog = new THREE.Fog(0xaeb6bd, 45, 210); // 기본 안개 복원(맵 전환 시 숲 안개 잔존 방지)
+  setFog(); // 안개 = 현재 룩(LOOKS.fog·수평선색)
   // 지면 (ambientCG Ground048 — 없으면 절차 생성)
-  let groundMat;
-  if (GROUND_TEX.ground) {
-    const t = GROUND_TEX.ground;
-    t.repeat.set(26, 26);
-    groundMat = new THREE.MeshStandardMaterial({ map: t, color: 0xc4cba8, roughness: 1.0 });
-  } else {
-    groundMat = new THREE.MeshStandardMaterial({ map: makeGroundTexture(), roughness: 1.0 });
-  }
+  const groundMat = terrainMat('industrial'); // (#362)
+  farRidge(250, 10, 30, 0x5d7260, 0.6, 11); farRidge(215, 4, 16, 0x667866, 0.48, 5); // 원경 구릉 (#362)
   // 하이트필드 변위 지면 — 6x6 타일 (프러스텀/레이캐스트 바운딩 컬링용)
   {
     const full = WORLD_HALF * 2 + 24;
@@ -5966,12 +5999,79 @@ function scatterGroundClutter(cx0, cz0, cx1, cz1) {
   console.log(`[clutter] grass ${grass} plants ${plants} rocks ${rocks} merged ${fb.flush()}`); // 0건이어도 남긴다
 }
 
+// ── 원경 능선 (#322 벚꽃 동네 → #362 전 맵 공용) ── 링 스트립: 바닥 R, 꼭대기 R+30 (높이 = 노이즈). 안개 밖이라 fog:false + 수평선색 혼합.
+// blocky>0 이면 높이를 계단으로 끊어 도시 스카이라인 실루엣으로.
+function farRidge(R, base, amp, col, mix, seed, blocky = 0) {
+  const hor = new THREE.Color().setRGB(...(currentLook || LOOKS.default).hor);
+  const r2 = mulberry32(seed), N = blocky ? 240 : 160, P = [], idx = [];
+  const hs = []; let hold = 0, hv = 0;
+  for (let i = 0; i <= N; i++) {
+    let h = base + amp * (0.5 + 0.5 * Math.sin(i * 0.19 + seed) * Math.sin(i * 0.071 + seed * 2)) + r2() * amp * 0.15;
+    if (blocky) { if (hold <= 0) { hold = 1 + Math.floor(r2() * blocky); hv = base + amp * (0.15 + 0.85 * r2() * r2()); } hold--; h = hv; }
+    hs.push(h);
+  }
+  if (blocky) { for (let i = 0; i < N; i++) { const a0 = (i / N) * Math.PI * 2, a1 = ((i + 1) / N) * Math.PI * 2, b = P.length / 3; const h = hs[i]; // 건물 = 구간마다 평평한 지붕
+      P.push(Math.cos(a0) * R, -2, Math.sin(a0) * R, Math.cos(a0) * R, h, Math.sin(a0) * R, Math.cos(a1) * R, -2, Math.sin(a1) * R, Math.cos(a1) * R, h, Math.sin(a1) * R); idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2); } }
+  else {
+    for (let i = 0; i <= N; i++) { const a = (i / N) * Math.PI * 2, c = Math.cos(a), sn = Math.sin(a); P.push(c * R, -2, sn * R, c * (R + 30), hs[i], sn * (R + 30)); }
+    for (let i = 0; i < N; i++) { const b = i * 2; idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2); }
+  }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); g.setIndex(idx);
+  const m = new THREE.MeshBasicMaterial({ color: new THREE.Color(col).lerp(hor, mix), fog: false, side: THREE.DoubleSide });
+  const mesh = new THREE.Mesh(g, m); mesh.renderOrder = -1; scene.add(mesh);
+}
+// ── 지형 재질 (#362 그래픽 개편) ──
+// 전엔 지면 텍스처(선형 반사율 0.07)에 색조를 곱해 지면이 거의 검었다(0.04). 이제 텍스처는 **명암 디테일**로만 쓰고(평균으로 나눠 1 근처),
+// 색은 맵별 흙색·풀색을 월드 좌표 노이즈로 섞는다. 두 배율로 겹쳐 타일 반복을 지우고, 저주파 명도 변주를 얹는다. 색은 sRGB 16진.
+const TEX_MEAN = { ground: [0.103, 0.0571, 0.0399], gravel: [0.7065, 0.6796, 0.6271], rubble: [0.287, 0.2075, 0.1476], forest: [0.2498, 0.1263, 0.0478] };
+const TERRAIN_STYLE = {
+  industrial: { tex: 'ground', dirt: 0xa08f74, dirt2: 0x8a7a66, grass: 0x687a42, grass2: 0x858649, amt: 0.52, scale: 0.36 },
+  forest: { tex: 'forest', dirt: 0x86755c, dirt2: 0x6c5f4c, grass: 0x5f733c, grass2: 0x7a8043, amt: 0.46, scale: 0.34 },
+  rubble: { tex: 'rubble', dirt: 0x9d948a, dirt2: 0x857b70, grass: 0x7a8052, grass2: 0x8d8a5e, amt: 0.30, scale: 0.3 },
+  yard: { tex: 'ground', dirt: 0xb8a482, dirt2: 0xa8946f, grass: 0x7d8648, grass2: 0x8d8c50, amt: 0.2, scale: 0.4 }, // 학교 운동장: 마른 흙 + 가장자리 잡초
+  gravel: { tex: 'gravel', dirt: 0xb5ad9e, dirt2: 0xa0978a, grass: 0x7c8a4a, grass2: 0x98974f, amt: 0.22, scale: 0.4 },
+};
+function terrainMat(styleKey) {
+  const S = TERRAIN_STYLE[styleKey] || TERRAIN_STYLE.industrial, src = GROUND_TEX[S.tex] || GROUND_TEX.ground;
+  const lin = (hex) => new THREE.Color(hex); // Color(hex) 는 sRGB → 작업 공간(선형) 변환
+  if (!src) return new THREE.MeshStandardMaterial({ map: makeGroundTexture(), color: S.dirt, roughness: 1.0 });
+  const t = src.clone(); t.needsUpdate = true; t.repeat.set(1, 1);
+  const m = new THREE.MeshStandardMaterial({ map: t, roughness: 1.0, metalness: 0 });
+  const U = { uDirt: { value: lin(S.dirt) }, uDirt2: { value: lin(S.dirt2) }, uGrass: { value: lin(S.grass) }, uGrass2: { value: lin(S.grass2) },
+    uAmt: { value: S.amt }, uTScale: { value: S.scale }, uTMean: { value: new THREE.Vector3(...(TEX_MEAN[S.tex] || TEX_MEAN.ground)) } };
+  m.userData.terrain = U;
+  m.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, U);
+    sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vTerrW;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvTerrW = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', `#include <common>
+      varying vec3 vTerrW; uniform vec3 uDirt, uDirt2, uGrass, uGrass2, uTMean; uniform float uAmt, uTScale;
+      float tHash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+      float tNoise(vec2 p) { vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(mix(tHash(i), tHash(i + vec2(1, 0)), u.x), mix(tHash(i + vec2(0, 1)), tHash(i + vec2(1, 1)), u.x), u.y); }
+      float tFbm(vec2 p) { return 0.5 * tNoise(p) + 0.28 * tNoise(p * 2.07 + 13.1) + 0.15 * tNoise(p * 4.3 + 3.7) + 0.07 * tNoise(p * 9.1 + 7.9); }`)
+      .replace('#include <map_fragment>', `
+      vec2 tuv = vTerrW.xz;
+      vec3 d1 = texture2D(map, tuv * uTScale).rgb, d2 = texture2D(map, tuv * uTScale * 0.173 + vec2(0.37, 0.61)).rgb;
+      float camD = length(vTerrW - cameraPosition);
+      vec3 det = mix(d1, d2, clamp(0.35 + camD * 0.012, 0.35, 0.85)) / uTMean;       // 평균 1 의 디테일 — 멀수록 큰 무늬로(반복 무늬 제거)
+      float dl = dot(det, vec3(0.333));
+      float n1 = tFbm(tuv * 0.045 + 21.0), n2 = tFbm(tuv * 0.31 + 5.0), macro = tFbm(tuv * 0.011 + 40.0);
+      float g = smoothstep(-0.10, 0.10, n1 * 0.72 + n2 * 0.28 - (1.0 - uAmt) + (dl - 1.0) * 0.06);  // 풀 덮임
+      vec3 dirt = mix(uDirt2, uDirt, smoothstep(0.3, 0.7, tFbm(tuv * 0.09 + 60.0)));
+      vec3 grass = mix(uGrass, uGrass2, smoothstep(0.35, 0.75, tFbm(tuv * 0.07 + 80.0)));
+      vec3 dd = mix(vec3(1.0), det, 0.75);                         // 흙: 텍스처 색 디테일
+      vec3 gd = vec3(mix(1.0, dl, 0.55)) * (0.86 + 0.28 * n2);     // 풀: 명암만(갈색 기운 제거) + 잔무늬
+      vec3 tcol = mix(dirt * dd, grass * gd, g);
+      tcol *= 0.82 + 0.36 * macro;                                 // 저주파 명도 변주
+      diffuseColor.rgb *= tcol;`);
+  };
+  m.customProgramCacheKey = () => 'terrain';
+  return m;
+}
 // 하이트필드 변위 지면 타일 (산업/학교/도심 공용) — tint 로 색조, texKey 로 GROUND_TEX 선택(도심=rubble #268)
-function buildGroundTiles(tint, texKey = 'ground') {
-  let groundMat;
-  const src = GROUND_TEX[texKey] || GROUND_TEX.ground;
-  if (src) { const t = src.clone(); t.needsUpdate = true; t.repeat.set(26, 26); groundMat = new THREE.MeshStandardMaterial({ map: t, color: tint, roughness: 1.0 }); }
-  else groundMat = new THREE.MeshStandardMaterial({ map: makeGroundTexture(), color: tint, roughness: 1.0 });
+function buildGroundTiles(styleKey = 'industrial') {
+  const groundMat = terrainMat(styleKey);
   const full = WORLD_HALF * 2 + 24, TILES = 6, tw = full / TILES;
   for (let ti = 0; ti < TILES; ti++) {
     for (let tj = 0; tj < TILES; tj++) {
@@ -6000,8 +6100,9 @@ function buildGroundTiles(tint, texKey = 'ground') {
 
 function buildSchoolMap() {
   buildTexMats();
-  scene.fog = new THREE.Fog(0x8f9c8b, 55, 210); // 숲 안개 — 녹회색. 카드 트리(#280)는 원경 캐노피가 안개색으로 바래므로 시작 거리를 55m 로
-  buildGroundTiles(0xaaa89a, 'forest'); // 숲 바닥 = ambientCG Ground076 낙엽/뿌리 (#283)
+  setFog(); // 안개 = 현재 룩(forest)
+  buildGroundTiles('forest');
+  farRidge(255, 16, 42, 0x4f6a52, 0.6, 23); farRidge(218, 8, 24, 0x52704c, 0.42, 9); // 원경 숲 능선 (#362) // 숲 바닥 = ambientCG Ground076 낙엽/뿌리 (#283)
   // 외곽 경계벽 (나무로 가림)
   const W = WORLD_HALF;
   addBox(0, 2.5, -W, W * 2 + 2, 5, 1, 'concrete', { shadow: false });
@@ -6011,7 +6112,7 @@ function buildSchoolMap() {
 
   // 운동장 (흙바닥) + 학교 건물
   const yard = new THREE.Mesh(new THREE.PlaneGeometry(74, 42),
-    new THREE.MeshStandardMaterial({ map: GROUND_TEX.ground ? GROUND_TEX.ground.clone() : makeGroundTexture(), color: 0xbaa889, roughness: 1 }));
+    terrainMat('yard'));
   yard.rotation.x = -Math.PI / 2; yard.position.set(0, 0.03, 30); yard.receiveShadow = true;
   scene.add(yard);
   buildSchoolBuilding(0, 0);
@@ -6331,8 +6432,9 @@ function buildUrbanStreets() {
 
 function buildUrbanMap() {
   buildTexMats();
-  scene.fog = new THREE.Fog(0x949aa2, 42, 190);               // 회색 스모그
-  buildGroundTiles(0xa39d92, 'rubble');                       // 공터 = 벽돌 잔해 흙 (ambientCG Ground107) #268
+  setFog(); // 안개 = 현재 룩(smog)
+  buildGroundTiles('rubble');
+  farRidge(250, 14, 62, 0x6a7078, 0.66, 31, 5); farRidge(230, 8, 30, 0x62676d, 0.52, 17, 4); // 원경 스카이라인 (#362)                       // 공터 = 벽돌 잔해 흙 (ambientCG Ground107) #268
   const W = WORLD_HALF;
   addBox(0, 3, -W, W * 2 + 2, 6, 1, 'concrete', { shadow: false });
   addBox(0, 3, W, W * 2 + 2, 6, 1, 'concrete', { shadow: false });
@@ -7410,7 +7512,7 @@ function townLots() {
 
 function buildTownMap() {
   buildTexMats(); buildTownMats(); buildTownDetailMats();
-  scene.fog = new THREE.Fog(0xdcd6dc, 55, 230);
+  setFog();
   TOWN_LOOT.length = 0; SAKURA_TREES.length = 0; TOWN_PROPS.length = 0; townLights = 0;
   TOWN_HOUSES.length = 0; TOWN_WEEDS.length = 0; TOWN_IVY.length = 0; townFxExtra.length = 0;
   const B = townBatch(), fb = forestBatch(), rnd = mulberry32(3197), L = WORLD_HALF, T = [], tm = (k) => T.push(`${k} ${Math.round(performance.now() - t0)}`), t0 = performance.now();
@@ -7542,16 +7644,8 @@ function buildTownBackdrop() {
     }
   }
   for (const [m, gs] of geos) { const mesh = new THREE.Mesh(mergeGeometries(gs, false), m); mesh.receiveShadow = false; scene.add(mesh); }
-  const hor = new THREE.Color(0xdcd6dc);
-  const ridge = (R, base, amp, col, mix, seed) => { // 링 스트립: 바닥 R, 꼭대기 R+30 (높이 = 노이즈)
-    const r2 = mulberry32(seed), N = 160, P = [], idx = [];
-    const hs = []; for (let i = 0; i <= N; i++) hs.push(base + amp * (0.5 + 0.5 * Math.sin(i * 0.19 + seed) * Math.sin(i * 0.071 + seed * 2)) + r2() * amp * 0.15);
-    for (let i = 0; i <= N; i++) { const a = (i / N) * Math.PI * 2, c = Math.cos(a), s = Math.sin(a); P.push(c * R, -2, s * R, c * (R + 30), hs[i], s * (R + 30)); }
-    for (let i = 0; i < N; i++) { const b = i * 2; idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2); }
-    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); g.setIndex(idx);
-    const m = new THREE.MeshBasicMaterial({ color: new THREE.Color(col).lerp(hor, mix), fog: false, side: THREE.DoubleSide });
-    const mesh = new THREE.Mesh(g, m); mesh.renderOrder = -1; scene.add(mesh);
-  };
+  const hor = new THREE.Color().setRGB(...(currentLook || LOOKS.spring).hor); // 수평선색 = 현재 룩 (#362)
+  const ridge = farRidge;
   ridge(262, 14, 38, 0x5f7466, 0.62, 7); ridge(232, 6, 22, 0x6c7f6e, 0.52, 3);
   // 송전탑 2기(능선 앞) + 전선
   const towerMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0x5a5f63).lerp(hor, 0.55), fog: false });
@@ -7911,8 +8005,9 @@ function updateRangeHud() {
 const RANGE_FIRE_Z = 58, RANGE_EXIT_Z = 68; // 사격선(스폰) / 퇴장 지점(스폰 10m 뒤, 반경5 밖)
 function buildRangeMap() {
   buildTexMats();
-  scene.fog = new THREE.Fog(0xb0b6bd, 90, 280);
-  buildGroundTiles(0xb3ada2, 'gravel'); // 자갈 마당 (#292)
+  setFog(90, 280);
+  buildGroundTiles('gravel');
+  farRidge(250, 12, 34, 0x5d7260, 0.6, 41); farRidge(212, 5, 18, 0x60775c, 0.45, 13); // 원경 구릉 (#362) // 자갈 마당 (#292)
   const backZ = -48, frontZ = 74, hx = 16, midZ = (backZ + frontZ) / 2, lz = frontZ - backZ, rr = mulberry32(292);
   const b = batchBuilder();
   // 버름(흙 둔덕, 3단 계단형): 측면 2 + 백스톱(높고 두꺼움). 콘크리트 벽 대체 — 밑단만 콜라이더
@@ -8923,6 +9018,8 @@ window.__ex = {
     info.autoReset = true; return out;
   },
   get _map() { return { current: currentMapKey, built: builtMapKey, maps: Object.keys(MAPS) }; },
+  // 화면 캡처 QA (#362): 한 프레임을 직접 그려 JPEG 으로 돌려주고, 그 프레임의 드로콜·삼각형·소요 시간을 lastShot 에 남긴다
+  _shot(q = 0.9) { const info = renderer.info, ar = info.autoReset; info.autoReset = false; info.reset(); skyMesh.position.copy(camera.position); updateSunShadow(true); const t0 = performance.now(); if (composer) composer.render(); else renderer.render(scene, camera); renderer.getContext().finish(); this.lastShot = { calls: info.render.calls, tris: info.render.triangles, ms: +(performance.now() - t0).toFixed(1), programs: info.programs ? info.programs.length : 0, geos: info.memory.geometries, tex: info.memory.textures }; info.autoReset = ar; return canvas.toDataURL('image/jpeg', q); },
   // 렌더 QA (#319): 룩 전환·톤매핑 비교·낙화 상태
   applyLook(k) { currentLook = null; applyLook(k); }, LOOKS, _tone(name, exp) { renderer.toneMapping = { aces: THREE.ACESFilmicToneMapping, agx: THREE.AgXToneMapping, neutral: THREE.NeutralToneMapping }[name] ?? renderer.toneMapping; if (exp) renderer.toneMappingExposure = exp; }, get townFx() { return townFx; }, get sakura() { return SAKURA_TREES; }, _townTick(dt) { updateTownFx(dt); }, _shadow() { updateSunShadow(true); return { t: sun.target.position.toArray(), half: SHADOW_HALF }; },
   _dbgAim() {
