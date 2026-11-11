@@ -451,7 +451,7 @@ function setupPostFX() {
       // 알파 컷아웃·반투명(카드 나무·벚꽃·체인 펜스·유리·꽃잎)은 AO 법선/깊이 패스에서 제외 (#319): 오버라이드 재질이 alphaTest 를 무시해
       // 카드 사각형 전체가 깊이에 찍혀 수관에 검은 사각 AO 가 생기던 문제. 가시성은 GTAOPass 의 캐시가 복원한다.
       const ov = gtaoPass.overrideVisibility.bind(gtaoPass);
-      gtaoPass.overrideVisibility = function () { ov(); this.scene.traverse((o) => { const m = o.material; if (o.isMesh && m && !Array.isArray(m) && (m.alphaTest > 0 || m.transparent)) o.visible = false; }); };
+      gtaoPass.overrideVisibility = function () { ov(); this.scene.traverse((o) => { const m = o.material; if (o.isMesh && m && !Array.isArray(m) && (m.alphaTest > 0 || m.transparent || o.userData.noAO)) o.visible = false; }); };
       composer.addPass(gtaoPass);
     } catch (e) { console.warn('GTAO 생략:', e && e.message); }
   }
@@ -500,10 +500,10 @@ const LOOKS = {
   forest: { top: [0.22, 0.38, 0.60], mid: [0.50, 0.64, 0.76], hor: [0.74, 0.80, 0.76], cloud: 0.5, cloudCol: [0.98, 0.99, 0.96], ground: [0.26, 0.28, 0.18], fog: [60, 230],
     hemi: [0xc8dccc, 0x7c8460, 0.40], sun: [0xffeccc, 3.0], fill: [0xa9bfb0, 0.14], exposure: 1.04, env: 0.78, tone: 'neutral',
     grade: { contrast: 1.05, sat: 1.08, vig: 0.85, shadow: [0.97, 1.0, 1.02], high: [1.03, 1.0, 0.96], grain: 0.012 } },
-  // 도심 폐허: 흐린 날 — 구름 많고 낮은 채도, 약한 태양·넓은 주변광
-  smog: { top: [0.34, 0.40, 0.50], mid: [0.56, 0.60, 0.66], hor: [0.74, 0.75, 0.76], cloud: 0.78, cloudCol: [0.90, 0.90, 0.91], ground: [0.30, 0.29, 0.28], fog: [45, 210],
-    hemi: [0xbcc6d2, 0x857f78, 0.42], sun: [0xffe6c8, 2.3], fill: [0xa0adba, 0.16], exposure: 1.02, env: 0.85, tone: 'neutral',
-    grade: { contrast: 1.07, sat: 0.96, vig: 0.9, shadow: [0.96, 0.99, 1.04], high: [1.02, 1.0, 0.98], grain: 0.016 } },
+  // 도심 폐허: 구름이 걷히는 흐린 날 — 구름 많고 채도는 다른 맵보다 낮게 두되, 햇빛·하늘에 색을 조금 돌려 준다 (#365: 전엔 회색 일색)
+  smog: { top: [0.27, 0.38, 0.56], mid: [0.54, 0.62, 0.72], hor: [0.76, 0.78, 0.79], cloud: 0.68, cloudCol: [0.94, 0.93, 0.92], ground: [0.31, 0.30, 0.28], fog: [45, 210],
+    hemi: [0xbcc8d6, 0x8a8278, 0.42], sun: [0xffe2bc, 2.7], fill: [0xa0adba, 0.16], exposure: 1.02, env: 0.82, tone: 'neutral',
+    grade: { contrast: 1.06, sat: 1.04, vig: 0.9, shadow: [0.96, 0.99, 1.04], high: [1.03, 1.0, 0.97], grain: 0.016 } },
 };
 let currentLook = null;
 function setFog(near, far) { // 색 = 현재 룩의 수평선색(선형) — 원경이 하늘로 이어진다 (#362: 전엔 맵 빌드마다 16진 색을 따로 적어 하늘과 어긋났다)
@@ -527,6 +527,35 @@ function applyLook(key) {
   rebuildEnv(L.env);
 }
 applyLook('default');
+
+// ── 캐릭터 셰이딩 (#365) ── VRoid 캐릭터는 unlit(KHR_materials_unlit → MeshBasicMaterial)이라 그늘·실내·흐린 날에도 텍스처 색 그대로 떠 있었다.
+// 그림체(텍스처·얼굴)는 그대로 두고 빛만 받게 한다: 툰 2단 음영(햇빛 쪽/그늘 쪽) + 그림자 수신 + 태양 쪽 림라이트.
+//   밝기 = 텍스처 × (amb[그늘에서도 남는 기본 밝기 — 자체 발광으로 넣어 맵 주변광과 무관하게 얼굴이 죽지 않는다] + 태양 × lit × 2단)
+// ?charshade=0 이면 예전 unlit 그대로(전후 비교·되돌리기용).
+const CHAR_SHADE = { on: new URLSearchParams(location.search).get('charshade') !== '0', amb: [0.60, 0.62, 0.68], lit: 0.36, rim: 0.5 };
+let _charGrad = null;
+function charMat(src) {
+  if (!CHAR_SHADE.on || !src.isMeshBasicMaterial) return src;
+  if (!_charGrad) { // 2단 램프(경계만 살짝 부드럽게): 그늘 0 → 햇빛 lit
+    const L = Math.round(CHAR_SHADE.lit * 255), d = new Uint8Array([0, 0, 0, Math.round(L * 0.5), L, L, L, L]);
+    _charGrad = new THREE.DataTexture(d, 8, 1, THREE.RedFormat); _charGrad.minFilter = _charGrad.magFilter = THREE.LinearFilter; _charGrad.needsUpdate = true;
+  }
+  const m = new THREE.MeshToonMaterial({ map: src.map, color: src.color.clone(), gradientMap: _charGrad, emissiveMap: src.map, emissive: new THREE.Color().setRGB(...CHAR_SHADE.amb).multiply(src.color), // 재질 색(머리 염색 등)은 기본 밝기에도 곱한다
+    alphaTest: src.alphaTest, transparent: src.transparent, opacity: src.opacity, side: src.side, depthWrite: src.depthWrite, vertexColors: src.vertexColors, alphaMap: src.alphaMap });
+  m.name = src.name; m.userData.charShade = true;
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uCharRim = { value: CHAR_SHADE.rim };
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nuniform float uCharRim;')
+      .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
+      #if NUM_DIR_LIGHTS > 0
+      { vec3 rv = normalize(vViewPosition); float rf = pow(1.0 - saturate(dot(normal, rv)), 3.0);                 // 림라이트: 윤곽 × 태양을 향한 쪽
+        reflectedLight.directDiffuse += diffuseColor.rgb * directionalLights[0].color * (rf * smoothstep(-0.15, 0.55, dot(normal, directionalLights[0].direction)) * uCharRim * 0.3183); }
+      #endif`);
+  };
+  m.customProgramCacheKey = () => 'charshade';
+  m.clone = function () { const c = THREE.MeshToonMaterial.prototype.clone.call(this); c.onBeforeCompile = this.onBeforeCompile; c.customProgramCacheKey = this.customProgramCacheKey; c.clone = this.clone; return c; }; // 보스 틴트 등 복제에도 유지
+  return m;
+}
 
 // ============================================================
 // 에셋 (Kenney / Quaternius CC0 — CREDITS.md 참조)
@@ -708,6 +737,7 @@ async function loadAssets() {
           o.material.alphaTest = 0.35;
           o.material.depthWrite = true;
         }
+        if (o.material && isGirl) { o.material = charMat(o.material); o.receiveShadow = true; } // 배경과 같은 빛을 받게 (#365)
       }
     });
     ASSETS[key] = gltf;
@@ -2441,7 +2471,7 @@ function buildIndustrialMap() {
   buildTexMats(); // 건축 PBR 재질 (#107) — 텍스처 로드 후 1회
   setFog(); // 안개 = 현재 룩(LOOKS.fog·수평선색)
   // 지면 (ambientCG Ground048 — 없으면 절차 생성)
-  const groundMat = terrainMat('industrial'); // (#362)
+  const groundMat = terrainMat('industrial'); groundMat.userData.grassHost = true; // (#362, 풀잎 #365)
   farRidge(250, 10, 30, 0x5d7260, 0.6, 11); farRidge(215, 4, 16, 0x667866, 0.48, 5); // 원경 구릉 (#362)
   // 하이트필드 변위 지면 — 6x6 타일 (프러스텀/레이캐스트 바운딩 컬링용)
   {
@@ -2495,10 +2525,7 @@ function buildIndustrialMap() {
 
   // 외곽 콘크리트 벽
   const W = WORLD_HALF;
-  addBox(0, 2.5, -W, W * 2 + 2, 5, 1, 'concrete');
-  addBox(0, 2.5, W, W * 2 + 2, 5, 1, 'concrete');
-  addBox(-W, 2.5, 0, 1, 5, W * 2 + 2, 'concrete');
-  addBox(W, 2.5, 0, 1, 5, W * 2 + 2, 'concrete');
+  buildPerimeterWall(5, true);
 
   // 중앙 창고 (진입 가능 — 절차 생성 유지)
   addBuilding(-28, -18, 26, 15, 5.5, 'corrugated');
@@ -3219,6 +3246,7 @@ function spawnBoss(avoidPos) {
     if ((o.isMesh || o.isSkinnedMesh) && o.material && !o.userData.gear) { // 장비는 자체 팔레트(boss)라 틴트 제외 (#331)
       o.material = o.material.clone(); // 재질 공유 해제 후 틴트
       o.material.color.multiply(new THREE.Color(0.4, 0.16, 0.18)); // 어두운 적갈색
+      if (o.material.userData.charShade) o.material.emissive.multiply(new THREE.Color(0.4, 0.16, 0.18)); // 툰 재질은 기본 밝기(자체 발광)도 같이 틴트 (#365)
     }
   });
   m.group.position.copy(p);
@@ -6031,6 +6059,12 @@ const TERRAIN_STYLE = {
   yard: { tex: 'ground', dirt: 0xb8a482, dirt2: 0xa8946f, grass: 0x7d8648, grass2: 0x8d8c50, amt: 0.2, scale: 0.4 }, // 학교 운동장: 마른 흙 + 가장자리 잡초
   gravel: { tex: 'gravel', dirt: 0xb5ad9e, dirt2: 0xa0978a, grass: 0x7c8a4a, grass2: 0x98974f, amt: 0.22, scale: 0.4 },
 };
+// 지형 셰이더와 풀잎 셰이더가 같은 노이즈를 쓴다(풀 덮임 무늬가 정확히 겹치도록 GLSL 한 벌) (#365)
+const TERRAIN_NOISE_GLSL = `
+      float tHash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+      float tNoise(vec2 p) { vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(mix(tHash(i), tHash(i + vec2(1, 0)), u.x), mix(tHash(i + vec2(0, 1)), tHash(i + vec2(1, 1)), u.x), u.y); }
+      float tFbm(vec2 p) { return 0.5 * tNoise(p) + 0.28 * tNoise(p * 2.07 + 13.1) + 0.15 * tNoise(p * 4.3 + 3.7) + 0.07 * tNoise(p * 9.1 + 7.9); }`;
 function terrainMat(styleKey) {
   const S = TERRAIN_STYLE[styleKey] || TERRAIN_STYLE.industrial, src = GROUND_TEX[S.tex] || GROUND_TEX.ground;
   const lin = (hex) => new THREE.Color(hex); // Color(hex) 는 sRGB → 작업 공간(선형) 변환
@@ -6046,10 +6080,7 @@ function terrainMat(styleKey) {
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvTerrW = (modelMatrix * vec4(transformed, 1.0)).xyz;');
     sh.fragmentShader = sh.fragmentShader.replace('#include <common>', `#include <common>
       varying vec3 vTerrW; uniform vec3 uDirt, uDirt2, uGrass, uGrass2, uTMean; uniform float uAmt, uTScale;
-      float tHash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
-      float tNoise(vec2 p) { vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
-        return mix(mix(tHash(i), tHash(i + vec2(1, 0)), u.x), mix(tHash(i + vec2(0, 1)), tHash(i + vec2(1, 1)), u.x), u.y); }
-      float tFbm(vec2 p) { return 0.5 * tNoise(p) + 0.28 * tNoise(p * 2.07 + 13.1) + 0.15 * tNoise(p * 4.3 + 3.7) + 0.07 * tNoise(p * 9.1 + 7.9); }`)
+${TERRAIN_NOISE_GLSL}`)
       .replace('#include <map_fragment>', `
       vec2 tuv = vTerrW.xz;
       vec3 d1 = texture2D(map, tuv * uTScale).rgb, d2 = texture2D(map, tuv * uTScale * 0.173 + vec2(0.37, 0.61)).rgb;
@@ -6071,7 +6102,7 @@ function terrainMat(styleKey) {
 }
 // 하이트필드 변위 지면 타일 (산업/학교/도심 공용) — tint 로 색조, texKey 로 GROUND_TEX 선택(도심=rubble #268)
 function buildGroundTiles(styleKey = 'industrial') {
-  const groundMat = terrainMat(styleKey);
+  const groundMat = terrainMat(styleKey); groundMat.userData.grassHost = true; // 풀잎이 자라는 지면 (#365)
   const full = WORLD_HALF * 2 + 24, TILES = 6, tw = full / TILES;
   for (let ti = 0; ti < TILES; ti++) {
     for (let tj = 0; tj < TILES; tj++) {
@@ -6098,6 +6129,132 @@ function buildGroundTiles(styleKey = 'industrial') {
   }
 }
 
+// ── 외곽 경계 벽 (#365) ── 전엔 5 m 콘크리트 상자 넷: 어둡고(그늘면 0.06) 2.6 m 타일이 그대로 반복돼 "맵 끝"이 그대로 보였다.
+// 충돌·차폐 치수는 그대로 두고, 재질을 밝히고(월드 좌표 얼룩·빗물 자국·밑동 때) 기둥·덮개·기단을 장식 메시 한 장으로 얹는다.
+const PERIM = { gain: 1.75, bay: 8 };
+let _perimSrc = null, _perimMat = null;
+function perimeterMat() {
+  const src = matOf('concrete');
+  if (_perimSrc === src && _perimMat) return _perimMat;
+  const m = src.clone(); m.color.multiplyScalar(PERIM.gain); m.roughness = 0.97;
+  m.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vPW;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPW = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', `#include <common>\nvarying vec3 vPW;${TERRAIN_NOISE_GLSL}`)
+      .replace('#include <map_fragment>', `#include <map_fragment>
+      float pu = vPW.x + vPW.z;                                                    // 벽을 따라가는 좌표(네 면 모두에서 변한다)
+      float blot = tFbm(vec2(pu * 0.11, vPW.y * 0.23) + 7.0);                      // 큰 얼룩
+      float drip = tFbm(vec2(pu * 1.3, vPW.y * 0.09) + 31.0);                      // 세로 빗물 자국
+      float top = smoothstep(1.2, 4.6, vPW.y);
+      vec3 pc = diffuseColor.rgb * (0.80 + 0.36 * blot);
+      pc *= 1.0 - 0.30 * smoothstep(0.52, 0.80, drip) * top;                       // 위에서 흘러내린 때
+      pc = mix(pc * vec3(0.66, 0.70, 0.60), pc, smoothstep(0.0, 1.1, vPW.y + (blot - 0.5) * 0.8)); // 밑동: 흙·이끼 기운
+      diffuseColor.rgb = pc;`);
+  };
+  m.customProgramCacheKey = () => 'perim';
+  _perimSrc = src; _perimMat = m; return m;
+}
+function buildPerimeterWall(h = 5, shadow = true) {
+  const W = WORLD_HALF, mat = perimeterMat(), o = { shadow };
+  addBox(0, h / 2, -W, W * 2 + 2, h, 1, mat, o); addBox(0, h / 2, W, W * 2 + 2, h, 1, mat, o);
+  addBox(-W, h / 2, 0, 1, h, W * 2 + 2, mat, o); addBox(W, h / 2, 0, 1, h, W * 2 + 2, mat, o);
+  const geos = [], wuv = mat.userData && mat.userData.worldUV;
+  const bx = (cx, cy, cz, w, hh, d) => { const g = new THREE.BoxGeometry(w, hh, d); if (wuv) uvWorldBox(g, w, hh, d, cx, cy, cz); g.translate(cx, cy, cz); geos.push(g); };
+  for (const sgn of [-1, 1]) {
+    const e = sgn * W, inn = e - sgn * 0.5; // 벽 안쪽 면
+    bx(0, h + 0.11, e, W * 2 + 2.4, 0.22, 1.36); bx(e, h + 0.11, 0, 1.36, 0.22, W * 2 + 2.4);                    // 덮개
+    bx(0, 0.3, inn - sgn * 0.07, W * 2, 0.6, 0.14); bx(inn - sgn * 0.07, 0.3, 0, 0.14, 0.6, W * 2);              // 기단
+    for (let t = -W + PERIM.bay / 2; t < W; t += PERIM.bay) { bx(t, h / 2, inn - sgn * 0.1, 0.55, h, 0.2); bx(inn - sgn * 0.1, h / 2, t, 0.2, h, 0.55); } // 기둥
+  }
+  const deco = new THREE.Mesh(mergeGeometries(geos, false), mat); deco.castShadow = shadow; deco.receiveShadow = true; deco.raycast = () => {};
+  scene.add(deco);
+}
+
+// ── 풀잎 (#365 그래픽 개편 2단계) ──
+// 지형 셰이더가 "풀색"으로 칠한 곳에 실제 풀잎을 세운다. 맵 전체에 심지 않고 카메라 앞 S×S m 격자 한 장을 월드 좌표로 감아 돌린다
+// (잎마다 월드 위치가 고정이라 걸어도 풀이 따라오지 않는다). 어디에 서는지는 맵 빌드 뒤 위에서 한 번 내려 찍은 텍스처로 정한다:
+//   R = 지면 타일의 실제 높이(해석적 terrainH 가 아니라 렌더되는 메시 — 타일이 성겨 둘이 수십 cm 어긋난다), G = 1 이면 맨땅(위에 도로·건물·소품 없음).
+// 덮임은 지형 셰이더와 같은 tFbm·같은 유니폼으로 정점 셰이더에서 계산 → 칠해진 풀밭과 정확히 겹친다. 그림자·AO 깊이 패스에서는 제외(변위를 모른다).
+const GRASS = { on: !new URLSearchParams(location.search).has('nograss'), count: IS_MOBILE ? 30000 : 150000, size: IS_MOBILE ? 30 : 50, h: 0.25, w: 0.034, wind: 1.0, tex: IS_MOBILE ? 512 : 1024 };
+let grassField = null;
+function buildGrassField() {
+  if (grassField) { grassField.rt.dispose(); grassField.mesh.material.dispose(); grassField = null; }
+  if (!GRASS.on) return;
+  let host = null; const hostMeshes = [], blockers = [];
+  scene.traverse((o) => {
+    if (!o.isMesh || !o.visible || o.isSkinnedMesh) return;
+    const m = o.material;
+    if (m && !Array.isArray(m) && m.userData.grassHost) { host = host || m; if (m === host) hostMeshes.push(o); else blockers.push(o); return; }
+    if (m && !Array.isArray(m) && (m.alphaTest > 0 || m.transparent || m.isShaderMaterial || m.depthWrite === false)) return; // 수관 카드·유리·하늘은 풀을 가리지 않는다
+    blockers.push(o);
+  });
+  if (!host || !host.userData.terrain) { console.info('[grass] 풀이 자라는 지면 없음 — 생략'); return; }
+  const H = WORLD_HALF + 12, rt = new THREE.WebGLRenderTarget(GRASS.tex, GRASS.tex, { type: THREE.HalfFloatType, depthBuffer: true });
+  rt.texture.minFilter = rt.texture.magFilter = THREE.LinearFilter; rt.texture.generateMipmaps = false;
+  const cam = new THREE.OrthographicCamera(-H, H, H, -H, 1, 400); cam.position.set(0, 300, 0); cam.up.set(0, 0, -1); cam.lookAt(0, 0, 0); cam.updateMatrixWorld(true);
+  const hMat = new THREE.ShaderMaterial({ vertexShader: 'varying float vY; void main(){ vec4 w = modelMatrix * vec4(position, 1.0); vY = w.y; gl_Position = projectionMatrix * viewMatrix * w; }', fragmentShader: 'varying float vY; void main(){ gl_FragColor = vec4(vY, 1.0, 0.0, 1.0); }' });
+  // 가리는 것: 대상 = 대상 × (1,0,1) → 높이(R)는 두고 맨땅 표시(G)만 지운다. 깊이 검사로 지면 위에 있는 것만
+  const bMat = new THREE.MeshBasicMaterial({ color: 0xff00ff, fog: false, toneMapped: false, transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.CustomBlending, blendSrc: THREE.ZeroFactor, blendDst: THREE.SrcColorFactor, blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor });
+  const saved = new Map(), hidden = [];
+  scene.traverse((o) => { if ((o.isMesh || o.isPoints || o.isLine || o.isSprite) && o.visible) { hidden.push(o); o.visible = false; } });
+  for (const o of hostMeshes) { saved.set(o, o.material); o.material = hMat; o.visible = true; }
+  for (const o of blockers) { saved.set(o, o.material); o.material = bMat; o.visible = true; }
+  const prevRT = renderer.getRenderTarget(), au = renderer.shadowMap.autoUpdate, cc = new THREE.Color(); renderer.getClearColor(cc); const ca = renderer.getClearAlpha(), bg = scene.background, fg = scene.fog;
+  try {
+    renderer.shadowMap.autoUpdate = false; scene.background = null; scene.fog = null;
+    renderer.setRenderTarget(rt); renderer.setClearColor(0x000000, 0); renderer.clear(); renderer.render(scene, cam);
+  } finally {
+    renderer.setRenderTarget(prevRT); renderer.setClearColor(cc, ca); renderer.shadowMap.autoUpdate = au; scene.background = bg; scene.fog = fg;
+    for (const [o, m] of saved) o.material = m; for (const o of hidden) o.visible = true;
+    hMat.dispose(); bMat.dispose();
+  }
+  // 잎 한 장 = 정점 5개(밑 2 · 중간 2 · 끝 1). 인스턴스 속성: 격자 안 위치, 난수 4개(방향·키·위상·색)
+  const N = GRASS.count, S = GRASS.size, g = new THREE.InstancedBufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute([-1, 0, 0, 1, 0, 0, -0.62, 0.5, 0, 0.62, 0.5, 0, 0, 1, 0], 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
+  g.setIndex([0, 1, 2, 2, 1, 3, 2, 3, 4]);
+  const root = new Float32Array(N * 2), rnd = new Float32Array(N * 4), rg = mulberry32(365), side = Math.ceil(Math.sqrt(N)), cs = S / side;
+  for (let i = 0; i < N; i++) { root[i * 2] = ((i % side) + rg()) * cs; root[i * 2 + 1] = (Math.floor(i / side) + rg()) * cs; for (let k = 0; k < 4; k++) rnd[i * 4 + k] = rg(); }
+  g.setAttribute('aRoot', new THREE.InstancedBufferAttribute(root, 2)); g.setAttribute('aRnd', new THREE.InstancedBufferAttribute(rnd, 4));
+  g.instanceCount = N;
+  const T = host.userData.terrain, U = { uGrass: T.uGrass, uGrass2: T.uGrass2, uAmt: T.uAmt, uField: { value: rt.texture }, uCtr: { value: new THREE.Vector2() }, uGTime: { value: 0 },
+    uGP: { value: new THREE.Vector4(S, H, GRASS.h, GRASS.w) }, uWind: { value: GRASS.wind } };
+  const mat = new THREE.MeshStandardMaterial({ roughness: 1.0, metalness: 0, side: THREE.DoubleSide });
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, U);
+    sh.vertexShader = sh.vertexShader.replace('#include <common>', `#include <common>
+      attribute vec2 aRoot; attribute vec4 aRnd; varying vec3 vGCol;
+      uniform sampler2D uField; uniform vec2 uCtr; uniform vec4 uGP; uniform float uGTime, uAmt, uWind; uniform vec3 uGrass, uGrass2;${TERRAIN_NOISE_GLSL}`)
+      .replace('#include <begin_vertex>', `
+      float S = uGP.x; vec2 gw = uCtr + mod(aRoot - uCtr + 0.5 * S, S) - 0.5 * S;       // 격자를 카메라 앞 중심에 감아 돌린다(월드 위치 고정)
+      vec4 fld = texture2D(uField, vec2(gw.x + uGP.y, uGP.y - gw.y) / (2.0 * uGP.y));
+      float n1 = tFbm(gw * 0.045 + 21.0), n2 = tFbm(gw * 0.31 + 5.0), macro = tFbm(gw * 0.011 + 40.0);
+      float cov = smoothstep(-0.02, 0.16, n1 * 0.72 + n2 * 0.28 - (1.0 - uAmt));          // 지형 셰이더의 풀 덮임과 같은 식(가장자리는 조금 안쪽부터)
+      float fade = 1.0 - smoothstep(0.30 * S, 0.47 * S, length(gw - uCtr));
+      float open = smoothstep(0.80, 0.98, fld.g) * step(max(abs(gw.x), abs(gw.y)), uGP.y - 13.5);
+      float k = cov * fade * open * (0.6 + 0.6 * aRnd.y) * (0.8 + 0.3 * n2);              // 키 최대 약 0.33 m — 쓰러진 적·떨어진 물건이 묻히지 않게 낮게 둔다
+      float hgt = uGP.z * k, ya = aRnd.x * 6.2832, py = position.y;
+      vec2 dir = vec2(cos(ya), sin(ya)), across = vec2(-dir.y, dir.x);
+      float sway = sin(uGTime * 1.7 + gw.x * 0.33 + gw.y * 0.27 + aRnd.z * 2.0) * 0.6 + sin(uGTime * 3.3 + gw.x * 0.9 - gw.y * 0.7) * 0.25 + (tNoise(gw * 0.06 + uGTime * 0.22) - 0.5) * 1.6;
+      vec2 off = across * position.x * uGP.w * (0.7 + 0.6 * aRnd.w) * step(0.04, k)
+        + (dir * (0.25 + 0.5 * aRnd.z) + vec2(0.8, 0.45) * sway * 0.38 * uWind) * py * py * hgt;
+      vec3 transformed = vec3(gw.x + off.x, fld.r + py * hgt - 0.01, gw.y + off.y);
+      vec3 gc = mix(uGrass, uGrass2, smoothstep(0.35, 0.75, tFbm(gw * 0.07 + 80.0))) * (0.82 + 0.36 * macro);
+      vGCol = gc * mix(0.58, 1.12, py) * (0.86 + 0.2 * aRnd.w) * (1.0 + 0.10 * sway * py);`);
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec3 vGCol;')
+      .replace('#include <map_fragment>', 'diffuseColor.rgb = vGCol;')
+      .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nnormal = normalize(vNormal);'); // 양면이어도 법선은 위(뒷면이 검게 뒤집히지 않게) — 지면과 같은 빛을 받는다
+  };
+  mat.customProgramCacheKey = () => 'grass';
+  const mesh = new THREE.Mesh(g, mat);
+  mesh.frustumCulled = false; mesh.castShadow = false; mesh.receiveShadow = true; mesh.userData.noAO = true; mesh.raycast = () => {};
+  const fwd = new THREE.Vector3();
+  mesh.onBeforeRender = (r, sc, c) => { c.getWorldDirection(fwd); const l = Math.hypot(fwd.x, fwd.z) || 1; U.uCtr.value.set(c.position.x + fwd.x / l * S * 0.3, c.position.z + fwd.z / l * S * 0.3); U.uGTime.value = performance.now() / 1000; };
+  scene.add(mesh);
+  grassField = { mesh, rt, U, host: hostMeshes.length, blockers: blockers.length };
+  console.info(`[grass] 풀잎 ${N}장 · 격자 ${S} m · 지면 메시 ${hostMeshes.length} · 가리는 메시 ${blockers.length} · 마스크 ${GRASS.tex}px`);
+}
+
 function buildSchoolMap() {
   buildTexMats();
   setFog(); // 안개 = 현재 룩(forest)
@@ -6105,10 +6262,7 @@ function buildSchoolMap() {
   farRidge(255, 16, 42, 0x4f6a52, 0.6, 23); farRidge(218, 8, 24, 0x52704c, 0.42, 9); // 원경 숲 능선 (#362) // 숲 바닥 = ambientCG Ground076 낙엽/뿌리 (#283)
   // 외곽 경계벽 (나무로 가림)
   const W = WORLD_HALF;
-  addBox(0, 2.5, -W, W * 2 + 2, 5, 1, 'concrete', { shadow: false });
-  addBox(0, 2.5, W, W * 2 + 2, 5, 1, 'concrete', { shadow: false });
-  addBox(-W, 2.5, 0, 1, 5, W * 2 + 2, 'concrete', { shadow: false });
-  addBox(W, 2.5, 0, 1, 5, W * 2 + 2, 'concrete', { shadow: false });
+  buildPerimeterWall(5, false);
 
   // 운동장 (흙바닥) + 학교 건물
   const yard = new THREE.Mesh(new THREE.PlaneGeometry(74, 42),
@@ -6436,10 +6590,7 @@ function buildUrbanMap() {
   buildGroundTiles('rubble');
   farRidge(250, 14, 62, 0x6a7078, 0.66, 31, 5); farRidge(230, 8, 30, 0x62676d, 0.52, 17, 4); // 원경 스카이라인 (#362)                       // 공터 = 벽돌 잔해 흙 (ambientCG Ground107) #268
   const W = WORLD_HALF;
-  addBox(0, 3, -W, W * 2 + 2, 6, 1, 'concrete', { shadow: false });
-  addBox(0, 3, W, W * 2 + 2, 6, 1, 'concrete', { shadow: false });
-  addBox(-W, 3, 0, 1, 6, W * 2 + 2, 'concrete', { shadow: false });
-  addBox(W, 3, 0, 1, 6, W * 2 + 2, 'concrete', { shadow: false });
+  buildPerimeterWall(6, false);
   // 아파트/오피스 블록 (다양한 높이·재질) — 중앙 광장(±16) 개방, 거리 형성
   // 블록 12동 = buildUrbanBlock 3스타일 변주 (#265 히어로, #271 롤아웃). 1층 진입·루팅 스팟은 건물 중심(기둥 사이) 유지.
   buildUrbanBlock(-36, -36, 20, 16, 5, { style: 'apartment', mat: 'brickCity', shop: true, fireEscape: 'west', seed: 11, door: -3 }); // 히어로 블록 (#265 Phase 1)
@@ -8108,6 +8259,7 @@ function applyMap(key) {
   }
   lastBuildInfo = { key, ms: Math.round(performance.now() - t0), baked: !!bk && !!BAKED[key] };
   console.info(`[map] ${key} 빌드 ${lastBuildInfo.ms}ms (${lastBuildInfo.baked ? '구운 형상' : '절차 생성'})`);
+  if (!new URLSearchParams(location.search).has('bake')) buildGrassField(); // 풀잎 (#365) — 정적 형상이 다 놓인 뒤 위에서 내려 찍어 자리를 정한다
   for (const c of scene.children) if (!before.has(c)) staticObjects.push(c);
   if (!new URLSearchParams(location.search).has('bake')) splitHeavyRaycastMeshes(); // 굽기 페이지는 형상만 만든다 (#355)
   buildPhysicsStatics();
@@ -9005,6 +9157,7 @@ window.__ex = {
   _killDir(i, x, z) { const e = enemies[i]; if (!e || e.dead) return null; killEnemy(e, new THREE.Vector3(x, 0, z)); return { side: enemyHitSide(e, new THREE.Vector3(x, 0, z)), clip: e.actDeath ? e.actDeath.getClip().name : null }; }, _beginRaid(k) { return beginRaid(k); }, _loadBaked(k) { return loadBaked(k); }, get bakeInfo() { return { hash: SRC_HASH, loaded: Object.keys(BAKED), last: lastBuildInfo }; },
   _fire() { if (state.phase !== 'raid') return; if (gun.mag <= 0) gun.mag = GUN.magSize; fireShot(); }, // QA: 트리거 게이트(포인터락·raiseT 등) 우회 1발, 탄창 자동 보충 (#292)
   get rangeTargets() { return rangeTargets; }, get drill() { return drill; }, _startDrill() { startDrill(); }, _rangeTick(dt) { updateRangeTargets(dt); }, _cycleDrillMode() { cycleDrillMode(); }, get recoilPat() { return recoilPat; }, // QA (#295/#298)
+  get grassField() { return grassField; }, GRASS,
   get grenades() { return grenades; }, get grenadeStats() { return grenadeStats; }, GRENADE, grenadeCount, _terrainH(x, z) { return terrainH(x, z); }, _isOpen(x, z, r = 0.8) { return isPointOpen(x, z, r); }, // QA (#359): 수류탄
   _giveGrenade(n = 1) { for (let k = 0; k < n; k++) inventory.push({ name: '파편 수류탄', value: 9000, use: 'grenade', type: 'consumable' }); refreshInventoryUI(); return grenadeCount(); },
   _throwGrenade(x, y, z) { grenadeCd = 0; return throwGrenade(x == null ? null : new THREE.Vector3(x, y, z)); }, _stepGrenades(dt) { updateGrenades(dt); return grenades.length; }, _discardGrenades() { for (const g of grenades) if (!g.dead) { g.dead = true; scene.remove(g.mesh); g.mat.dispose(); } grenades = []; }, _grenadeFlee(i, dt) { return grenadeFlee(enemies[i], dt); },
