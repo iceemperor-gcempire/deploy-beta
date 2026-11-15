@@ -557,6 +557,79 @@ function charMat(src) {
   return m;
 }
 
+// ── 치마 안감 (#369) ── 변환 때의 데시메이션으로 치마 주름이 찢어져(열린 모서리 수백 개) 틈으로 다리·배경이 비쳤다.
+// 원본 VRM 없이 고치려고, 치마 바로 안쪽에 같은 색 원통형 안감을 만들어 같은 뼈대에 묶는다. 가중치는 가까운 치마 정점에서 가져와 스프링 본을 같이 따라간다.
+const SKIRT_LINER = { on: new URLSearchParams(location.search).get('liner') !== '0', seg: 40, rows: 7, inset: 0.004, hemUp: 0.012, dark: 0.62 };
+function buildSkirtLiner(src) {
+  const geo = src.geometry, P = geo.attributes.position, SI = geo.attributes.skinIndex, SW = geo.attributes.skinWeight, UV = geo.attributes.uv;
+  if (!P || !SI || !SW || !src.skeleton) return null;
+  const bones = src.skeleton.bones, isSk = bones.map((b) => /Skirt/.test(b.name)), whole = /Bottoms/.test(src.material.name);
+  const sel = [];
+  for (let i = 0; i < P.count; i++) { let w = 0; for (let k = 0; k < 4; k++) if (isSk[SI.getComponent(i, k)]) w += SW.getComponent(i, k); if (whole || w > 0.02) sel.push(i); }
+  if (sel.length < 24) return null;
+  let cx = 0, cz = 0, y0 = 1e9, y1 = -1e9;
+  for (const i of sel) { cx += P.getX(i); cz += P.getZ(i); y0 = Math.min(y0, P.getY(i)); y1 = Math.max(y1, P.getY(i)); }
+  cx /= sel.length; cz /= sel.length;
+  const V = sel.map((i) => { const x = P.getX(i) - cx, z = P.getZ(i) - cz; return { i, y: P.getY(i), r: Math.hypot(x, z), a: Math.atan2(z, x) }; });
+  const { seg: K, rows: R, inset, hemUp } = SKIRT_LINER, da = Math.PI * 2 / K, dAng = (a, b) => { let d = Math.abs(a - b) % (Math.PI * 2); return d > Math.PI ? Math.PI * 2 - d : d; };
+  const pos = [], idx = [], si = [], sw = [], nodes = [];
+  for (let k = 0; k < K; k++) {
+    const a = -Math.PI + (k + 0.5) * da, near = V.filter((v) => dAng(v.a, a) < da * 1.6);
+    const pool = near.length >= 3 ? near : V; let hem = 1e9; for (const v of pool) hem = Math.min(hem, v.y); hem += hemUp;
+    for (let r = 0; r < R; r++) {
+      const y = y1 + (hem - y1) * (r / (R - 1));
+      // 이 높이의 안쪽 주름 반지름: 가까운 정점 중 가장 작은 반지름 - inset. 가중치는 (각도·높이) 거리로 가까운 셋을 섞는다
+      const sc = pool.map((v) => ({ v, d: Math.hypot(dAng(v.a, a) * v.r, v.y - y) })).sort((p, q) => p.d - q.d).slice(0, 6);
+      let rad = 1e9; for (const c of sc.slice(0, 4)) rad = Math.min(rad, c.v.r); if (r < 2) { let mx = 0; for (const c of sc.slice(0, 4)) mx = Math.max(mx, c.v.r); rad = mx + inset * 0.5; } rad = Math.max(0.02, rad - inset); // 허리 두 줄은 몸통이 바로 안쪽이라 바깥 주름면 바로 밑에 붙인다(안쪽에 두면 몸통이 안감을 뚫고 보인다)
+      const acc = new Map(); for (const c of sc.slice(0, 3)) { const wd = 1 / (c.d + 0.004); for (let q = 0; q < 4; q++) { const w = SW.getComponent(c.v.i, q); if (w > 0) { const b = SI.getComponent(c.v.i, q); acc.set(b, (acc.get(b) || 0) + w * wd); } } }
+      const top = [...acc.entries()].sort((p, q) => q[1] - p[1]).slice(0, 4); const tot = top.reduce((t, e) => t + e[1], 0) || 1;
+      nodes.push({ a, y, rad, top, tot, uv: sc[0].v.i });
+    }
+  }
+  // 반지름을 이웃 각도끼리 한 번 고르게(주름 굴곡이 그대로 튀지 않게) — 단, 더 커지지는 않게(치마 밖으로 나오지 않게)
+  for (let k = 0; k < K; k++) for (let r = 0; r < R; r++) { const n = nodes[k * R + r], l = nodes[((k + K - 1) % K) * R + r], rr = nodes[((k + 1) % K) * R + r]; n.rs = r < 2 ? n.rad : Math.min(n.rad, (l.rad + n.rad * 2 + rr.rad) / 4); }
+  for (const n of nodes) { pos.push(cx + Math.cos(n.a) * n.rs, n.y, cz + Math.sin(n.a) * n.rs); for (let q = 0; q < 4; q++) { si.push(n.top[q] ? n.top[q][0] : 0); sw.push(n.top[q] ? n.top[q][1] / n.tot : 0); } }
+  for (let k = 0; k < K; k++) for (let r = 0; r < R - 1; r++) { const a0 = k * R + r, b0 = ((k + 1) % K) * R + r; idx.push(a0, b0, a0 + 1, b0, b0 + 1, a0 + 1); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4)); g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
+  g.setIndex(idx); g.computeVertexNormals();
+  // 색: 치마 텍스처에서 선택 정점 자리의 평균색(없으면 재질 색) × dark — 안쪽이라 한 톤 어둡게
+  const col = new THREE.Color(0x1a1c2a);
+  try { const img = src.material.map && src.material.map.image; if (img && UV) { const c = document.createElement('canvas'); c.width = c.height = 64; const x2 = c.getContext('2d', { willReadFrequently: true }); x2.drawImage(img, 0, 0, 64, 64); const d = x2.getImageData(0, 0, 64, 64).data; let rr = 0, gg = 0, bb = 0, n = 0;
+      for (const i of sel) { const u = Math.min(63, Math.max(0, Math.floor((UV.getX(i) % 1 + 1) % 1 * 64))), v = Math.min(63, Math.max(0, Math.floor((UV.getY(i) % 1 + 1) % 1 * 64))), o = (v * 64 + u) * 4; if (d[o + 3] < 128) continue; rr += d[o]; gg += d[o + 1]; bb += d[o + 2]; n++; }
+      if (n) col.setRGB(rr / n / 255, gg / n / 255, bb / n / 255, THREE.SRGBColorSpace); } } catch (e) { /* 캔버스 읽기 실패 → 기본색 */ }
+  col.multiply(src.material.color).multiplyScalar(SKIRT_LINER.dark);
+  const base = new THREE.MeshBasicMaterial({ color: col, side: THREE.DoubleSide }); base.name = 'SkirtLiner';
+  const m = new THREE.SkinnedMesh(g, charMat(base));
+  m.name = 'SkirtLiner'; m.position.copy(src.position); m.quaternion.copy(src.quaternion); m.scale.copy(src.scale);
+  m.bind(src.skeleton, src.bindMatrix); m.castShadow = false; m.receiveShadow = true; m.frustumCulled = false; m.raycast = () => {};
+  return m;
+}
+
+// ── 실내 전등 (#369) ── 전엔 점광원을 천장 0.35~0.7 m 아래에 그냥 띄워, 천장에 빛이 하얗게 뭉치고 빛이 어디서 나오는지 보이지 않았다.
+// 천장에서 drop 만큼 내려뜨린 펜던트 기구(줄 + 갓 + 빛나는 전구)를 달고 광원을 전구 자리에 둔다. 광원 수는 그대로다.
+const LAMP_FIX = { on: new URLSearchParams(location.search).get('lampfix') !== '0', geoBody: null, geoBulb: null, matBody: null, count: 0 };
+function roomLamp(x, yCeil, z, color, intensity, dist, drop = 0.75, pendant = true) {
+  const F = LAMP_FIX; if (!F.on) drop = Math.min(drop, 0.5);
+  const lamp = new THREE.PointLight(color, intensity, dist, 2); lamp.position.set(x, yCeil - drop, z); scene.add(lamp);
+  if (!F.on || !pendant) return lamp;
+  if (!F.geoBulb) {
+    F.geoBulb = new THREE.SphereGeometry(0.075, 10, 8); F.geoBulb.translate(0, 0.02, 0);
+    F.matBody = new THREE.MeshStandardMaterial({ color: 0x2b2d30, roughness: 0.6, metalness: 0.4, side: THREE.DoubleSide });
+    F.geoBody = {};
+  }
+  const key = drop.toFixed(2);
+  if (!F.geoBody[key]) { // 줄 + 갓(아래로 벌어진 원뿔대, 속이 빈 채) — drop 별로 한 번만 만든다
+    const cord = new THREE.CylinderGeometry(0.012, 0.012, drop - 0.2, 5); cord.translate(0, 0.2 + (drop - 0.2) / 2, 0);
+    const shade = new THREE.CylinderGeometry(0.06, 0.24, 0.17, 14, 1, true); shade.translate(0, 0.115, 0);
+    F.geoBody[key] = mergeGeometries([cord, shade], false); cord.dispose(); shade.dispose();
+  }
+  const body = new THREE.Mesh(F.geoBody[key], F.matBody); body.position.set(x, yCeil - drop, z); body.castShadow = false; body.raycast = () => {}; scene.add(body);
+  const bulb = new THREE.Mesh(F.geoBulb, new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(1.6), fog: false })); bulb.position.copy(body.position); bulb.raycast = () => {}; scene.add(bulb);
+  F.count++;
+  return lamp;
+}
+
 // ============================================================
 // 에셋 (Kenney / Quaternius CC0 — CREDITS.md 참조)
 // ============================================================
@@ -567,6 +640,7 @@ const CANOPY_TEX = {}; // 카드 트리/풀 카드 알파 텍스처 (#280, make_
 const CHAR_CLIPS = {}; // key(girl*) → { idle, run, death, hitChest, hitHead }
 // VRoid CC0 샘플 (OpenGameArt) → convert_vrm_girl.py 변환. 개체마다 랜덤 선택
 const GIRL_KEYS = ['girlA', 'girlB', 'girlC', 'girlD'];
+const linerInfo = {};  // key → 안감 정점 수 (0 = 치마를 못 찾음)
 let assetsReady = false;
 
 const GLB_MANIFEST = {
@@ -705,6 +779,7 @@ async function loadAssets() {
     const gltf = await loadGlb(path);
     const isGirl = GIRL_KEYS.includes(key);
     const isNature = key.startsWith('q_'); // Quaternius 나무·수풀·바위
+    const skirts = [];
     gltf.scene.traverse((o) => {
       if (o.isMesh) {
         o.castShadow = true; o.receiveShadow = true;
@@ -716,7 +791,8 @@ async function loadAssets() {
             if ('envMapIntensity' in o.material) o.material.envMapIntensity = 0.2;
           }
           if (key.startsWith('rockReal')) { // (#362) 거칠기 맵이 0.3 대라 젖은 듯 번들거리고 붉게 보였다 → 무광 + 회색 기운
-            o.material.roughnessMap = null; o.material.metalnessMap = null; o.material.roughness = 0.96; o.material.metalness = 0; o.material.color.setRGB(1.2, 1.3, 1.42);
+            o.material.roughnessMap = null; o.material.metalnessMap = null; o.material.roughness = 0.96; o.material.metalness = 0;
+            { const avg = { rockRealA: [0.224, 0.118, 0.071], rockRealB: [0.186, 0.12, 0.072], rockRealC: [0.084, 0.05, 0.024] }[key] || [0.2, 0.12, 0.07]; const lg = 0.2 / (0.2126 * avg[0] + 0.7152 * avg[1] + 0.0722 * avg[2]); o.material.color.setRGB((lg + 0.21 / avg[0]) / 2, (lg + 0.195 / avg[1]) / 2, (lg + 0.17 / avg[2]) / 2); } // 밝기 배율과 채널별 배율의 중간 — 채널별로만 맞추면 파란 얼룩이 과하게 살아난다 // (#369) 텍스처 평균(선형)이 붉고 어두워(C 는 0.05) 검붉은 덩어리였다 → 평균을 회갈색 0.2 로 맞춘다
           }
           const mn = (o.material.name || '').toLowerCase();
           if (/leaf|leaves|foliage|bush|plant|grass|flower|petal|fern|shrub|ivy/.test(mn)) { // Poly Haven fern_02/shrub_03 도 alphaMode MASK 카드 (#283)
@@ -737,9 +813,11 @@ async function loadAssets() {
           o.material.alphaTest = 0.35;
           o.material.depthWrite = true;
         }
+        if (isGirl && SKIRT_LINER.on && o.isSkinnedMesh && o.material && /Bottoms|Onepice/.test(o.material.name || '')) skirts.push(o);
         if (o.material && isGirl) { o.material = charMat(o.material); o.receiveShadow = true; } // 배경과 같은 빛을 받게 (#365)
       }
     });
+    for (const sk of skirts) { const ln = buildSkirtLiner(sk); if (ln) sk.parent.add(ln); linerInfo[key] = ln ? ln.geometry.attributes.position.count : 0; } // 0 이어도 남긴다
     ASSETS[key] = gltf;
   });
   // 지면 PBR 컬러맵 (ambientCG CC0) — 실패해도 절차 생성 텍스처로 폴백
@@ -1896,6 +1974,9 @@ const MAT = {
   wood: new THREE.MeshStandardMaterial({ color: 0x6e5a3e, roughness: 0.9 }),
   woodDark: new THREE.MeshStandardMaterial({ color: 0x4a3d2a, roughness: 0.9 }),
   roof: new THREE.MeshStandardMaterial({ color: 0x3d4147, roughness: 0.85 }),
+  ceilingMetal: new THREE.MeshStandardMaterial({ color: 0xa3a8ab, roughness: 0.8, metalness: 0.1 }),   // 창고 천장 안쪽 판 (#369)
+  trussSteel: new THREE.MeshStandardMaterial({ color: 0x7c848b, roughness: 0.6, metalness: 0.4 }),     // 지붕 트러스
+  skylight: new THREE.MeshBasicMaterial({ color: 0xdfeaf2 }),                                          // 천창 — 빛나는 면(광원 없음)
   glass: new THREE.MeshStandardMaterial({ color: 0x88aab4, roughness: 0.15, metalness: 0.1, transparent: true, opacity: 0.5, envMapIntensity: 1.2 }),
   schoolBase: new THREE.MeshStandardMaterial({ color: 0x9a8f7a, roughness: 0.95 }), // 학교 1층 base 밴드(살짝 짙은 톤)
   sandbag: new THREE.MeshStandardMaterial({ color: 0x8a7f5f, roughness: 1.0 }),
@@ -1908,6 +1989,7 @@ const MAT = {
   steel: new THREE.MeshStandardMaterial({ color: 0x9a9ea3, roughness: 0.5, metalness: 0.55 }), // 사일로/탱크 아연강판
   rust: new THREE.MeshStandardMaterial({ color: 0x6e4a33, roughness: 0.9, metalness: 0.2 }),    // 녹/폐자재
   interior: new THREE.MeshStandardMaterial({ color: 0x1b1d20, roughness: 1.0 }),                // 파인 창 뒤 어두운 실내 배킹 (#265)
+  sootSoft: new THREE.MeshStandardMaterial({ color: 0x1c1813, roughness: 1.0, transparent: true, opacity: 0.38, depthWrite: false }), // 그을음 얼룩(반투명 띠를 겹쳐 번짐처럼) (#369)
   soot: new THREE.MeshStandardMaterial({ color: 0x17140f, roughness: 1.0 }),                    // 화재 그을음 (#265)
   laneYellow: new THREE.MeshStandardMaterial({ color: 0xc4b26a, roughness: 0.95 }),             // 바랜 중앙선 (#268)
   laneWhite: new THREE.MeshStandardMaterial({ color: 0xd3d1c6, roughness: 0.95 }),              // 바랜 횡단보도/정지선 (#268)
@@ -1923,7 +2005,7 @@ const TEXMAT_DEF = {
   corrugated: [0xa8a8a8, 0.6, 1.8, 'metalBlue'],
   woodfloor: [0xb8a488, 0.85, 2.2, 'wood'],
   concrete: [0xb0aca0, 0.95, 2.6, 'concrete'],
-  asphalt: [0x8f8e8a, 0.96, 5.0, 'concreteDark'], // ambientCG Road012B 균열 아스팔트 (#268)
+  asphalt: [0xf4f2ec, 0.96, 5.0, 'concreteDark'], // ambientCG Road012B 균열 아스팔트 (#268)
   paving: [0xb4b1a7, 0.95, 2.2, 'concrete'],      // ambientCG Concrete047A 보도/광장 (#268)
   plasterbroken: [0xb9b0a2, 0.95, 2.6, 'concrete'], // ambientCG PaintedPlaster006 벗겨진 페인트 파사드 (#277)
   brickdirty: [0x9a8578, 0.93, 2.4, 'brick'],       // ambientCG Bricks090 때 탄 공장 벽돌 (#277)
@@ -2405,7 +2487,16 @@ function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutte
   b.box(cx + w * 0.18, gy + h + 0.4, cz - d * 0.18, 1.2, 0.7, 1.0, MAT.barrel, false);
   b.cyl(cx + w * 0.30, gy + h + 0.9, cz + d * 0.28, 0.28, 0.28, 1.8, MAT.barrel, 10, false);
   if (open) { // 내부 루팅공간: 마감 바닥 + 지지기둥(엄폐) + 후면 선반랙
-    b.box(cx, gy + 0.1, cz, w - t * 2, 0.14, d - t * 2, MAT.concreteDark, false); // 실내 바닥
+    b.box(cx, gy + 0.1, cz, w - t * 2, 0.14, d - t * 2, 'concrete', false); // 실내 바닥 (#369: concreteDark 는 햇빛 없는 실내에서 남색 덩어리로 보였다)
+    b.box(cx, gy + h - 0.06, cz, w - t * 2, 0.06, d - t * 2, MAT.ceilingMetal, false); // 천장 안쪽 판 — 지붕 밑면(거의 검정)이 그대로 보이던 것
+    { // 지붕 트러스 + 천창(빛나는 띠) + 바닥 안전선
+      const iw = w - t * 2, n = Math.max(2, Math.round(d / 4.2));
+      for (let i = 1; i < n; i++) { const tz = cz - d / 2 + d * i / n;
+        b.box(cx, gy + h - 1.0, tz, iw, 0.14, 0.14, MAT.trussSteel, false); b.box(cx, gy + h - 0.2, tz, iw, 0.12, 0.14, MAT.trussSteel, false);
+        const nv = Math.max(4, Math.round(iw / 2.6)); for (let k = 0; k <= nv; k++) b.box(cx - iw / 2 + iw * k / nv, gy + h - 0.6, tz, 0.09, 0.8, 0.09, MAT.trussSteel, false); }
+      for (const q of [-1, 1]) b.box(cx + q * iw * 0.27, gy + h - 0.1, cz, 1.1, 0.03, d * 0.62, MAT.skylight, false);
+      for (const q of [-1, 1]) b.box(cx + q * (shutterW / 2 + 0.25), gy + 0.175, cz, 0.12, 0.012, d - t * 2 - 1.2, MAT.laneYellow, false);
+    }
     const colX = w * 0.24;
     for (const sx of [-1, 1]) b.box(cx + sx * colX, gy + (h - 0.2) / 2 + 0.2, cz, 0.5, h - 0.2, 0.5, MAT.steel); // 지지기둥(충돌)
     const rz = bz + fSign * (d * 0.30); // 후면 선반랙
@@ -2414,7 +2505,7 @@ function buildWarehouse(cx, cz, w, d, h, { front = 'north', shutterW = 6, shutte
     for (const px of [-w * 0.27, 0, w * 0.27]) for (const pz of [-0.44, 0.44]) b.box(cx + px, gy + 1.35, rz + pz, 0.1, 2.7, 0.1, MAT.rust, false); // 선반 기둥
   }
   b.flush();
-  if (open) { const lamp = new THREE.PointLight(0xffd9a8, 14, Math.max(w, d) * 1.15, 2); lamp.position.set(cx, gy + h - 0.7, cz); scene.add(lamp); }
+  if (open) roomLamp(cx, gy + h - 0.2, cz, 0xffd9a8, 14, Math.max(w, d) * 1.15, Math.min(1.9, h * 0.32));
 }
 
 // ── 공장동 (#213): 콘크리트/벽돌 다층 + 층별 리본창 + 코너기둥 + 파라펫 + 옥상 계단탑/설비/굴뚝. ──
@@ -2432,8 +2523,36 @@ function buildFactory(cx, cz, w, d, h, { mat = 'concrete', floors = 3 } = {}) {
   const fh = (h - plinth) / floors; // 층별 리본창 (유리 밴드) — 시각 오버레이
   for (let f = 0; f < floors; f++) {
     const wy = gy + plinth + fh * (f + 0.55), wh = Math.min(1.4, fh * 0.55);
-    for (const s of [-1, 1]) b.box(cx, wy, cz + s * (d / 2 + 0.16), w - 1.8, wh, 0.1, MAT.glass, false);
-    for (const s of [-1, 1]) b.box(cx + s * (w / 2 + 0.16), wy, cz, 0.1, wh, d - 1.8, MAT.glass, false);
+    // (#369) 평평한 유리 띠 → 어두운 실내 배킹 + 유리 + 창대·인방 돌출 + 세로 창살·벽기둥. 면이 여러 겹이라 햇빛에서 그림자가 진다
+    for (const s of [-1, 1]) for (const ax of ['x', 'z']) {
+      const len = (ax === 'x' ? w : d) - 1.8, off = (ax === 'x' ? d : w) / 2;
+      const put = (u, y, o, lu, lh, lo, m) => ax === 'x' ? b.box(cx + u, y, cz + s * (off + o), lu, lh, lo, m, false) : b.box(cx + s * (off + o), y, cz + u, lo, lh, lu, m, false);
+      put(0, wy, 0.215, len, wh, 0.03, MAT.interior);
+      put(0, wy, 0.25, len, wh, 0.03, MAT.glass);
+      put(0, wy - wh / 2 - 0.07, 0.30, len + 0.3, 0.14, 0.22, MAT.concreteDark);   // 창대
+      put(0, wy + wh / 2 + 0.06, 0.27, len + 0.3, 0.12, 0.16, MAT.concreteDark);   // 인방
+      const nb = Math.max(2, Math.round(len / 3.2));
+      for (let i = 0; i <= nb; i++) put(-len / 2 + len * i / nb, wy, 0.29, 0.34, wh + 0.02, 0.2, mat); // 벽기둥(창을 칸으로 나눔)
+      for (let i = 0; i < nb; i++) for (const q of [1 / 3, 2 / 3]) put(-len / 2 + len * (i + q) / nb, wy, 0.275, 0.05, wh, 0.05, MAT.lampPole); // 창살
+      put(0, wy, 0.275, len, 0.05, 0.05, MAT.lampPole);                             // 가로 창살
+    }
+  }
+  for (const s of [-1, 1]) { // 기단 돌출 띠 + 층간 띠(코니스)
+    b.box(cx, gy + plinth - 0.06, cz + s * (d / 2 + 0.24), w + 0.5, 0.12, 0.1, MAT.concreteDark, false);
+    b.box(cx + s * (w / 2 + 0.24), gy + plinth - 0.06, cz, 0.1, 0.12, d + 0.5, MAT.concreteDark, false);
+    b.box(cx, gy + h - 0.25, cz + s * (d / 2 + 0.25), w + 0.6, 0.22, 0.14, MAT.concreteDark, false);
+    b.box(cx + s * (w / 2 + 0.25), gy + h - 0.25, cz, 0.14, 0.22, d + 0.6, MAT.concreteDark, false);
+  }
+  { // 정면(+z) 출입구: 계단·철문·차양·문 위 등기구 갓, 옆에 배전함. 모서리 두 곳에 홈통
+    const fz = cz + d / 2 + 0.2, dx = cx + w * 0.28;
+    b.box(dx, gy + 0.12, fz + 0.75, 2.4, 0.24, 1.5, MAT.concreteDark, false);
+    b.box(dx, gy + 1.3, fz + 0.03, 1.5, 2.2, 0.08, MAT.metalBlue, false);
+    b.box(dx, gy + 1.3, fz + 0.06, 0.04, 2.2, 0.06, MAT.lampPole, false);
+    for (const q of [-1, 1]) b.box(dx + q * 0.8, gy + 1.3, fz + 0.05, 0.1, 2.3, 0.12, MAT.concreteDark, false);
+    b.box(dx, gy + 2.62, fz + 0.5, 2.2, 0.1, 1.1, MAT.roof, false);
+    for (const q of [-1, 1]) b.box(dx + q * 1.0, gy + 2.3, fz + 0.5, 0.05, 0.6, 0.05, MAT.lampPole, false);
+    b.box(dx - 1.9, gy + 1.5, fz + 0.1, 0.7, 1.0, 0.22, MAT.metalGreen, false);
+    for (const q of [-1, 1]) { const px = cx + q * (w / 2 - 0.55); b.cyl(px, gy + h / 2, fz + 0.06, 0.07, 0.07, h, MAT.lampPole, 6, false); for (let y = 1.2; y < h; y += 2.4) b.box(px, gy + y, fz + 0.02, 0.22, 0.06, 0.16, MAT.lampPole, false); }
   }
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) b.box(cx + sx * (w / 2), gy + h / 2, cz + sz * (d / 2), 0.7, h, 0.7, mat, false); // 코너기둥
   const pH = 0.6, po = 0.1; // 파라펫
@@ -2564,9 +2683,7 @@ function buildIndustrialMap() {
     placeModel('box', ox + 4.4, oz + 1.4, { height: 0.9, rotY: 1.2 });
     placeModel('barrel', ox - 4.6, oz - 3.2, { height: 1.0, rotY: 2.1 });
     for (const [lx, lz] of [[ox - 3, oz], [ox + 4, oz]]) {
-      const lamp = new THREE.PointLight(0xffd9a0, 22, 10, 2);
-      lamp.position.set(lx, H2 - 0.35, lz);
-      scene.add(lamp);
+      roomLamp(lx, H2, lz, 0xffd9a0, 22, 10, 0.75);
     }
   }
 
@@ -2702,8 +2819,8 @@ function buildIndustrialMap() {
     addBox(gx - W3 / 2, F1 / 2, gz, 0.35, F1, D3, MAT.concrete);
     addBox(gx, F1 / 2, gz + D3 / 2, W3, F1, 0.35, MAT.concrete);
     // 2층 바닥 (계단 개구부 2.0×3.8 서쪽) — 두 장으로 분할
-    addBox(gx + 1.2, F1 + 0.1, gz, 7.6, 0.2, D3, MAT.woodDark);
-    addBox(gx - 3.8, F1 + 0.1, gz - 2.0, 2.4, 0.2, D3 - 4.0, MAT.woodDark);
+    addBox(gx + 1.2, F1 + 0.1, gz, 7.6, 0.2, D3, 'woodfloor');   // (#369) woodDark(선형 0.06)는 햇빛 없는 2층에서 검정으로 보였다
+    addBox(gx - 3.8, F1 + 0.1, gz - 2.0, 2.4, 0.2, D3 - 4.0, 'woodfloor');
     // 2층 벽: 사방 창문 (저격 포지션) — baseY 로 1층 위에 얹음
     addWindowWall(gx, gz - D3 / 2, W3, F2 - F1, 'x', MAT.brick, [{ at: -2, w: 1.8 }, { at: 2.5, w: 1.8 }], F1);
     addWindowWall(gx, gz + D3 / 2, W3, F2 - F1, 'x', MAT.brick, [{ at: 0, w: 2.0 }], F1);
@@ -2711,13 +2828,13 @@ function buildIndustrialMap() {
     addWindowWall(gx + W3 / 2, gz, D3, F2 - F1, 'z', MAT.brick, [{ at: -1, w: 1.8 }], F1);
     // 지붕
     addBox(gx, F2 + 0.15, gz, W3 + 0.6, 0.3, D3 + 0.6, MAT.roof);
+    addBox(gx, F2 - 0.03, gz, W3 - 0.4, 0.05, D3 - 0.4, MAT.ceilingMetal, { collide: false, block: false, shadow: false }); // 2층 천장 안쪽 판 — 지붕 밑면(검정)이 그대로 보였다
     // 실내 계단 (서쪽 벽면을 따라 북→남, 6단 × 0.5)
     addStairs(gx - 3.8, gz + 3.8, 0, -1, 6, 0.5, 0.6, 1.8, MAT.concreteDark);
     // 1층 소품
     placeModel('box', gx + 2.5, gz + 1.5, { height: 0.9, rotY: 0.7 });
-    const lampG = new THREE.PointLight(0xffd9a0, 22, 10, 2);
-    lampG.position.set(gx, F1 - 0.35, gz);
-    scene.add(lampG);
+    roomLamp(gx, F1, gz, 0xffd9a0, 22, 10, 0.75);
+    addBox(gx, 0.04, gz, W3 - 0.4, 0.06, D3 - 0.4, 'concrete', { collide: false, block: false, shadow: false }); // (#369) 1층 바닥 — 전엔 실내에 잔디 지면이 그대로 보였다
   }
 
   // 공장/창고 옆 연료 탱크 / 소형 배기 굴뚝 — 건물 밖으로 배치. **스캐터보다 먼저** 놓아 스캐터가 회피 (#215)
@@ -3088,7 +3205,7 @@ function makeEnemyMesh(boss = false) {
   model.position.y = -bb.min.y * s;
   model.traverse((o) => {
     if (o.isMesh || o.isSkinnedMesh) {
-      o.castShadow = true;
+      o.castShadow = o.name !== 'SkirtLiner';
       o.frustumCulled = false; // 스킨드 메시 컬링 오판 방지
     }
   });
@@ -4328,7 +4445,7 @@ function buildPlayerChar() {
   const s = CHAR_HEIGHT / Math.max(0.001, bb.max.y - bb.min.y);
   model.scale.setScalar(s);
   model.position.y = -bb.min.y * s;
-  model.traverse((o) => { if (o.isMesh || o.isSkinnedMesh) { o.castShadow = true; o.frustumCulled = false; } });
+  model.traverse((o) => { if (o.isMesh || o.isSkinnedMesh) { o.castShadow = o.name !== 'SkirtLiner'; o.frustumCulled = false; } });
   const g = new THREE.Group();
   g.add(model);
   const gear = attachGear(model, g, PC_KEY, { helmet: 'olive', nvg: true, vest: 'olive', pack: 'tan', heavy: false }); // 전부 만들고 상태별 표시 (#331)
@@ -5822,12 +5939,14 @@ function buildSchoolBuilding(cx, cz) {
       else if (r < 0.78) { // 깨짐
         b.box(cxw, gy, wz - n * 0.16, o.w - 0.1, gh, 0.05, MAT.interior, false);
         b.box(cxw - o.w * 0.3, gy - 0.28, wz, o.w * 0.34, 0.4, 0.06, MAT.glass, false); b.box(cxw + o.w * 0.34, gy + 0.3, wz, o.w * 0.26, 0.36, 0.06, MAT.glass, false);
-        if (rs() < 0.5) b.box(cxw, gy + 0.72, out, o.w + 0.5, 0.42, 0.03, MAT.soot, false);
+        if (rs() < 0.5) for (let k = 0; k < 4; k++) b.box(cxw, gy + 0.56 + k * 0.13, out + n * k * 0.002, o.w + 0.3 - k * k * 0.16, 0.13, 0.02, MAT.sootSoft, false); // 그을음: 위로 갈수록 좁아지는 반투명 띠 (#369 — 전엔 새까만 직사각형 판)
       } else { // 판자
         b.box(cxw, gy, wz - n * 0.16, o.w - 0.1, gh, 0.05, MAT.interior, false);
         for (let k = 0; k < 3; k++) b.box(cxw + (rs() - 0.5) * 0.2, gy - 0.34 + k * 0.34, out, o.w + 0.3, 0.17, 0.05, MAT.woodDark, false);
       }
       if (rs() < 0.25) b.box(cxw + (rs() - 0.5) * 0.6, gy - 0.95, out - n * 0.01, 0.1, 0.8, 0.03, MAT.rust, false); // 창턱 아래 녹물
+      b.box(cxw, gy - gh / 2 - 0.06, out + n * 0.06, o.w + 0.36, 0.1, 0.2, 'concrete', false);  // (#369) 창대 — 민무늬 벽에 그림자 선을 만든다
+      b.box(cxw, gy + gh / 2 + 0.07, out + n * 0.03, o.w + 0.24, 0.12, 0.12, MAT.schoolBase, false); // 인방
     }
   };
   const bay = 4.4;
@@ -5888,6 +6007,14 @@ function buildSchoolBuilding(cx, cz) {
 
   // ── 옥상: 파라펫 + 계단탑(penthouse) + 물탱크 ──
   const roofY = FH * FLOORS;
+  { // (#369) 창 사이 벽기둥 + 홈통 — 68 m 민무늬 벽을 칸으로 나눈다. 정면 1층 현관 폭은 비운다
+    const span = Math.floor((L - 2.5) / bay) * bay;
+    for (let i = 0; i * bay < span - 0.01; i++) { const px = cx - span / 2 + (i + 0.5) * bay;
+      b.box(px, (FH + roofY) / 2, zF + t / 2 + 0.07, 0.5, roofY - FH, 0.14, wall, false); // 정면 1층은 창 배치가 달라(현관 좌우로 따로 정렬) 기둥이 사격 개구부를 가린다 → 2층부터
+      b.box(px, roofY / 2 + 0.3, zB - t / 2 - 0.07, 0.5, roofY - 0.6, 0.14, wall, false); }
+    for (const q of [-1, 1]) for (const [z, n] of [[zF, 1], [zB, -1]]) { const px = cx + q * (halfL - 0.9), pz = z + n * (t / 2 + 0.12);
+      b.cyl(px, roofY / 2 + 0.4, pz, 0.07, 0.07, roofY - 0.4, MAT.lampPole, 6, false); for (let y = 1.6; y < roofY; y += 2.6) b.box(px, y, pz - n * 0.05, 0.22, 0.06, 0.14, MAT.lampPole, false); }
+  }
   for (const [ox, oz, w, d] of [[0, halfD, L + 0.6, 0.35], [0, -halfD, L + 0.6, 0.35], [-halfL, 0, 0.35, Dp + 0.6], [halfL, 0, 0.35, Dp + 0.6]]) {
     addBox(cx + ox, roofY + 0.6, cz + oz, w, 1.2, d, 'concrete', { collide: false });
   }
@@ -6534,7 +6661,7 @@ function buildUrbanBlock(cx, cz, w, d, floors, { style = 'apartment', mat = 'bri
     if (f.ax === 'z') fe.position.x += wallAt - (f.n > 0 ? bb.min.x : bb.max.x); else fe.position.z += wallAt - (f.n > 0 ? bb.min.z : bb.max.z);
     fe.updateMatrixWorld(true);
   }
-  const lamp = new THREE.PointLight(0xffd9a8, 9, Math.max(w, d) * 1.1, 2); lamp.position.set(cx, gy + FH - 0.5, cz); scene.add(lamp); // 1층 실내 조명(루팅 가시)
+  roomLamp(cx, gy + FH, cz, 0xffd9a8, 9, Math.max(w, d) * 1.1, 0.95); // 1층 실내 조명(루팅 가시)
 }
 
 // ── 도심 거리 인프라 (#268 Phase 2): 도로망(아스팔트 8m + 보도 2m + 연석) + 중앙 점선/정지선/횡단보도 + 광장 포장 + 가로등(절차) +
@@ -6974,7 +7101,7 @@ function buildTownHouse(B, lot) {
     F.box(B, u0 + hw * 0.1, 0.45, v0 - hd / 2 + 0.45, 2.2, 0.9, 0.6, TMAT.trimWhite, true);       // 싱크대
     const [lx, lz] = F.pos(u0, v0 + hd * 0.15);
     TOWN_LOOT.push([lx, lz]);
-    if (townLights < 8) { const L = new THREE.PointLight(0xffdcae, 5, Math.max(hw, hd) * 1.2, 2); L.position.set(lx, H1 - 0.4, lz); scene.add(L); townLights++; }
+    if (townLights < 8) { roomLamp(lx, H1, lz, 0xffdcae, 5, Math.max(hw, hd) * 1.2, 0.7); townLights++; }
   } else if (floors === 2) F.box(B, u0, H1, v0, hw - t, 0.1, hd - t, TMAT.interior);
   // ── 발코니 ──
   if (balcony) {
@@ -7486,7 +7613,7 @@ function townKonbini(B) {
   B.box(19.2, 0.5, 24.2, 1.0, 1.0, 3.2, TMAT.trimWhite, true); B.box(19.2, 1.05, 23.5, 0.5, 0.3, 0.4, TMAT.trimDark);   // 계산대 + 계산기
   B.box(xm - 1, 0.5, z0 + 0.5, 6, 1.0, 0.45, TMAT.white, true);                                                    // 잡지 선반(창가)
   TOWN_LOOT.push([10.5, 26.3], [17.5, 28.8]);
-  if (townLights < 8) { const L = new THREE.PointLight(0xf2f6ff, 6, 14, 2); L.position.set(xm, H - 0.6, zm); scene.add(L); townLights++; }
+  if (townLights < 8) { roomLamp(xm, H, zm, 0xf2f6ff, 6, 14, 0.6, false); townLights++; } // 편의점은 천장 형광등 기구가 이미 있다 → 펜던트 없이 광원만
   // 외부: 주차 칸·차 멈춤·자판기·쓰레기통·옥상 실외기
   for (let x = x0 + 1; x <= x1 - 1; x += 2.6) { B.box(x, 0.034, 19.5, 0.12, 0.01, 4.6, TMAT.whiteLine); B.box(x + 1.3, 0.08, 21.1, 1.2, 0.12, 0.2, 'concrete'); }
   townVending(B, x1 + 0.9, 21.8, Math.PI, 1); townVending(B, x1 + 1.95, 21.8, Math.PI, 2);
@@ -9171,6 +9298,7 @@ window.__ex = {
     info.autoReset = true; return out;
   },
   get _map() { return { current: currentMapKey, built: builtMapKey, maps: Object.keys(MAPS) }; },
+  get _lootSpots() { return LOOT_SPOTS; }, get _scene() { return scene; }, get _liner() { return linerInfo; },
   // 화면 캡처 QA (#362): 한 프레임을 직접 그려 JPEG 으로 돌려주고, 그 프레임의 드로콜·삼각형·소요 시간을 lastShot 에 남긴다
   _shot(q = 0.9) { const info = renderer.info, ar = info.autoReset; info.autoReset = false; info.reset(); skyMesh.position.copy(camera.position); updateSunShadow(true); const t0 = performance.now(); if (composer) composer.render(); else renderer.render(scene, camera); renderer.getContext().finish(); this.lastShot = { calls: info.render.calls, tris: info.render.triangles, ms: +(performance.now() - t0).toFixed(1), programs: info.programs ? info.programs.length : 0, geos: info.memory.geometries, tex: info.memory.textures }; info.autoReset = ar; return canvas.toDataURL('image/jpeg', q); },
   // 렌더 QA (#319): 룩 전환·톤매핑 비교·낙화 상태
