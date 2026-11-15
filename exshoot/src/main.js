@@ -1032,14 +1032,14 @@ function canopyMat(key) {
   return CANOPY_MAT[key];
 }
 const FOREST_CHUNK = 44;
-function forestBatch() { // 청크·재질별 지오메트리 누적 → flush 시 병합 메시 1개씩
+function forestBatch({ hit = true } = {}) { // 청크·재질별 지오메트리 누적 → flush 시 병합 메시 1개씩. hit:false = 탄착·시야 판정 제외(창을 덮는 덩굴 #375)
   const byKey = new Map(), bid = bakeBatchId(), rp = bakeReplay(); // (#325)
   return {
     put(x, z, mkey, mat, geo) { if (rp || !geo) return; const k = `${Math.floor(x / FOREST_CHUNK)},${Math.floor(z / FOREST_CHUNK)}|${mkey}`; if (!byKey.has(k)) byKey.set(k, { mat, geos: [] }); byKey.get(k).geos.push(geo); },
     flush() {
       if (rp) return bakeReplayFlush(bid);
       let n = 0;
-      for (const { mat, geos } of byKey.values()) { const g = mergeGeometries(geos, false); for (const q of geos) q.dispose(); const m = new THREE.Mesh(g, mat); m.castShadow = m.receiveShadow = true; scene.add(m); obstacleMeshes.push(m); bakeRecord(bid, m, true); n++; }
+      for (const { mat, geos } of byKey.values()) { const g = mergeGeometries(geos, false); for (const q of geos) q.dispose(); const m = new THREE.Mesh(g, mat); m.castShadow = m.receiveShadow = true; scene.add(m); if (hit) obstacleMeshes.push(m); bakeRecord(bid, m, hit); n++; }
       byKey.clear(); return n;
     },
   };
@@ -1928,6 +1928,21 @@ const MAT = {
   skylight: new THREE.MeshBasicMaterial({ color: 0xdfeaf2 }),                                          // 천창 — 빛나는 면(광원 없음)
   glass: new THREE.MeshStandardMaterial({ color: 0x88aab4, roughness: 0.15, metalness: 0.1, transparent: true, opacity: 0.5, envMapIntensity: 1.2 }),
   schoolBase: new THREE.MeshStandardMaterial({ color: 0x9a8f7a, roughness: 0.95 }), // 학교 1층 base 밴드(살짝 짙은 톤)
+  winFrame: new THREE.MeshStandardMaterial({ color: 0xd8d4c8, roughness: 0.7, metalness: 0.2 }),  // 학교 알루미늄 창틀 (#375)
+  // 학교 실내 소품 (#375)
+  deskTop: new THREE.MeshStandardMaterial({ color: 0xb08d5e, roughness: 0.8 }), deskMetal: new THREE.MeshStandardMaterial({ color: 0x6c747c, roughness: 0.55, metalness: 0.4 }),
+  blackboard: new THREE.MeshStandardMaterial({ color: 0x29443a, roughness: 0.9 }), corkboard: new THREE.MeshStandardMaterial({ color: 0x9a7650, roughness: 1 }),
+  lockerGray: new THREE.MeshStandardMaterial({ color: 0x8b979c, roughness: 0.6, metalness: 0.3 }), lockerBlue: new THREE.MeshStandardMaterial({ color: 0x4d6f8f, roughness: 0.6, metalness: 0.3 }),
+  books: [0x8a3b32, 0x2f5d7c, 0x4e7a45, 0xc2a24a, 0x6b4a7a, 0xd9d2c0].map((c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.9 })),
+  paper: new THREE.MeshStandardMaterial({ color: 0xe6e2d6, roughness: 1 }), ceilingLight: new THREE.MeshStandardMaterial({ color: 0xd8d4c8, roughness: 0.95, emissive: 0x4a4842 }), // 판 밑면은 지면 반사광(초록)만 받아 올리브색으로 죽는다 → 약한 자체 밝기
+  fireRed: new THREE.MeshStandardMaterial({ color: 0xb23228, roughness: 0.6 }), trophy: new THREE.MeshStandardMaterial({ color: 0xc9a84a, roughness: 0.35, metalness: 0.8 }),
+  sofa: new THREE.MeshStandardMaterial({ color: 0x5a4a44, roughness: 0.95 }), vending: new THREE.MeshStandardMaterial({ color: 0x9c3a34, roughness: 0.5, metalness: 0.3 }),
+  labTop: new THREE.MeshStandardMaterial({ color: 0x7d8a8a, roughness: 0.7 }), piano: new THREE.MeshStandardMaterial({ color: 0x1c1a19, roughness: 0.3 }),
+  bedWhite: new THREE.MeshStandardMaterial({ color: 0xd9d8d2, roughness: 1 }), curtain: new THREE.MeshStandardMaterial({ color: 0xb9cfc8, roughness: 1, side: THREE.DoubleSide }),
+  curtainRed: new THREE.MeshStandardMaterial({ color: 0x7a2222, roughness: 1 }), matBlue: new THREE.MeshStandardMaterial({ color: 0x35589a, roughness: 0.9 }),
+  trayOrange: new THREE.MeshStandardMaterial({ color: 0xd07a2e, roughness: 0.7 }), cardboard: new THREE.MeshStandardMaterial({ color: 0xa98a5e, roughness: 1 }),
+  signGreen: new THREE.MeshStandardMaterial({ color: 0x2c5a48, roughness: 0.7 }), soil: new THREE.MeshStandardMaterial({ color: 0x5a4632, roughness: 1 }),
+  roofRed: new THREE.MeshStandardMaterial({ color: 0x8a5544, roughness: 0.85 }),
   sandbag: new THREE.MeshStandardMaterial({ color: 0x8a7f5f, roughness: 1.0 }),
   barrel: new THREE.MeshStandardMaterial({ color: 0x37505f, roughness: 0.55, metalness: 0.4 }),
   trunk: new THREE.MeshStandardMaterial({ color: 0x54422e, roughness: 1.0 }),
@@ -2354,7 +2369,7 @@ async function bakeAllMaps() {
   return summary;
 }
 
-function batchBuilder() {
+function batchBuilder({ hit = true } = {}) { // hit:false = 장식 전용(유리·창살·잔 소품) — 탄착·시야 판정에 넣지 않는다 (#375)
   const byMat = new Map(), bid = bakeBatchId(), rp = bakeReplay(); // 굽기 재생이면 형상 생성 생략(콜라이더만) (#325)
   const put = (m, geo) => { if (!byMat.has(m)) byMat.set(m, []); byMat.get(m).push(geo); };
   return {
@@ -2377,7 +2392,7 @@ function batchBuilder() {
       for (const [m, gs] of byMat) {
         const merged = mergeGeometries(gs, false); for (const g of gs) g.dispose();
         const mesh = new THREE.Mesh(merged, m); mesh.castShadow = mesh.receiveShadow = true;
-        scene.add(mesh); obstacleMeshes.push(mesh); bakeRecord(bid, mesh, true);
+        scene.add(mesh); if (hit) obstacleMeshes.push(mesh); bakeRecord(bid, mesh, hit);
       }
     },
   };
@@ -3255,7 +3270,7 @@ function randomOpenPoint(margin = 6) {
 }
 function isPointOpen(x, z, r) {
   for (const b of colliders) {
-    if (b.maxY < 0.3 || b.minY >= 1.5) continue;
+    if (b.maxY < 0.35 || b.minY >= 1.5) continue; // 0.35 미만은 걸어 올라서는 바닥판(학교 1층 0.3 m)이라 막힌 자리가 아니다 (#375 — 전엔 0.3 '미만'이라 실내가 통째로 막힌 곳으로 잡혔다)
     const dx = x - b.cx, dz = z - b.cz;
     const lx = b.c * dx - b.s * dz, lz = b.s * dx + b.c * dz;
     if (Math.abs(lx) < b.hx + r && Math.abs(lz) < b.hz + r) return false;
@@ -3703,7 +3718,7 @@ function updateEnemy(e, dt) {
     const preX = e.pos.x, preZ = e.pos.z;
     e.pos.x += moveDir.x * speed * dt;
     e.pos.z += moveDir.z * speed * dt;
-    resolveHorizontal(e.pos, 0.4, 0.1, 1.7);
+    e.pos.y = terrainH(e.pos.x, e.pos.z); resolveHorizontal(e.pos, 0.4, 0.1, 1.7); // (#375) 높이를 먼저 지면으로 되돌린 뒤 해소 — 낮은 바닥판(학교 1층 0.3 m)에 올라선 높이가 프레임 끝까지 남는다
     const movedDist = Math.hypot(e.pos.x - preX, e.pos.z - preZ); // 실제 변위
 
     // 근거리 적 발소리 (거리 감쇠) — 벽에 막히면 안 남
@@ -3730,7 +3745,7 @@ function updateEnemy(e, dt) {
   // 맵 경계 + 지형 높이 추종
   e.pos.x = THREE.MathUtils.clamp(e.pos.x, -WORLD_HALF + 2, WORLD_HALF - 2);
   e.pos.z = THREE.MathUtils.clamp(e.pos.z, -WORLD_HALF + 2, WORLD_HALF - 2);
-  e.pos.y = terrainH(e.pos.x, e.pos.z);
+  { const gy = terrainH(e.pos.x, e.pos.z); if (e.pos.y < gy || e.pos.y > gy + 0.56) e.pos.y = gy; } // 스텝업(≤0.55)으로 올라선 바닥판 위에서는 그 높이를 유지 (#375 — 전엔 매 프레임 지면으로 되돌려 바닥에 0.3 m 묻혔다)
 
   // --- 애니메이션 (전환 디바운스: 매 프레임 reset 반복 → 바인드포즈 고정 방지) ---
   if (e.actIdle && e.actRun && !e.oneShot) {
@@ -5863,157 +5878,233 @@ let SPAWN_POINTS = [
 // 오픈월드풍 나무 (Quaternius 개별 GLB) — 침엽(소나무)·활엽(단풍/일반/자작) 혼합 + 고사목 소량
 // (FOREST_TREES 제거 — 숲은 placeCardTree 카드 트리 #280)
 
-// 절차적 고등학교 건물(#178 대형화) — 1층 진입 가능(중앙 현관+복도+교실 7칸),
-// 2~4층 유리창 파사드 매스, 층 밴드·현관 캐노피·옥상 구조물로 "학교"다운 스케일.
-function buildSchoolBuilding(cx, cz) {
-  const L = 68, Dp = 15, FH = 3.6, t = 0.35, FLOORS = 4; // 길이(X)/깊이(Z)/층고/층수
-  const halfL = L / 2, halfD = Dp / 2;
-  const wall = 'plaster';                        // 외벽: 밝은 도색(크림)
-  const zF = cz + halfD, zB = cz - halfD;        // 남(정면 +Z)/북(후면)
-  const entW = 6.5;                              // 중앙 현관 폭
-
-  // 창 개구부를 일정 간격(bay)으로 생성 — 세그먼트 길이/중심 기준
-  const evenWins = (len, spacing, w) => {
-    const n = Math.max(0, Math.floor((len - 2.5) / spacing));
-    const span = n * spacing, out = [];
-    for (let i = 0; i <= n; i++) out.push({ at: -span / 2 + i * spacing, w });
-    return out;
-  };
-  // 폐교 창 변형 (#286): 멀쩡(유리+멀리언) / 깨짐(어두운 배킹+유리 파편+그을음) / 판자 막음. 시드 결정론. n = 바깥 법선 부호(+z 정면 1, 후면 -1)
-  const b = batchBuilder(), rs = mulberry32(2026);
-  const glaze = (wx, wz, axis, openings, baseY, n = 1) => {
-    const gy = baseY + 1.5, gh = 1.0; // addWindowWall 개구부(sill 1.0~lintel 2.0) 대응
-    for (const o of openings) {
-      const r = rs(), cxw = wx + o.at, out = wz + n * (t / 2 + 0.03);
-      if (r < 0.5) { b.box(cxw, gy, wz, o.w, gh, 0.06, MAT.glass, false); b.box(cxw, gy, wz, 0.07, gh, 0.13, MAT.woodDark, false); }
-      else if (r < 0.78) { // 깨짐
-        b.box(cxw, gy, wz - n * 0.16, o.w - 0.1, gh, 0.05, MAT.interior, false);
-        b.box(cxw - o.w * 0.3, gy - 0.28, wz, o.w * 0.34, 0.4, 0.06, MAT.glass, false); b.box(cxw + o.w * 0.34, gy + 0.3, wz, o.w * 0.26, 0.36, 0.06, MAT.glass, false);
-        if (rs() < 0.5) for (let k = 0; k < 4; k++) b.box(cxw, gy + 0.56 + k * 0.13, out + n * k * 0.002, o.w + 0.3 - k * k * 0.16, 0.13, 0.02, MAT.sootSoft, false); // 그을음: 위로 갈수록 좁아지는 반투명 띠 (#369 — 전엔 새까만 직사각형 판)
-      } else { // 판자
-        b.box(cxw, gy, wz - n * 0.16, o.w - 0.1, gh, 0.05, MAT.interior, false);
-        for (let k = 0; k < 3; k++) b.box(cxw + (rs() - 0.5) * 0.2, gy - 0.34 + k * 0.34, out, o.w + 0.3, 0.17, 0.05, MAT.woodDark, false);
-      }
-      if (rs() < 0.25) b.box(cxw + (rs() - 0.5) * 0.6, gy - 0.95, out - n * 0.01, 0.1, 0.8, 0.03, MAT.rust, false); // 창턱 아래 녹물
-      b.box(cxw, gy - gh / 2 - 0.06, out + n * 0.06, o.w + 0.36, 0.1, 0.2, 'concrete', false);  // (#369) 창대 — 민무늬 벽에 그림자 선을 만든다
-      b.box(cxw, gy + gh / 2 + 0.07, out + n * 0.03, o.w + 0.24, 0.12, 0.12, MAT.schoolBase, false); // 인방
+// ── 숲속 고등학교 캠퍼스 (#375) ── 옛 일자형 교사(1층만 진입, 빈 교실)를 걷어내고 새로 지었다.
+// 본관 = ㄷ자(중앙동 x±27·z-14..-2 + 양 날개 x±27..39·z-14..20), 남쪽으로 열린 안뜰. 1·2층 진입 + 옥상. 계단실은 북서·북동 모서리.
+// 좌표: +z 가 남(정면). 층 바닥 윗면 F1=0.3 / F2=3.9 / 옥상 RF=7.5. 벽 두께 0.3. 진입 층의 창은 전부 실제 개구부다(유리·창살은 hit:false 장식).
+const SCH = { F1: 0.3, F2: 3.9, RF: 7.5, FH: 3.6, T: 0.3, rooms: [], doors: [], stairs: [], wins: [] };
+// 개구부 있는 벽: axis 'x' = x 방향으로 긴 벽(z=fixed). ops = [{ at, w, sill, top }] (at = 축 좌표 절대값, sill/top = 층 바닥 기준 높이)
+function schWall(b, axis, fixed, a0, a1, y0, h, mat, ops = []) {
+  if (a0 > a1) [a0, a1] = [a1, a0]; // 뒤집힌 범위로 부르면 벽이 통째로 사라졌다(동쪽 날개) — 여기서 바로잡는다
+  const T = SCH.T, put = (s0, s1, yy, hh) => { const len = s1 - s0; if (len < 0.05 || hh < 0.05) return; const mid = (s0 + s1) / 2;
+    if (axis === 'x') b.box(mid, y0 + yy + hh / 2, fixed, len, hh, T, mat); else b.box(fixed, y0 + yy + hh / 2, mid, T, hh, len, mat); };
+  let cur = a0;
+  for (const o of [...ops].sort((p, q) => p.at - q.at)) { const s0 = Math.max(a0, o.at - o.w / 2), s1 = Math.min(a1, o.at + o.w / 2); if (s1 <= s0) continue;
+    put(cur, s0, 0, h); if (o.sill > 0) put(s0, s1, 0, o.sill); put(s0, s1, o.top, h - o.top); cur = s1; }
+  put(cur, a1, 0, h);
+}
+const schWin = (a0, a1, sp = 3.6, w = 2.0, skip = []) => { const n = Math.max(1, Math.floor((a1 - a0 - 1.2) / sp)), st = (a1 - a0) / n, out = [];
+  for (let i = 0; i < n; i++) { const at = a0 + st * (i + 0.5); if (!skip.some(([p, q]) => at > p && at < q)) out.push({ at, w, sill: 1.0, top: 2.5, win: true }); } return out; };
+const schDoor = (at, w = 1.4) => ({ at, w, sill: 0, top: 2.3, door: true });
+function buildSchoolCampus() {
+  const b = batchBuilder(), d = batchBuilder({ hit: false }), { F1, F2, RF, FH, T } = SCH, rnd = mulberry32(375);
+  SCH.rooms.length = SCH.doors.length = SCH.stairs.length = SCH.wins.length = 0;
+  const wall = 'plaster', inner = 'plasterbroken', mx = (sx, a, c) => [Math.min(sx * a, sx * c), Math.max(sx * a, sx * c)];
+  // 창 장식(틀·창살·유리 조각·판자) — 전부 d(hit:false). face = 바깥 법선 방향(+1/-1), outer = 외벽 여부
+  const dress = (axis, fixed, y0, ops, face, outer) => { for (const o of ops) {
+    if (o.door) { if (outer) { const px = axis === 'x' ? o.at : fixed + face * 0.45, pz = axis === 'x' ? fixed + face * 0.45 : o.at; b.box(px, y0 + 2.42, pz, axis === 'x' ? o.w + 0.8 : 0.9, 0.12, axis === 'x' ? 0.9 : o.w + 0.8, MAT.schoolBase, false); } continue; }
+    const P = (u, y, off, lu, lh, lo, m, bb = d) => axis === 'x' ? bb.box(o.at + u, y0 + y, fixed + face * off, lu, lh, lo, m, false) : bb.box(fixed + face * off, y0 + y, o.at + u, lo, lh, lu, m, false);
+    P(0, o.sill - 0.05, 0.2, o.w + 0.3, 0.1, 0.22, outer ? 'concrete' : MAT.schoolBase, b);                         // 창대(바깥으로 돌출)
+    if (outer) P(0, o.top + 0.06, 0.18, o.w + 0.2, 0.12, 0.1, MAT.schoolBase, b);                                    // 인방
+    const r = rnd(), hh = o.top - o.sill; if (outer) SCH.wins.push({ axis, fixed, at: o.at, y: y0 + o.sill + hh / 2, face, kind: r < 0.45 ? 'glass' : r < 0.75 ? 'broken' : r < 0.88 ? 'board' : 'open' });
+    for (const u of [-o.w / 2 + 0.03, o.w / 2 - 0.03]) P(u, o.sill + hh / 2, 0, 0.06, hh, 0.08, MAT.winFrame); P(0, o.top - 0.03, 0, o.w, 0.06, 0.08, MAT.winFrame); // 틀
+    if (r < 0.45) { P(0, o.sill + hh / 2, 0, 0.05, hh, 0.07, MAT.winFrame); P(-o.w / 4, o.sill + hh / 2, 0, o.w / 2 - 0.1, hh - 0.08, 0.02, MAT.glass); P(o.w / 4, o.sill + hh / 2, 0, o.w / 2 - 0.1, hh - 0.08, 0.02, MAT.glass); } // 멀쩡
+    else if (r < 0.75) { P(0, o.sill + hh / 2, 0, 0.05, hh, 0.07, MAT.winFrame); P(-o.w * 0.3, o.sill + 0.3, 0, o.w * 0.3, 0.55, 0.02, MAT.glass); P(o.w * 0.33, o.top - 0.35, 0, o.w * 0.22, 0.5, 0.02, MAT.glass); }      // 깨짐(조각만)
+    else if (outer && r < 0.88) { for (let k = 0; k < 3; k++) P((rnd() - 0.5) * 0.15, o.sill + 0.3 + k * 0.45, 0.19, o.w + 0.25, 0.2, 0.04, MAT.woodDark, b); }                                                      // 판자(사이로 보인다)
+  } };
+  // 층 하나의 벽체 — 1·2층 공통 평면. y0 = 그 층 바닥 윗면
+  const storey = (y0, lv) => {
+    const g = lv === 1, W = (axis, fixed, a0, a1, mat, ops, face, outer) => { schWall(b, axis, fixed, a0, a1, y0, FH, mat, ops); dress(axis, fixed, y0, ops, face, outer); for (const o of ops) if (o.door) SCH.doors.push({ axis, fixed, at: o.at, w: o.w, y: y0, lv }); };
+    // 외벽
+    W('x', -14, -39, 39, wall, [...schWin(-39, 39, 3.9, 2.0, g ? [[-34, -31], [31, 34], [-1.6, 1.6]] : []), ...(g ? [schDoor(-32.5), schDoor(32.5), schDoor(0, 1.8)] : [])], -1, true);          // 북
+    for (const sx of [-1, 1]) {
+      W('z', sx * 39, -14, 20, wall, [...schWin(-5, 20, 4.1, 2.0, g && sx === 1 ? [[14, 18]] : []), ...(g && sx === 1 ? [schDoor(16, 1.8)] : []), { at: -10.3, w: 1.6, sill: 1.6, top: 2.6, win: true }], sx, true); // 서·동 바깥
+      W('x', 20, ...mx(sx, 39, 27), wall, [...schWin(Math.min(sx * 39, sx * 30), Math.max(sx * 39, sx * 30), 4.4, 2.0), ...(g ? [schDoor(sx * 28.5, 1.6)] : [{ at: sx * 28.5, w: 1.6, sill: 1.0, top: 2.5, win: true }])].map((o) => o), 1, true); // 날개 남단
+      W('z', sx * 27, -2, 20, wall, [...schWin(-2, 20, 3.6, 1.8, g ? [[7.5, 10.5]] : []), ...(g ? [schDoor(9, 1.8)] : [])], -sx, true);                                                              // 안뜰 쪽 날개 벽
+      W('z', sx * 27, -14, -5, inner, [], -sx, false);                                                                                                                                             // 끝 교실 ↔ 날개 복도
+      W('z', sx * 30, -5, 20, inner, [schDoor(-0.8, 1.3), schDoor(7.5, 1.3), schDoor(15.8, 1.3)], sx, false);                                                                                      // 날개 복도 ↔ 특별실
+      W('x', -5, ...mx(sx, 39, 30), inner, [], 1, false);                                                                                                                                           // 계단 홀 ↔ 특별실 1
+      for (const z of [3.33, 11.67]) W('x', z, ...mx(sx, 39, 30), inner, [], 1, false);
+      for (const x of [15.75, 4.5]) W('z', sx * x, -14, -5, inner, [], sx, false);                                                                                                                 // 교실 칸막이
+      W('x', -5, Math.min(sx * 27, sx * 4.5), Math.max(sx * 27, sx * 4.5), inner, [sx * 25.2, sx * 17.6, sx * 13.9, sx * 6.3].map((x) => schDoor(x, 1.3)), 1, false);                               // 교실 ↔ 중앙 복도
     }
+    W('x', -2, -27, 27, wall, [...schWin(-27, 27, 3.6, 1.9, g ? [[-2.4, 2.4]] : []), ...(g ? [schDoor(0, 3.2)] : [])], 1, true);                                                                   // 중앙 복도 남벽(안뜰)
   };
-  const bay = 4.4;
-
-  // 기초 플린스 + 실내 바닥
-  addBox(cx, 0.3, cz, L + 1.4, 0.8, Dp + 1.4, 'concrete');
-  addBox(cx, 0.62, cz, L - 0.4, 0.05, Dp - 0.4, 'woodfloor', { collide: false, block: false, shadow: false });
-  // 1층 base 밴드(살짝 짙은 톤 — 학교 특유의 하부 마감)
-  addBox(cx, 0.95, zF, L + 0.5, 1.3, 0.12, MAT.schoolBase, { collide: false, block: false });
-  addBox(cx, 0.95, zB, L + 0.5, 1.3, 0.12, MAT.schoolBase, { collide: false, block: false });
-
-  const winsSideL = evenWins(halfL - entW / 2, bay, 2.6);
-  const centerL = cx - (entW / 2 + (halfL - entW / 2) / 2);
-  const centerR = cx + (entW / 2 + (halfL - entW / 2) / 2);
-  const winsFull = evenWins(L, bay, 2.6);
-
-  // ── 1층 (진입 가능) ──
-  // 정면: 좌우 창벽 + 중앙 현관 개구부
-  addWindowWall(centerL, zF, halfL - entW / 2, FH, 'x', wall, winsSideL); glaze(centerL, zF, 'x', winsSideL, 0, 1);
-  addWindowWall(centerR, zF, halfL - entW / 2, FH, 'x', wall, winsSideL); glaze(centerR, zF, 'x', winsSideL, 0, 1);
-  addBox(cx, FH - 0.35, zF, entW + 0.6, 0.7, t, wall);   // 현관 상인방
-  // 현관 캐노피(한쪽 기둥이 부러져 기운 슬래브 #286) + 기둥 + 계단
-  addBoxRot(cx + 0.3, FH + 0.05 - 1.05, zF + 1.6, entW + 2.4, 0.3, 3.4, 'concrete', { rz: -0.24 }); // 캐노피 — 우측이 1.5m 까지 내려앉음
-  addBox(cx - (entW / 2 + 0.6), FH / 2, zF + 3.0, 0.4, FH, 0.4, 'concrete');                        // 좌측 기둥(온전)
-  addBox(cx + (entW / 2 + 0.6), 0.6, zF + 3.0, 0.4, 1.2, 0.4, 'concrete');                           // 우측 기둥 밑동
-  addBoxRot(cx + entW / 2 + 2.3, 0.22, zF + 4.3, 0.4, 2.0, 0.4, 'concrete', { rz: Math.PI / 2 - 0.15, ry: 0.5 }); // 쓰러진 기둥 토막
-  for (let s = 0; s < 3; s++) addBox(cx, 0.1 + s * 0.0, zF + 1.0 + s * 0.6, entW + 1.6 - s * 0.6, 0.2 + s * 0.2, 1.4 - s * 0.4, 'concrete', { block: false }); // 계단
-  // 후면: 창 밴드
-  addWindowWall(cx, zB, L, FH, 'x', wall, winsFull); glaze(cx, zB, 'x', winsFull, 0, -1);
-  // 양 끝벽(동/서): 비상문
-  addWallWithDoor(cx - halfL, cz, Dp, FH, 'z', wall, halfD - 2.2, 1.4);
-  addWallWithDoor(cx + halfL, cz, Dp, FH, 'z', wall, -(halfD - 2.2), 1.4);
-
-  // 내부: 복도(정면쪽 3.2m) + 교실 7칸 칸막이·교실문
-  const corrZ = cz + halfD - 3.2;
-  const roomCount = 7, roomW = L / roomCount;
-  for (let r = 0; r < roomCount; r++) {
-    const rx = cx - halfL + roomW * (r + 0.5);
-    addWallWithDoor(rx, corrZ, roomW, FH, 'x', wall, roomW * 0.3, 1.3);
-    if (r > 0) addWall(cx - halfL + roomW * r, (cz - halfD + corrZ) / 2, corrZ - (cz - halfD), FH, 'z', wall);
+  storey(F1, 1); storey(F2, 2);
+  // 바닥판·옥상판 (계단 구멍을 피해 사각형으로 나눠 깐다). 1층 = 기단(0~F1)
+  const slab = (x0, x1, z0, z1, top, th, mat = 'concrete') => { b.box((x0 + x1) / 2, top - th / 2, (z0 + z1) / 2, x1 - x0, th, z1 - z0, mat); if (top > 1) b.box((x0 + x1) / 2, top - th - 0.015, (z0 + z1) / 2, x1 - x0 - 0.02, 0.03, z1 - z0 - 0.02, MAT.ceilingLight, false); }; // 위층 판 밑에는 밝은 천장 마감(판 밑면은 햇빛이 안 닿아 검게 보인다)
+  slab(-27, 27, -14, -2, F1, 0.3); for (const sx of [-1, 1]) slab(Math.min(sx * 39, sx * 27), Math.max(sx * 39, sx * 27), -14, 20, F1, 0.3);
+  slab(-27, 27, -14, -2, F2, 0.25); slab(-27, 27, -14, -2, RF, 0.3);
+  for (const sx of [-1, 1]) {
+    slab(...mx(sx, 39, 27), -8.0, 20, F2, 0.25); slab(...mx(sx, 36.9, 27), -14, -8.0, F2, 0.25); slab(...mx(sx, 39, 36.9), -14, -12.4, F2, 0.25);          // 2층: 계단 1 구멍(x 38.85..36.9, z -12.4..-8)
+    slab(...mx(sx, 39, 27), -8.2, 20, RF, 0.3); slab(...mx(sx, 35.0, 27), -14, -8.2, RF, 0.3); slab(...mx(sx, 39, 36.9), -14, -8.2, RF, 0.3); slab(...mx(sx, 36.9, 35.0), -14, -12.4, RF, 0.3); // 옥상: 계단 2 구멍
+    // 계단: 12단 × (0.3 높이, 0.35 깊이). 1번(바깥 레인) 1층 남→북 오름, 2번(안쪽 레인) 2층 북→남 오름. 단은 그 층 바닥부터 채운 기둥
+    const lane = (a, c, y0, zs, dir, lv) => { for (let i = 0; i < 12; i++) { const top = y0 + 0.3 * (i + 1), zc = zs + dir * 0.35 * (i + 0.5); b.box((sx * a + sx * c) / 2, y0 + (top - y0) / 2, zc, Math.abs(a - c), top - y0, 0.35, 'concrete'); }
+      SCH.stairs.push({ x: (sx * a + sx * c) / 2, z0: zs, z1: zs + dir * 4.2, y0, y1: y0 + 3.6, lv }); };
+    lane(38.7, 37.0, F1, -8.2, -1, 1); lane(36.8, 35.1, F2, -12.4, 1, 2);
+    b.box(sx * 36.9, F1 + 1.0, -10.3, 0.12, 2.0, 4.2, MAT.schoolBase, false);                                                                               // 레인 사이 난간벽(장식)
+    // 옥상 계단실(구멍 위 오두막): 서·동·북 벽 + 지붕, 남쪽으로 나온다
+    b.box(sx * 37.05, RF + 1.25, -10.4, 0.25, 2.5, 4.6, wall); b.box(sx * 34.85, RF + 1.25, -10.4, 0.25, 2.5, 4.6, wall); b.box(sx * 35.95, RF + 1.25, -12.6, 2.45, 2.5, 0.25, wall);
+    b.box(sx * 35.95, RF + 2.6, -10.3, 2.9, 0.2, 5.0, MAT.roof, false);
   }
-  addBox(cx, FH + 0.12, cz, L + 0.6, 0.24, Dp + 0.6, 'concrete', { collide: false }); // 1층 천장
-
-  // ── 2~4층: 유리창 파사드(진입 불가 매스) + 층 밴드 ──
-  for (let f = 1; f < FLOORS; f++) {
-    const by = FH * f;
-    addWindowWall(cx, zF, L, FH, 'x', wall, winsFull, by); glaze(cx, zF, 'x', winsFull, by, 1);
-    addWindowWall(cx, zB, L, FH, 'x', wall, winsFull, by); glaze(cx, zB, 'x', winsFull, by, -1);
-    addBox(cx - halfL, by + FH / 2, cz, t, FH, Dp, wall, { collide: false });
-    addBox(cx + halfL, by + FH / 2, cz, t, FH, Dp, wall, { collide: false });
-    addBox(cx, by + FH + 0.12, cz, L + 0.6, 0.24, Dp + 0.6, 'concrete', { collide: false });
+  // 파라펫(옥상 엄폐, 높이 1.0) — 바깥 둘레 + 안뜰 둘레
+  const par = (axis, fixed, a0, a1) => axis === 'x' ? b.box((a0 + a1) / 2, RF + 0.5, fixed, a1 - a0, 1.0, 0.3, wall) : b.box(fixed, RF + 0.5, (a0 + a1) / 2, 0.3, 1.0, a1 - a0, wall);
+  par('x', -14, -39, 39); par('x', -2, -27, 27); for (const sx of [-1, 1]) { par('z', sx * 39, -14, 20); par('z', sx * 27, -2, 20); par('x', 20, ...mx(sx, 39, 27)); }
+  // ══ 실내 ══ 가구 콜라이더는 0.6 m 이상만(0.3~0.55 는 '계단'으로 올라타 버린다). 낮은 것은 콜라이더 없이 둔다.
+  const M = MAT, col = (x, z, w, dd, y0, h) => colliders.push(axisCollider(x - w / 2, x + w / 2, y0, y0 + h, z - dd / 2, z + dd / 2));
+  const solid = (x, y0, z, w, h, dd, m) => { b.box(x, y0 + h / 2, z, w, h, dd, m, h >= 0.6); };   // 바닥에 놓인 덩어리(높이 0.6 이상이면 충돌)
+  const desk = (x, z, y0, face, ax = 'x') => { // face = 의자가 놓이는 반대쪽(칠판 방향) 부호. ax = 책상이 바라보는 축
+    if (rnd() < 0.1) { b.box(x, y0 + 0.24, z, ax === 'x' ? 0.05 : 0.62, 0.48, ax === 'x' ? 0.62 : 0.05, M.deskTop, false); return; } // 넘어진 책상
+    x += (rnd() - 0.5) * 0.3; z += (rnd() - 0.5) * 0.3;
+    const bx = (u, y, v, lu, lh, lv, m) => ax === 'x' ? b.box(x + u, y0 + y, z + v, lu, lh, lv, m, false) : b.box(x + v, y0 + y, z + u, lv, lh, lu, m, false);
+    bx(0, 0.72, 0, 0.45, 0.04, 0.62, M.deskTop); for (const s of [-1, 1]) bx(0, 0.36, s * 0.28, 0.4, 0.7, 0.03, M.deskMetal);
+    if (ax === 'x') col(x, z, 0.45, 0.62, y0, 0.74); else col(x, z, 0.62, 0.45, y0, 0.74);
+    if (rnd() < 0.78) { const u = -face * 0.5; bx(u, 0.42, 0, 0.38, 0.04, 0.38, M.deskTop); bx(u - face * 0.18, 0.66, 0, 0.03, 0.44, 0.36, M.deskTop); for (const s of [-1, 1]) bx(u, 0.21, s * 0.17, 0.34, 0.42, 0.03, M.deskMetal); }
+  };
+  const board = (ax, fixed, at, y0, face, len = 4.4) => { const P = (off, y, lu, lh, lo, m) => ax === 'x' ? b.box(fixed + face * off, y0 + y, at, lo, lh, lu, m, false) : b.box(at, y0 + y, fixed + face * off, lu, lh, lo, m, false);
+    P(0.19, 1.65, len, 1.25, 0.05, M.blackboard); P(0.2, 2.31, len + 0.16, 0.07, 0.07, M.deskTop); P(0.2, 0.99, len + 0.16, 0.07, 0.07, M.deskTop); P(0.24, 0.95, len * 0.9, 0.04, 0.12, M.deskMetal); };
+  const lockers = (ax, fixed, a0, a1, y0, face, m = M.lockerGray, h = 1.8) => { const len = a1 - a0, mid = (a0 + a1) / 2;
+    if (ax === 'x') { b.box(mid, y0 + h / 2, fixed + face * 0.36, len, h, 0.42, m); for (let u = a0 + 0.4; u < a1 - 0.1; u += 0.4) d.box(u, y0 + h / 2, fixed + face * 0.575, 0.02, h - 0.1, 0.02, M.deskMetal, false); }
+    else { b.box(fixed + face * 0.36, y0 + h / 2, mid, 0.42, h, len, m); for (let u = a0 + 0.4; u < a1 - 0.1; u += 0.4) d.box(fixed + face * 0.575, y0 + h / 2, u, 0.02, h - 0.1, 0.02, M.deskMetal, false); } };
+  const shelf = (x, z, y0, len, ax, books = true) => { const w = ax === 'x' ? len : 0.45, dd = ax === 'x' ? 0.45 : len; b.box(x, y0 + 1.0, z, w, 2.0, dd, M.deskTop);
+    if (books) for (let lv = 0; lv < 4; lv++) for (const s of [-1, 1]) { let u = -len / 2 + 0.15; while (u < len / 2 - 0.3) { const l = 0.25 + rnd() * 0.6, m = M.books[Math.floor(rnd() * M.books.length)], y = y0 + 0.3 + lv * 0.48;
+        if (rnd() < 0.8) (ax === 'x' ? d.box(x + u + l / 2, y, z + s * 0.235, l, 0.3, 0.03, m, false) : d.box(x + s * 0.235, y, z + u + l / 2, 0.03, 0.3, l, m, false)); u += l + 0.04; } } };
+  const litter = (x0, x1, z0, z1, y0, n) => { for (let i = 0; i < n; i++) { const x = x0 + rnd() * (x1 - x0), z = z0 + rnd() * (z1 - z0), r = rnd();
+      if (r < 0.5) d.box(x, y0 + 0.012, z, 0.21 + rnd() * 0.1, 0.006, 0.3, M.paper, false); else if (r < 0.85) d.box(x, y0 + 0.02, z, 0.6, 0.03, 0.6, M.ceilingLight, false); else d.box(x, y0 + 0.06, z, 0.3 + rnd() * 0.4, 0.12, 0.25 + rnd() * 0.3, M.concreteDark, false); } };
+  const classroom = (x0, x1, y0, flip) => { const bw = flip ? x1 : x0, f = flip ? -1 : 1; // 칠판은 한쪽 칸막이 벽, 책상은 그쪽을 본다
+    b.box((x0 + x1) / 2, y0 + 0.011, -9.5, x1 - x0 - T, 0.022, 9 - T, 'woodfloor', false);
+    board('x', bw, -9.5, y0, f); solid(bw + f * 1.7, y0, -9.5, 0.7, 0.78, 1.5, M.deskTop); solid(bw + f * 1.0, y0, -6.6, 0.5, 1.1, 0.5, M.deskTop);
+    for (let c = 0; c < 5; c++) for (let r = 0; r < 4; r++) if (rnd() < 0.9) desk(bw + f * (3.4 + c * 1.45), -12.5 + r * 1.85, y0, -f);
+    lockers('z', flip ? x0 + T / 2 : x1 - T / 2, -12.8, -6.8, y0, -f, M.lockerBlue, 1.2); litter(x0 + 0.5, x1 - 0.5, -13.5, -5.5, y0, 14);
+    SCH.rooms.push({ kind: 'class', x: (x0 + x1) / 2, z: -9.5, y: y0 }); };
+  for (const [y0, lv] of [[F1, 1], [F2, 2]]) {
+    classroom(-27, -15.75, y0, false); classroom(-15.75, -4.5, y0, true); classroom(4.5, 15.75, y0, false); classroom(15.75, 27, y0, true);
+    // 중앙 복도: 사물함(교실 문 사이), 게시판, 소화기함, 바닥 잔해
+    for (const sx of [-1, 1]) { lockers('x', -5 + T / 2, ...mx(sx, 8, 12.2), y0, 1); lockers('x', -5 + T / 2, ...mx(sx, 19.3, 23.6), y0, 1);
+      b.box(sx * 15.7, y0 + 1.5, -4.78, 1.8, 1.0, 0.05, M.corkboard, false); b.box(sx * 21.4, y0 + 0.9, -2.27, 0.35, 0.6, 0.2, M.fireRed, false);
+      lockers('z', sx * 30 - sx * T / 2, 1.2, 5.8, y0, -sx); lockers('z', sx * 30 - sx * T / 2, 9.6, 13.9, y0, -sx); b.box(sx * 29.78, y0 + 1.5, -3, 0.05, 1.0, 1.6, M.corkboard, false); }
+    litter(-26, 26, -4.6, -2.4, y0, 40); for (const sx of [-1, 1]) litter(Math.min(sx * 27.3, sx * 29.7), Math.max(sx * 27.3, sx * 29.7), -13, 19, y0, 26);
+    // 중앙 홀: 1층 = 현관(신발장 4줄 + 트로피장), 2층 = 휴게 공간(소파·자판기)
+    b.box(0, y0 + 0.011, -9.5, 9 - T, 0.022, 9 - T, 'paving', false);
+    if (lv === 1) { for (const x of [-3.7, -2.2, 2.2, 3.7]) { solid(x, y0, -9.6, 0.4, 1.3, 5.2, M.deskTop); for (let k = 0; k < 9; k++) d.box(x, y0 + 0.65, -12 + k * 0.6, 0.42, 1.2, 0.02, M.deskMetal, false); }
+      solid(-2.9, y0, -13.5, 2.6, 1.9, 0.5, M.deskTop); d.box(-2.9, y0 + 1.2, -13.23, 2.3, 1.2, 0.02, M.glass, false); for (let k = 0; k < 4; k++) d.box(-3.8 + k * 0.6, y0 + 1.0, -13.4, 0.14, 0.3 + rnd() * 0.25, 0.14, M.trophy, false); }
+    else { solid(-3.2, y0, -12.6, 2.4, 0.75, 0.9, M.sofa); b.box(-3.2, y0 + 0.95, -13.0, 2.4, 0.5, 0.25, M.sofa, false); solid(3.4, y0, -11.6, 0.9, 0.75, 2.4, M.sofa); solid(3.9, y0, -6.2, 0.8, 1.85, 0.9, M.vending); d.box(3.48, y0 + 1.2, -6.2, 0.02, 1.1, 0.7, M.skylight, false); solid(0.2, y0, -10.2, 1.2, 0.62, 0.7, M.deskTop); }
+    SCH.rooms.push({ kind: 'hall', x: 0, z: -9.5, y: y0 });
+    // 날개 특별실 (복도 쪽 문 앞 1.6 m 는 비운다 → |x| ≥ 31.8)
+    for (const sx of [-1, 1]) { const kinds = lv === 1 ? (sx < 0 ? ['lab', 'library', 'art'] : ['staff', 'infirm', 'cafe']) : (sx < 0 ? ['pc', 'class2', 'store'] : ['art', 'class2', 'store']);
+      [[-5, 3.33], [3.33, 11.67], [11.67, 20]].forEach(([z0, z1], i) => { const k = kinds[i], xa = Math.min(sx * 30, sx * 39) + T / 2, xb = Math.max(sx * 30, sx * 39) - T / 2, xm = sx * 35.3, zm = (z0 + z1) / 2, ox = sx * 38.75; // ox = 바깥벽 안쪽 면
+        b.box(sx * 34.5, y0 + 0.011, zm, 9 - T, 0.022, z1 - z0 - T, k === 'lab' || k === 'cafe' || k === 'infirm' ? 'paving' : 'woodfloor', false); litter(xa + 0.4, xb - 0.4, z0 + 0.5, z1 - 0.5, y0, 10);
+        if (k === 'lab') { for (const z of [z0 + 1.9, z0 + 4.2, z0 + 6.5]) { solid(xm, y0, z, 5.0, 0.9, 1.0, M.labTop); b.box(xm, y0 + 0.92, z, 5.1, 0.05, 1.1, M.blackboard, false); for (const u of [-1.6, 1.6]) { d.box(xm + u, y0 + 0.97, z, 0.5, 0.05, 0.4, M.steel, false); d.cyl(xm + u, y0 + 1.15, z - 0.3, 0.02, 0.02, 0.35, M.steel, 5, false); }
+              for (let q = 0; q < 5; q++) if (rnd() < 0.6) d.cyl(xm - 2 + q + rnd() * 0.3, y0 + 1.05, z + (rnd() - 0.5) * 0.5, 0.05, 0.06, 0.2, M.glass, 6, false); for (let q = 0; q < 4; q++) if (rnd() < 0.7) b.cyl(xm - 1.9 + q * 1.25, y0 + 0.25, z + 0.85, 0.17, 0.17, 0.5, M.deskMetal, 8, false); }
+          board('z', z0, xm, y0, 1, 4.0); }
+        else if (k === 'library') { for (const u of [1.9, 3.5, 5.1, 6.7]) shelf(sx * (30 + u) , zm + (rnd() < 0.25 ? 0.3 : 0), y0, 5.6, 'z'); solid(sx * 31.9, y0, z0 + 1.2, 1.4, 0.75, 0.8, M.deskTop); for (let q = 0; q < 14; q++) d.box(xa + 0.6 + rnd() * 7.5, y0 + 0.03 + rnd() * 0.05, z0 + 0.6 + rnd() * 7, 0.22, 0.05, 0.3, M.books[q % M.books.length], false); }
+        else if (k === 'art') { solid(xm, y0, zm, 3.2, 0.78, 1.5, M.deskTop); solid(ox - sx * 0.55, y0, z0 + 1.6, 0.7, 1.15, 1.6, M.piano); b.box(ox - sx * 1.0, y0 + 0.75, z0 + 1.6, 0.3, 0.06, 1.4, M.ceilingLight, false);
+          for (let q = 0; q < 5; q++) { const ex = xm - 3 + q * 1.5 + rnd() * 0.4, ez = z1 - 1.5 - rnd() * 1.2; b.box(ex, y0 + 0.8, ez, 0.05, 1.6, 0.05, M.deskTop, false); b.box(ex, y0 + 1.15, ez + 0.06, 0.6, 0.8, 0.03, q % 2 ? M.paper : M.books[q % 4], false); } shelf(xm, z0 + T / 2 + 0.3, y0, 4.5, 'x', false); }
+        else if (k === 'staff') { for (const z of [z0 + 2.2, z0 + 5.6]) for (const u of [-2.4, -0.8, 0.8, 2.4]) { solid(xm + u, y0, z, 1.4, 0.74, 0.75, M.deskTop); d.box(xm + u, y0 + 0.98, z - 0.15, 0.5, 0.36, 0.04, M.blackboard, false); if (rnd() < 0.7) b.box(xm + u, y0 + 0.45, z + 0.75, 0.45, 0.9, 0.45, M.sofa, false); b.box(xm + u + 0.72, y0 + 0.6, z, 0.04, 1.2, 0.9, M.corkboard, false); }
+          lockers('x', z1 - T / 2, xa + 0.6, xb - 0.6, y0, -1, M.lockerGray, 1.9); }
+        else if (k === 'infirm') { for (const z of [z0 + 1.6, z0 + 4.2, z0 + 6.8]) { solid(ox - sx * 1.25, y0, z, 2.0, 0.6, 0.95, M.winFrame); b.box(ox - sx * 1.25, y0 + 0.66, z, 2.0, 0.14, 0.9, M.bedWhite, false); b.box(ox - sx * 2.05, y0 + 0.78, z, 0.4, 0.1, 0.6, M.paper, false);
+            for (const zz of [z - 0.75, z + 0.75]) d.cyl(ox - sx * 2.4, y0 + 1.0, zz, 0.02, 0.02, 2.0, M.winFrame, 5, false); d.box(ox - sx * 1.3, y0 + 2.0, z - 0.75, 2.2, 0.03, 0.03, M.winFrame, false); if (rnd() < 0.7) d.box(ox - sx * 1.3, y0 + 1.25, z - 0.75, 2.0, 1.5, 0.02, M.curtain, false); }
+          solid(sx * 32.2, y0, z1 - 0.9, 1.3, 0.75, 0.7, M.deskTop); solid(sx * 34.4, y0, z1 - 0.55, 1.0, 1.8, 0.45, M.winFrame); d.box(sx * 34.4, y0 + 1.3, z1 - 0.79, 0.9, 0.9, 0.02, M.glass, false); }
+        else if (k === 'cafe') { for (const z of [z0 + 1.7, z0 + 4.0]) { solid(sx * 34.6, y0, z, 5.2, 0.74, 0.8, M.deskTop); for (const s of [-1, 1]) b.box(sx * 34.6, y0 + 0.21, z + s * 0.68, 5.2, 0.42, 0.32, M.deskMetal, false); }
+          solid(sx * 33.2, y0, z1 - 0.75, 5.6, 1.0, 0.8, M.steel); for (let q = 0; q < 5; q++) d.box(sx * 31 + sx * q * 1.0, y0 + 1.03, z1 - 0.75, 0.45, 0.04, 0.32, M.trayOrange, false); }
+        else if (k === 'pc') { for (const z of [z0 + 1.6, z0 + 3.5, z0 + 5.4, z0 + 7.2]) { solid(sx * 35, y0, z, 6.0, 0.74, 0.7, M.deskTop); for (let q = 0; q < 5; q++) if (rnd() < 0.75) { d.box(sx * 35 - 2.4 + q * 1.2, y0 + 0.98, z - 0.1, 0.45, 0.36, 0.05, M.blackboard, false); d.box(sx * 35 - 2.4 + q * 1.2, y0 + 0.78, z - 0.1, 0.12, 0.08, 0.12, M.deskMetal, false); } } }
+        else if (k === 'class2') { board('z', z0, xm, y0, 1, 4.0); for (let c = 0; c < 5; c++) for (let r = 0; r < 3; r++) if (rnd() < 0.85) desk(sx * 32.4 + sx * c * 1.35, z0 + 3.0 + r * 1.8, y0, 1, 'z'); }
+        else if (k === 'store') { for (let q = 0; q < 7; q++) { const px = xa + 1 + rnd() * 6.5, pz = z0 + 1 + rnd() * 6.2, hh = 0.7 + rnd() * 1.0; if (Math.abs(px - sx * 30) < 2.2) continue; solid(px, y0, pz, 0.9 + rnd() * 0.6, hh, 0.9 + rnd() * 0.5, q % 3 ? M.cardboard : M.deskTop); if (rnd() < 0.5) b.box(px, y0 + hh + 0.2, pz, 0.6, 0.4, 0.6, M.cardboard, false); } shelf(xm, z1 - T / 2 - 0.3, y0, 5.5, 'x', false); }
+        SCH.rooms.push({ kind: k, x: sx * 34.5, z: zm, y: y0 }); }); }
   }
-  // 층 구분 밴드(정면·후면 수평선 — 학교다운 수평 분절)
-  for (let f = 1; f < FLOORS; f++) {
-    addBox(cx, FH * f, zF, L + 0.4, 0.25, 0.18, MAT.schoolBase, { collide: false, block: false });
-    addBox(cx, FH * f, zB, L + 0.4, 0.25, 0.18, MAT.schoolBase, { collide: false, block: false });
-  }
-
-  // ── 옥상: 파라펫 + 계단탑(penthouse) + 물탱크 ──
-  const roofY = FH * FLOORS;
-  { // (#369) 창 사이 벽기둥 + 홈통 — 68 m 민무늬 벽을 칸으로 나눈다. 정면 1층 현관 폭은 비운다
-    const span = Math.floor((L - 2.5) / bay) * bay;
-    for (let i = 0; i * bay < span - 0.01; i++) { const px = cx - span / 2 + (i + 0.5) * bay;
-      b.box(px, (FH + roofY) / 2, zF + t / 2 + 0.07, 0.5, roofY - FH, 0.14, wall, false); // 정면 1층은 창 배치가 달라(현관 좌우로 따로 정렬) 기둥이 사격 개구부를 가린다 → 2층부터
-      b.box(px, roofY / 2 + 0.3, zB - t / 2 - 0.07, 0.5, roofY - 0.6, 0.14, wall, false); }
-    for (const q of [-1, 1]) for (const [z, n] of [[zF, 1], [zB, -1]]) { const px = cx + q * (halfL - 0.9), pz = z + n * (t / 2 + 0.12);
-      b.cyl(px, roofY / 2 + 0.4, pz, 0.07, 0.07, roofY - 0.4, MAT.lampPole, 6, false); for (let y = 1.6; y < roofY; y += 2.6) b.box(px, y, pz - n * 0.05, 0.22, 0.06, 0.14, MAT.lampPole, false); }
-  }
-  for (const [ox, oz, w, d] of [[0, halfD, L + 0.6, 0.35], [0, -halfD, L + 0.6, 0.35], [-halfL, 0, 0.35, Dp + 0.6], [halfL, 0, 0.35, Dp + 0.6]]) {
-    addBox(cx + ox, roofY + 0.6, cz + oz, w, 1.2, d, 'concrete', { collide: false });
-  }
-  addBox(cx - halfL + 8, roofY + 1.7, cz, 6, 3.4, 6, wall, { collide: false });        // 계단탑
-  addBox(cx + halfL - 10, roofY + 2.3, cz - 1, 3.2, 4.6, 3.2, MAT.rust, { collide: false }); // 물탱크(사각, 녹슴 #286)
-
-  // ── 폐교 마감 (#286): 그라임 밴드 · 덩굴 · 교실 책상 · 담장/교문 · 게양대 · 골대 · 벤치 · 운동장 잡초 ──
-  const dark = MAT.concreteDark;
-  for (const [x0, x1] of [[-halfL - 0.7, -entW / 2 - 0.9], [entW / 2 + 0.9, halfL + 0.7]]) b.box(cx + (x0 + x1) / 2, 0.36, zF + 0.73, x1 - x0, 0.62, 0.05, dark, false); // 정면 플린스 그라임(현관 제외)
-  b.box(cx, 0.36, zB - 0.73, L + 1.4, 0.62, 0.05, dark, false);
-  for (const sx of [-1, 1]) b.box(cx + sx * (halfL + 0.73), 0.36, cz, 0.05, 0.62, Dp + 1.4, dark, false);
-  { const iv = forestBatch(), im = canopyMat('ivy_card'); // 덩굴 카드(벽면 proud 8cm): 코너·후면 위주, 일부는 2층까지
-    for (const [x, z, n, s, y] of [[cx - halfL + 4, zF, 1, 5.5, 0], [cx + 20, zF, 1, 4.2, 0], [cx - 12, zB, -1, 6.5, 0], [cx + 26, zB, -1, 5, 0], [cx + 6, zB, -1, 4, 3.2], [cx - 30, zB, -1, 4.5, 0]]) {
-      const c = 0.6 + rs() * 0.3; iv.put(x, z, 'ivy_card', im, cardGeo(new THREE.Vector3(x, y + s / 2 + 0.15, z + n * (t / 2 + 0.08)), s, s, n > 0 ? 0 : Math.PI, 0, [c * 0.9, c, c * 0.85], rs() < 0.5));
-    }
-    for (const [sx, y, s] of [[-1, 0, 5], [1, 0, 4], [1, 3.6, 3.5]]) { const c = 0.6 + rs() * 0.3; iv.put(cx + sx * halfL, cz, 'ivy_card', im, cardGeo(new THREE.Vector3(cx + sx * (halfL + t / 2 + 0.08), y + s / 2 + 0.15, cz + (rs() - 0.5) * 6), s, s, sx * Math.PI / 2, 0, [c * 0.9, c, c * 0.85], rs() < 0.5)); }
+  // ══ 외장 ══ 기단·층간 띠, 창 사이 벽기둥(문 자리는 건너뜀), 현관 차양·교명판·시계탑, 옥상 설비
+  const band = (axis, fixed, a0, a1, face) => { for (const [y, h, o] of [[0.45, 0.9, 0.05], [F2 - 0.12, 0.26, 0.09], [RF - 0.05, 0.22, 0.1]]) axis === 'x' ? b.box((a0 + a1) / 2, y, fixed + face * (T / 2 + o / 2), a1 - a0 + 0.2, h, o, M.schoolBase, false) : b.box(fixed + face * (T / 2 + o / 2), y, (a0 + a1) / 2, o, h, a1 - a0 + 0.2, M.schoolBase, false); };
+  const pil = (axis, fixed, a0, a1, sp, face, skip = []) => { const n = Math.max(1, Math.floor((a1 - a0 - 1.2) / sp)), st = (a1 - a0) / n;
+    for (let i = 0; i <= n; i++) { const at = a0 + st * i; if (skip.some(([p, q]) => at > p && at < q)) continue; axis === 'x' ? b.box(at, RF / 2 + 0.2, fixed + face * (T / 2 + 0.06), 0.45, RF + 0.4, 0.12, wall, false) : b.box(fixed + face * (T / 2 + 0.06), RF / 2 + 0.2, at, 0.12, RF + 0.4, 0.45, wall, false); } };
+  band('x', -14, -39, 39, -1); pil('x', -14, -39, 39, 3.9, -1); band('x', -2, -27, 27, 1); pil('x', -2, -27, 27, 3.6, 1, [[-2.2, 2.2]]);
+  for (const sx of [-1, 1]) { band('z', sx * 39, -14, 20, sx); pil('z', sx * 39, -5, 20, 4.1, sx, sx > 0 ? [[14.8, 17.2]] : []); band('z', sx * 27, -2, 20, -sx); pil('z', sx * 27, -2, 20, 3.6, -sx, [[7.8, 10.2]]); band('x', 20, ...mx(sx, 39, 27), 1);
+    for (const [x, z] of [[sx * 39.25, -14.25], [sx * 39.25, 20.25], [sx * 26.75, 20.25]]) { b.cyl(x, RF / 2, z, 0.07, 0.07, RF, M.lampPole, 6, false); } }
+  b.box(0, 3.25, 0.2, 7.0, 0.25, 4.0, 'concrete', false); for (const sx of [-1, 1]) b.box(sx * 3.0, 1.56, 1.8, 0.4, 3.12, 0.4, 'concrete');                 // 현관 차양 + 기둥
+  b.box(0, 3.75, 2.1, 5.2, 0.7, 0.12, M.signGreen, false); for (let k = 0; k < 7; k++) d.box(-1.8 + k * 0.6, 3.75, 2.17, 0.36, 0.42, 0.02, M.winFrame, false);  // 교명판(글자 자리는 흰 판)
+  b.box(0, RF + 2.0, -2.0, 6.4, 3.0, 0.5, wall, false); b.box(0, RF + 3.6, -2.0, 7.0, 0.25, 0.9, M.schoolBase, false); // 시계탑
+  b.box(0, RF + 2.1, -1.74, 1.7, 1.7, 0.04, M.winFrame, false); d.box(0, RF + 2.4, -1.71, 0.06, 0.6, 0.02, M.blackboard, false); d.box(0.22, RF + 2.1, -1.71, 0.45, 0.06, 0.02, M.blackboard, false);
+  for (const [x, z, r] of [[-33, 14, 1.3], [33, 2, 1.1], [14, -9, 1.2]]) { for (const [px, pz] of [[-0.8, -0.8], [0.8, -0.8], [-0.8, 0.8], [0.8, 0.8]]) b.box(x + px, RF + 0.4, z + pz, 0.14, 0.8, 0.14, M.rust, false); b.cyl(x, RF + 1.7, z, r, r, 1.8, M.steel, 14, false); col(x, z, r * 1.8, r * 1.8, RF, 2.6); } // 옥상 물탱크
+  for (const [x, z] of [[-20, -11], [-8, -6], [8, -11], [22, -7], [-33, -2], [33, 12], [33, 16]]) { b.box(x, RF + 0.45, z, 1.3, 0.9, 0.9, M.metalGreen); d.box(x, RF + 0.5, z + 0.46, 0.9, 0.6, 0.02, M.interior, false); } // 실외기(엄폐)
+  for (const sx of [-1, 1]) b.cyl(sx * 24, RF + 2.2, -12, 0.04, 0.04, 4.4, M.lampPole, 5, false);
+  { const iv = forestBatch({ hit: false }), im = canopyMat('ivy_card'), ivy = (x, y, z, s, yaw) => { const c = 0.6 + rnd() * 0.3; iv.put(x, z, 'ivy_card', im, cardGeo(new THREE.Vector3(x, y + s / 2 + 0.1, z), s, s, yaw, 0, [c * 0.9, c, c * 0.85], rnd() < 0.5)); };
+    for (const [x, s, y] of [[-36, 6, 0], [-21, 5, 0], [-6, 4.5, 3.4], [12, 6.5, 0], [30, 5, 0], [36, 4, 3.6]]) ivy(x, y, -14.26, s, Math.PI);
+    for (const sx of [-1, 1]) { for (const [z, s, y] of [[-9, 5, 0], [6, 6, 0], [15, 4.5, 3.4]]) ivy(sx * 39.26, y, z, s, sx * Math.PI / 2); for (const [z, s] of [[2, 4.5], [16, 5.5]]) ivy(sx * 26.74, 0, z, s, -sx * Math.PI / 2); ivy(sx * 33, 0, 20.26, 5, 0); }
+    for (const [x, s] of [[-22, 5], [-9, 4], [15, 5.5], [24, 4]]) ivy(x, 0, -1.74, s, 0);
     iv.flush(); }
-  for (let r = 0; r < roomCount; r++) { if (r === 1 || r === 4) continue; const rx = cx - halfL + roomW * (r + 0.5); // 교실 책상(엄폐 낮음)
-    for (const dz of [-6, -3, 0]) for (const dx of [-2.6, 2.6]) { const x = rx + dx + (rs() - 0.5) * 0.6, z = cz + dz + (rs() - 0.5) * 0.5;
-      b.box(x, 0.74, z, 1.1, 0.06, 0.6, MAT.wood, true); for (const lx of [-0.45, 0.45]) b.box(x + lx, 0.36, z, 0.05, 0.72, 0.5, MAT.woodDark, false); } }
-  { const gz = 56; // 남쪽 담장 + 교문(개구 x ±3.2) + 철문 2짝(한 짝 열림·한 짝 반쯤 닫힘=콜라이더)
-    for (const [x0, x1] of [[-38, -3.2], [3.2, 38]]) { for (let x = x0; x < x1 - 0.1; x += 7) { const x1s = Math.min(x1, x + 7), gy2 = terrainH((x + x1s) / 2, gz); b.box((x + x1s) / 2, gy2 + 0.7, gz, x1s - x, 1.4, 0.3, 'concreteStain', true); b.box(x, terrainH(x, gz) + 0.9, gz, 0.5, 1.8, 0.5, 'brick', true); } b.box(x1, terrainH(x1, gz) + 0.9, gz, 0.5, 1.8, 0.5, 'brick', true); }
-    for (const sx of [-1, 1]) b.box(cx + sx * 3.5, terrainH(cx + sx * 3.5, gz) + 1.15, gz, 0.6, 2.3, 0.6, 'brick', true);
-    addBoxRot(cx - 1.9, 1.0, gz - 1.1, 2.8, 1.9, 0.08, MAT.rust, { ry: 1.1 });
-    addBoxRot(cx + 1.9, 1.0, gz + 0.3, 2.6, 1.9, 0.08, MAT.rust, { ry: -0.25 }); colliders.push(axisCollider(cx + 0.55, cx + 3.2, 0, 2, gz - 0.2, gz + 0.8)); }
-  b.cyl(cx - 24, 4.6, 12, 0.05, 0.07, 9.2, MAT.steel, 8, true); b.box(cx - 23.3, 8.7, 12, 1.3, 0.8, 0.03, MAT.laneWhite, false); // 국기게양대 + 바랜 깃발
-  for (const sx of [-1, 1]) { const gx = cx + sx * 29; for (const dz of [-3.66, 3.66]) b.box(gx, 1.2, 33 + dz, 0.12, 2.44, 0.12, MAT.steel, true); b.box(gx, 2.44, 33, 0.12, 0.12, 7.32, MAT.steel, false); } // 골대
-  b.flush();
-  for (const sx of [-1, 1]) weatherModel(placeModel('propBench', cx + sx * 7, zF + 6.5, { height: 0.85, rotY: Math.PI }));
-  { const yg = forestBatch(), gm = canopyMat('grass_card'); // 운동장 잡초(현관 앞 제외)
-    for (let i = 0; i < 80; i++) { const x = cx + (rs() - 0.5) * 70, z = 14 + rs() * 38; if (Math.abs(x) < 6 && z < 20) continue;
-      const w = 0.8 + rs() * 1.0, h = w * 0.5, c = 0.55 + rs() * 0.3, yaw = rs() * Math.PI;
-      for (let k = 0; k < 2; k++) yg.put(x, z, 'grass_card', gm, cardGeo(new THREE.Vector3(x, h / 2 + 0.01, z), w, h, yaw + k * Math.PI / 2, 0, [c * 0.95, c, c * 0.85], rs() < 0.5)); }
-    yg.flush(); }
+  // ══ 안뜰 ══ 십자 포장 + 중앙 화단(큰 나무) + 벤치. 나무는 맨 아래 숲 배치에서 심는다
+  b.box(0, 0.03, 9.5, 3.6, 0.06, 23, 'paving', false); b.box(0, 0.035, 9, 53.4, 0.06, 3.0, 'paving', false);
+  for (const [x, z, w, dd] of [[0, 5.9, 6.4, 0.4], [0, 12.1, 6.4, 0.4], [-3.0, 9, 0.4, 5.8], [3.0, 9, 0.4, 5.8]]) b.box(x, 0.33, z, w, 0.66, dd, 'concrete');
+  b.box(0, 0.2, 9, 5.6, 0.4, 5.8, M.soil, false);
+  for (const [x, z, r] of [[-9, 6.6, 0], [9, 6.6, 0], [-9, 11.4, Math.PI], [9, 11.4, Math.PI], [-20, 15, 1.57], [20, 4, -1.57]]) placeModel('propBench', x, z, { height: 0.9, rotY: r, collide: false });
+  // ══ 체육관 (동쪽) ══ x 48..74, z -16..4, 벽 높이 8. 무대(동)·관람석(북)·코트. 서문은 본관 동쪽 문과 지붕 통로로 이어진다
+  { const X0 = 48, X1 = 74, Z0 = -16, Z1 = 4, H = 8.2, gw = 'plaster', hi = (a0, a1, skip = []) => schWin(a0, a1, 4.6, 2.8, skip).map((o) => ({ ...o, sill: 4.3, top: 6.4 }));
+    slab(X0, X1, Z0, Z1, F1, 0.3); b.box(57.9, F1 + 0.011, -6, 20.2, 0.022, 19.4, 'woodfloor', false);
+    const GW = (axis, fixed, a0, a1, ops, face) => { schWall(b, axis, fixed, a0, a1, F1, H - F1, gw, ops); dress(axis, fixed, F1, ops.filter((o) => !o.door), face, true); for (const o of ops) if (o.door) SCH.doors.push({ axis, fixed, at: o.at, w: o.w, y: F1, lv: 1 }); };
+    GW('z', X0, Z0, Z1, [{ at: -6, w: 2.4, sill: 0, top: 2.6, door: true }, ...hi(Z0, Z1, [[-8.5, -3.5]])], -1); GW('x', Z1, X0, X1, [{ at: 61, w: 3.6, sill: 0, top: 2.8, door: true }, ...hi(X0, X1, [[58, 64]])], 1);
+    GW('x', Z0, X0, X1, hi(X0, X1), -1); GW('z', X1, Z0, Z1, hi(Z0, Z1), 1);
+    for (const [y, h, o] of [[0.5, 1.0, 0.06], [H - 0.15, 0.3, 0.1]]) { for (const [z, f] of [[Z0, -1], [Z1, 1]]) b.box(61, y, z + f * (T / 2 + o / 2), 26.4, h, o, M.schoolBase, false); for (const [x, f] of [[X0, -1], [X1, 1]]) b.box(x + f * (T / 2 + o / 2), y, -6, o, h, 20.4, M.schoolBase, false); }
+    for (let k = 0; k < 5; k++) b.box(61, H + 0.28 + k * 0.5, -6, 26.8, 0.5, 21 - k * 4.4, k === 4 ? M.roof : 'corrugated', false);                                   // 계단식 둥근 지붕
+    b.box(61, H - 0.05, -6, 25.6, 0.06, 19.6, M.ceilingMetal, false); for (const q of [-1, 1]) b.box(58 + q * 0, H - 0.1, -6 + q * 5, 18, 0.03, 1.2, M.skylight, false);
+    for (let x = X0 + 4.3; x < X1 - 2; x += 4.3) { b.box(x, H - 0.9, -6, 0.16, 0.16, 19.6, M.trussSteel, false); for (let z = Z0 + 1.6; z < Z1; z += 2.8) b.box(x, H - 0.5, z, 0.1, 0.8, 0.1, M.trussSteel, false); }
+    solid(71.2, F1, -6, 5.3, 1.0, 19.4, 'woodfloor'); b.box(68.0, F1 + 0.25, 2.6, 1.1, 0.5, 2.0, 'woodfloor'); for (const z of [-14.6, 2.6]) b.box(68.9, F1 + 3.6, z, 0.3, 5.2, 2.2, M.curtainRed, false); b.box(71.3, H - 1.0, -6, 0.3, 1.4, 19.4, M.curtainRed, false); // 무대·계단·막
+    for (let i = 0; i < 3; i++) b.box(58.5, F1 + (1.5 - i * 0.5) / 2, -15.25 + i * 0.9, 17, 1.5 - i * 0.5, 0.9, 'concrete');                                        // 관람석 3단
+    const ln = (x, z, w, dd) => b.box(x, F1 + 0.026, z, w, 0.008, dd, M.laneWhite, false);
+    ln(58.5, -11.8, 17, 0.08); ln(58.5, 1.6, 17, 0.08); ln(50, -5.1, 0.08, 13.4); ln(67, -5.1, 0.08, 13.4); ln(58.5, -5.1, 0.08, 13.4); for (const x of [51.9, 65.1]) { ln(x, -5.1, 3.8, 0.08); ln(x + (x < 58 ? 1.9 : -1.9), -5.1, 0.08, 3.6); }
+    for (const [x, f] of [[49.0, 1], [67.6, -1]]) { b.box(x, F1 + 3.3, -5.1, 0.08, 1.1, 1.8, M.winFrame, false); d.box(x + f * 0.3, F1 + 3.05, -5.1, 0.5, 0.03, 0.5, M.fireRed, false); b.box(x - f * 0.25, F1 + (f > 0 ? 3.3 : 5.5), -5.1, f > 0 ? 0.5 : 0.1, f > 0 ? 0.1 : 4.6, 0.1, M.trussSteel, false); }
+    solid(51.5, F1, 1.6, 2.0, 0.9, 1.2, M.matBlue); solid(55.2, F1, 2.4, 1.4, 1.1, 0.6, M.deskTop); solid(65.8, F1, 2.6, 1.0, 0.8, 1.0, M.deskMetal); for (let k = 0; k < 6; k++) d.cyl(65.8 + (rnd() - 0.5) * 0.6, F1 + 0.95, 2.6 + (rnd() - 0.5) * 0.6, 0.12, 0.12, 0.22, k % 2 ? M.trayOrange : M.books[1], 8, false);
+    litter(49, 67, -12, 3, F1, 30); SCH.rooms.push({ kind: 'gym', x: 58, z: -6, y: F1 }, { kind: 'stage', x: 71.2, z: -6, y: F1 + 1.0 });
+    // 지붕 통로: 본관 동문(39,16) → (44,16) → (44,-6) → 체육관 서문(48,-6)
+    for (const [x, z, w, dd] of [[41.9, 16, 5.6, 2.6], [44, 5, 2.6, 24.6], [46.2, -6, 3.6, 2.6]]) { b.box(x, 2.95, z, w, 0.14, dd, M.roof, false); b.box(x, 0.03, z, w - 0.6, 0.06, dd - 0.6, 'paving', false); }
+    for (let z = -6; z <= 16.1; z += 3.67) for (const s of [-1, 1]) b.cyl(44 + s * 1.15, 1.45, z, 0.07, 0.07, 2.9, M.lampPole, 6, false);
+    notePlacement('gym', 61, -6, 13, 10, 0, H + 3); }
+  // ══ 별관(옛 목조 교사, 서쪽) ══ x -74..-56, z -14..-5. 동아리방 3칸 + 남쪽 툇마루, 계단식 박공지붕
+  { const X0 = -74, X1 = -56, Z0 = -14, Z1 = -5, H = 3.3, aw = 'siding';
+    slab(X0, X1, Z0, Z1 + 1.8, F1, 0.3, 'woodfloor');
+    const AW = (axis, fixed, a0, a1, ops, face, outer = true) => { schWall(b, axis, fixed, a0, a1, F1, H, aw, ops); dress(axis, fixed, F1, ops, face, outer); for (const o of ops) if (o.door) SCH.doors.push({ axis, fixed, at: o.at, w: o.w, y: F1, lv: 1 }); };
+    AW('x', Z1, X0, X1, [schDoor(-71, 1.3), schDoor(-65, 1.3), schDoor(-59, 1.3), { at: -68, w: 1.6, sill: 1.0, top: 2.3, win: true }, { at: -62, w: 1.6, sill: 1.0, top: 2.3, win: true }], 1);
+    AW('x', Z0, X0, X1, schWin(X0, X1, 3.0, 1.6).map((o) => ({ ...o, top: 2.3 })), -1); AW('z', X0, Z0, Z1, [{ at: -9.5, w: 1.8, sill: 1.0, top: 2.3, win: true }], -1); AW('z', X1, Z0, Z1, [{ at: -9.5, w: 1.8, sill: 1.0, top: 2.3, win: true }], 1);
+    for (const x of [-68, -62]) schWall(b, 'z', x, Z0, Z1, F1, H, aw, []);
+    for (let k = 0; k < 4; k++) b.box(-65, F1 + H + 0.2 + k * 0.42, -8.6, 19.2, 0.42, 12.4 - k * 3.4, M.roofRed, false); b.box(-65, F1 + H - 0.04, -9.5, 17.6, 0.05, 8.6, M.ceilingLight, false);
+    for (let x = X0 + 0.4; x <= X1; x += 4.3) b.box(x, F1 + H / 2, -3.5, 0.16, H, 0.16, M.deskTop, false);
+    for (const [cx, kind] of [[-71, 0], [-65, 1], [-59, 2]]) { shelf(cx, Z0 + T / 2 + 0.3, F1, 3.6, 'x', kind === 1); solid(cx + 1.2, F1, -8.2, 1.6, 0.74, 0.8, M.deskTop); solid(cx - 1.7, F1, -11.2, 0.8, 0.9, 0.8, M.cardboard); if (kind === 0) for (const [u, v, r] of [[-0.6, -7.2, 0.3], [0.2, -7.0, 0.22], [-0.3, -6.3, 0.26]]) b.cyl(cx + u, F1 + 0.5, v, r, r, 0.4, M.curtainRed, 12, false);
+      if (kind === 2) for (let q = 0; q < 4; q++) solid(cx - 1.8 + q * 0.5, F1, -6.6 - (q % 2) * 0.5, 0.42, 0.9 + (q % 2) * 0.4, 0.42, M.deskMetal); litter(cx - 2.6, cx + 2.6, -13.4, -5.6, F1, 8); SCH.rooms.push({ kind: 'club', x: cx, z: -9.5, y: F1 }); }
+    notePlacement('annex', -65, -9, 9.5, 5.5, 0, 6);
+    // 급수탑 · 소각로 · 자전거 보관대
+    for (const [px, pz] of [[-1.3, -1.3], [1.3, -1.3], [-1.3, 1.3], [1.3, 1.3]]) b.cyl(-49 + px, 3.2, -11 + pz, 0.1, 0.12, 6.4, M.rust, 6, false); b.cyl(-49, 7.7, -11, 2.0, 2.0, 2.6, M.steel, 16, false); b.cone(-49, 9.5, -11, 2.15, 1.0, M.rust, 16); b.box(-49, 1.6, -11, 0.7, 3.2, 0.7, M.rust);
+    b.box(-50, 0.9, -0.5, 1.7, 1.8, 1.7, 'brickdirty'); b.cyl(-50, 3.2, -0.5, 0.28, 0.34, 2.8, 'brickdirty', 10, false); d.box(-50, 0.7, 0.37, 0.7, 0.6, 0.03, M.interior, false);
+    b.box(-47, 2.5, 12, 8.4, 0.1, 3.2, 'corrugatedRust' in TEXMAT ? 'corrugatedRust' : 'corrugated', false); for (const x of [-51, -47, -43]) for (const z of [10.6, 13.4]) b.cyl(x, 1.25, z, 0.06, 0.06, 2.5, M.lampPole, 6, false);
+    for (let k = 0; k < 9; k++) { const x = -50.6 + k * 0.9; d.box(x, 0.45, 12, 0.04, 0.9, 1.1, M.lampPole, false); if (rnd() < 0.5) { for (const z of [11.5, 12.6]) d.cyl(x + 0.2, 0.33, z, 0.33, 0.33, 0.04, M.interior, 12, false); d.box(x + 0.2, 0.62, 12.05, 0.04, 0.05, 1.1, k % 2 ? M.fireRed : M.lockerBlue, false); } } }
+  // ══ 운동장 (남쪽, 예전보다 작게 — 숲이 더 들어온다) ══ 조회대·국기 게양대·골대·스탠드·철봉
+  { solid(0, 0, 26.2, 6.0, 0.9, 3.0, 'concrete'); for (const sx of [-1, 1]) b.box(sx * 3.5, 0.225, 26.2, 1.0, 0.45, 3.0, 'concrete'); for (const [x, z] of [[-2.8, 24.9], [2.8, 24.9], [-2.8, 27.5], [2.8, 27.5]]) b.cyl(x, 2.1, z, 0.07, 0.07, 2.4, M.lampPole, 6, false); b.box(0, 3.35, 26.2, 6.6, 0.12, 3.6, M.roofRed, false);
+    for (const [x, c] of [[-6.5, M.fireRed], [-8, M.lockerBlue], [-9.5, M.winFrame]]) { b.cyl(x, 4.2, 25.4, 0.05, 0.06, 8.4, M.winFrame, 6, false); d.box(x + 0.55, 7.6, 25.4, 1.0, 0.65, 0.02, c, false); }
+    for (const gx of [-22, 22]) { const f = Math.sign(gx); for (const z of [47.4, 54.6]) { b.cyl(gx, 1.22, z, 0.06, 0.06, 2.44, M.winFrame, 6, false); b.box(gx + f * 0.9, 1.22, z, 1.8, 0.05, 0.05, M.winFrame, false); b.cyl(gx + f * 1.8, 0.61, z, 0.04, 0.04, 1.22, M.winFrame, 5, false); } b.box(gx, 2.44, 51, 0.1, 0.1, 7.3, M.winFrame, false); b.box(gx + f * 1.8, 1.22, 51, 0.05, 0.05, 7.3, M.winFrame, false); }
+    for (let i = 0; i < 3; i++) b.box(27.2 + i * 0.9, (0.5 + i * 0.5) / 2, 51, 0.9, 0.5 + i * 0.5, 30, 'concrete');
+    for (const z of [33, 35.2, 37.4]) { for (const s of [-1, 1]) b.cyl(-25, 1.1, z + s * 0.9, 0.05, 0.05, 2.2, M.lampPole, 6, false); b.box(-25, 2.2 - (z - 33) * 0.18, z, 0.05, 0.05, 1.8, M.lampPole, false); }
+    for (const [x, z, r] of [[-12, 30.5, 0], [12, 30.5, 0], [26.2, 34, 1.57]]) placeModel('propBench', x, z, { height: 0.9, rotY: r, collide: false });
+    placeModel('trashCan', 4.6, 24.6, { height: 1.0 }); placeModel('trashCan', -27, 30, { height: 1.0 }); }
+  // ══ 정문 (남) ══ 문기둥·녹슨 미닫이 철문(열려 있음)·수위실·버려진 차
+  { for (const sx of [-1, 1]) { b.box(sx * 3.6, 1.6, 84.6, 1.0, 3.2, 1.0, 'brickdirty'); b.box(sx * 3.6, 3.3, 84.6, 1.3, 0.2, 1.3, 'concrete', false); }
+    b.box(3.6, 1.9, 84.05, 0.5, 1.3, 0.06, M.signGreen, false); for (let k = 0; k < 9; k++) b.box(-9.6 + k * 0.6, 1.2, 85.0, 0.06, 2.2, 0.06, M.rust, false); for (const y of [0.2, 1.2, 2.25]) b.box(-7.2, y, 85.0, 5.2, 0.08, 0.08, M.rust, false);
+    schWall(b, 'x', 78.6, 6.2, 9.0, 0, 2.6, 'plaster', [{ at: 7.6, w: 1.4, sill: 1.0, top: 2.1, win: true }]); schWall(b, 'x', 81.4, 6.2, 9.0, 0, 2.6, 'plaster', []); schWall(b, 'z', 6.2, 78.6, 81.4, 0, 2.6, 'plaster', [schDoor(80, 1.0)]); schWall(b, 'z', 9.0, 78.6, 81.4, 0, 2.6, 'plaster', [{ at: 80, w: 1.2, sill: 1.0, top: 2.1, win: true }]);
+    b.box(7.6, 2.7, 80, 3.4, 0.16, 3.4, M.roof, false); b.box(7.6, 0.04, 80, 2.6, 0.08, 2.6, 'concrete', false); solid(8.3, 0.08, 80.6, 0.6, 0.75, 1.0, M.deskTop);
+    placeModel('carCovered', -9, 77, { height: 1.5, rotY: 0.4 }); placeModel('carSedan', 12.5, 74, { height: 1.45, rotY: 2.0 }); }
+  b.flush(); d.flush();
+  notePlacement('school', 0, 3, 39, 17, 0, RF);
+  console.log(`[school] 문 ${SCH.doors.length} 계단 ${SCH.stairs.length}`);
 }
 
 // 숲 배치: 격자+지터, 건물/운동장 플래튼·경계 회피.
 // 일부는 대형 엄폐목(굵은 활엽수 줄기) — 플레이어가 서서 은엄폐로 쓸 수 있게. #172
 function scatterForest(cx0, cz0, cx1, cz1) {
-  const step = 6.5, rnd = mulberry32(165), fb = forestBatch(); // 시드 고정 → 매 로드 동일 숲 (QA 재현)
+  const step = 5.7, rnd = mulberry32(165), fb = forestBatch(); // 시드 고정 → 매 로드 동일 숲 (QA 재현). (#375) 6.5 → 5.7, 성김 0.28 → 0.2 — 더 빽빽하게
   let n = 0;
   for (let x = cx0; x <= cx1; x += step) {
     for (let z = cz0; z <= cz1; z += step) {
       const jx = x + (rnd() - 0.5) * step * 0.8;
       const jz = z + (rnd() - 0.5) * step * 0.8;
       if (Math.abs(jx) > WORLD_HALF - 4 || Math.abs(jz) > WORLD_HALF - 4) continue;
-      if (terrainH(jx, jz) === 0 && insideAnyFlatten(jx, jz)) continue; // 플래튼(운동장/건물) 내부는 비움
+      if (insideAnyFlatten(jx, jz, 1.2)) continue; // 플래튼(운동장/건물) 내부는 비움 — 여유 3 → 1.2 m (나무가 건물 바로 옆까지 온다)
       if (nearPath(jx, jz, 2.8)) continue; // 임도 위 나무 없음 (#283)
-      if (rnd() < 0.28) continue; // 성김
+      if (rnd() < 0.2) continue; // 성김
       const seed = 1000 + n * 7919; n++;
       if (rnd() < 0.16) {
         // 대형 엄폐목: 큰 키 활엽 + 굵은 줄기 콜라이더(서서 뒤에 숨음)
@@ -6026,10 +6117,10 @@ function scatterForest(cx0, cz0, cx1, cz1) {
   }
   console.log(`[forest] card trees ${n}, merged meshes ${fb.flush()}`); // 0건이어도 남긴다
 }
-function insideAnyFlatten(x, z) {
+function insideAnyFlatten(x, z, m = 3) {
   for (const f of FLATTENS) {
-    if (f.r !== undefined) { if (Math.hypot(x - f.x, z - f.z) < f.r + 3) return true; }
-    else if (Math.abs(x - f.x) < f.hw + 3 && Math.abs(z - f.z) < f.hd + 3) return true;
+    if (f.r !== undefined) { if (Math.hypot(x - f.x, z - f.z) < f.r + m) return true; }
+    else if (Math.abs(x - f.x) < f.hw + m && Math.abs(z - f.z) < f.hd + m) return true;
   }
   return false;
 }
@@ -6058,7 +6149,7 @@ function putProp(fb, key, keepRe, x, z, height, rotY) {
   g.applyMatrix4(_ppM.compose(_ppP.set(x, terrainH(x, z) - 0.02, z), _ppQ.setFromAxisAngle(_up, rotY), _ppS.set(s, s, s)));
   fb.put(x, z, key + '|' + keepRe, p.mat, g); return true;
 }
-const SCHOOL_PATHS = [[[0, 54], [0, 84]], [[38, 30], [78, 78]], [[40, 2], [78, -78]], [[-40, 2], [-78, -78]]]; // 흙길 폴리라인 [x,z]: 남문·SE 숲길·NE/NW 임도 (#283)
+const SCHOOL_PATHS = [[[0, 84], [0, 75]], [[0, 76], [-33.5, 73], [-34.5, 27], [-12, 22.5]], [[34, 27], [78, 78]], [[42, -19], [78, -78]], [[-42, -19], [-78, -78]], [[-40, 22], [-34.5, 27]]]; // 흙길 폴리라인 [x,z]: 남문·SE 숲길·NE/NW 임도 (#283)
 function nearPath(x, z, r) {
   for (const pl of SCHOOL_PATHS) for (let i = 0; i < pl.length - 1; i++) {
     const [ax, az] = pl[i], [bx, bz] = pl[i + 1], dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz;
@@ -6083,7 +6174,7 @@ function buildSchoolPaths() { // 흙길: 지형 추종 스트립(2m 세그먼트
 }
 function scatterGroundClutter(cx0, cz0, cx1, cz1) {
   const rnd = mulberry32(177), fb = forestBatch(), gm = canopyMat('grass_card');
-  const insideBuilding = (x, z) => Math.abs(x) < 35 && Math.abs(z) < 9;
+  const insideBuilding = (x, z) => false; // 건물 자리는 플래튼이 걸러 준다 (#375)
   const step = 5; let grass = 0, plants = 0, rocks = 0;
   const fernKeep = [/fern_02_a$/, /fern_02_b$/, /fern_02_c$/, /fern_02_d$/], shrubKeep = [/shrub_03_a$/, /shrub_03_b$/, /shrub_03_c$/];
   for (let x = cx0; x <= cx1; x += step) {
@@ -6342,16 +6433,30 @@ function buildSchoolMap() {
   buildPerimeterWall(5, false);
 
   // 운동장 (흙바닥) + 학교 건물
-  const yard = new THREE.Mesh(new THREE.PlaneGeometry(74, 42),
-    terrainMat('yard'));
-  yard.rotation.x = -Math.PI / 2; yard.position.set(0, 0.03, 30); yard.receiveShadow = true;
+  const yard = new THREE.Mesh(new THREE.PlaneGeometry(60, 46), terrainMat('yard')); // (#375) 74×42 → 60×46, 본관에서 떨어뜨려 사이에 나무 띠를 둔다
+  yard.rotation.x = -Math.PI / 2; yard.position.set(0, 0.03, 51); yard.receiveShadow = true;
   scene.add(yard);
-  buildSchoolBuilding(0, 0);
+  { // 트랙(타원 3줄) + 중앙선·센터서클 — 얇은 띠 메시 1개(탄착·충돌 없음)
+    const pos = [], idx = [], ring = (a, bz, w, n = 72) => { const o = pos.length / 3; for (let i = 0; i <= n; i++) { const t = i / n * Math.PI * 2, c = Math.cos(t), s2 = Math.sin(t); pos.push(a * c, 0.05, 51 + bz * s2, (a + w) * c, 0.05, 51 + (bz + w) * s2); if (i < n) idx.push(o + i * 2, o + i * 2 + 2, o + i * 2 + 1, o + i * 2 + 1, o + i * 2 + 2, o + i * 2 + 3); } };
+    for (const k of [0, 1.25, 2.5]) ring(22 + k, 15.5 + k, 0.12); ring(4, 4, 0.1, 36);
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx); g.computeVertexNormals();
+    const tm = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0xcfcabc, roughness: 1, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2 })); tm.receiveShadow = true; tm.raycast = () => {}; scene.add(tm); }
+  buildSchoolCampus();
 
   // 숲: 임도 + 카드 트리 전역 산포 + 숲 바닥(풀 카드·고사리·관목·바위) + 그루터기/쓰러진 줄기 앵커 (#280, #283)
   buildSchoolPaths();
-  scatterForest(-W + 6, -W + 6, W - 6, W - 6);
+  scatterForest(-W + 5, -W + 5, W - 5, W - 5);
   scatterGroundClutter(-W + 6, -W + 6, W - 6, W - 6);
+  { // (#375) 교정 안으로 들어온 나무 — 플래튼 안이라 산포가 건너뛰는 자리(안뜰·건물 사이·운동장 가장자리)에 직접 심는다
+    const fb = forestBatch(), r3 = mulberry32(3751); let n = 0;
+    const T3 = [[0, 9, 'canopy_broad_a', 15, 0.6], [-17, 3.5, 'canopy_broad_b', 9, 0.35], [18, 15.5, 'canopy_autumn', 8, 0.35], [-19, 16.5, 'pine', 10, 0.3], [14, 3, 'dead', 7, 0.3], [-8, 17, 'canopy_broad_a', 7.5, 0.3], [9, 17.5, 'canopy_broad_b', 8.5, 0.3],
+      [-44, 4, 'canopy_broad_a', 13, 0.55], [-43, -8, 'pine', 12, 0.35], [-52, 4, 'canopy_autumn', 9, 0.35], [-45, 19, 'canopy_broad_b', 11, 0.4], [44.5, -12, 'pine', 11, 0.3], [41.5, 2, 'canopy_broad_b', 9, 0.3], [47, 9, 'canopy_autumn', 10, 0.35], [43, 22, 'canopy_broad_a', 14, 0.6],
+      [-30, 24.5, 'canopy_broad_b', 12, 0.45], [-18, 25.5, 'pine', 11, 0.3], [16, 24, 'canopy_broad_a', 12, 0.45], [30, 25, 'canopy_autumn', 9, 0.35], [-9, 23, 'canopy_autumn', 8, 0.3],
+      [-28, 44, 'canopy_broad_a', 10, 0.4], [-27.5, 60, 'pine', 12, 0.3], [-20, 71.5, 'canopy_broad_b', 11, 0.4], [18, 72, 'canopy_broad_a', 13, 0.5], [6, 71, 'dead', 8, 0.3], [-6, 34, 'canopy_broad_b', 7, 0.3], [13, 62, 'canopy_autumn', 7.5, 0.3], [-14, 55, 'pine', 9, 0.3],
+      [60, -22, 'pine', 13, 0.35], [72, -21, 'canopy_broad_a', 12, 0.45], [52, 9, 'canopy_broad_b', 10, 0.4], [66, 9.5, 'canopy_autumn', 9, 0.35], [78, 0, 'pine', 12, 0.3],
+      [-78, -9, 'pine', 12, 0.3], [-65, 0.5, 'canopy_broad_a', 13, 0.5], [-58, -19.5, 'canopy_broad_b', 11, 0.4], [-71, -19.5, 'canopy_autumn', 9, 0.35]];
+    for (const [x, z, k, h, tr] of T3) { if (!isPointOpen(x, z, 0.5)) continue; placeCardTree(fb, k, x, z, h * (0.92 + r3() * 0.16), tr, 9000 + n * 131); n++; }
+    console.log(`[school] 교정 나무 ${n}/${T3.length}, merged ${fb.flush()}`); }
   { const r2 = mulberry32(283);
     for (const [x, z] of [[8, 66], [-6, 70], [46, 44], [60, -30], [-52, -20], [-66, 50], [30, -50], [-20, -60], [70, 20], [-40, -75]]) if (isPointOpen(x, z, 1.2) && !nearPath(x, z, 2)) placeModel('stump', x, z, { height: 0.5 + r2() * 0.3, rotY: r2() * 6.28 });
     for (const [x, z, r] of [[14, 72, 0.4], [-50, 40, 1.9], [56, 8, 2.6], [-30, -40, 0.9], [40, -66, 2.2], [-70, -8, 1.3]]) if (isPointOpen(x, z, 2.2) && !nearPath(x, z, 2.5)) placeModel('deadLog', x, z, { height: 1.0, rotY: r }); }
@@ -6361,9 +6466,13 @@ function buildSchoolMap() {
 
 // 학교 맵 데이터
 const SCHOOL_FLATTENS = [
-  { x: 0, z: 0, hw: 36, hd: 9 },     // 학교 건물 패드(대형화 L68×Dp15)
-  { x: 0, z: 32, hw: 38, hd: 22 },   // 운동장
-  ...[[0, 80, 8], [74, -46, 8], [-74, -46, 8], [64, 66, 8], [-64, 66, 8], [80, 80, 7], [-80, 80, 7], [80, -80, 7], [-80, -80, 7]].map(([x, z, r]) => ({ x, z, r })),
+  { x: 0, z: 3, hw: 41, hd: 19 },      // 본관(ㄷ자) + 안뜰 (#375)
+  { x: 60, z: -6, hw: 17, hd: 12.5 },  // 체육관 + 지붕 통로
+  { x: -64, z: -8.5, hw: 12, hd: 8 },  // 별관
+  { x: -48, z: 3, hw: 6, hd: 13 },     // 급수탑·소각로·자전거 보관대
+  { x: 0, z: 50, hw: 31, hd: 25 },     // 운동장 + 조회대
+  { x: 4, z: 80, r: 11 },              // 정문·수위실
+  ...[[74, -46, 6], [-74, -46, 6], [66, 66, 6], [-66, 66, 6], [80, 80, 6], [-80, 80, 6], [80, -80, 6], [-80, -80, 6]].map(([x, z, r]) => ({ x, z, r })),
 ];
 const MAP_SCHOOL = {
   key: 'school', name: '숲속 고등학교', desc: '숲으로 둘러싸인 폐교 — 실내 교전',
@@ -6372,10 +6481,15 @@ const MAP_SCHOOL = {
   sun: [30, 55, 60], // 남동광 — 교사 정면(+z)·현관 채광 (#286)
   flattens: SCHOOL_FLATTENS,
   lootSpots: [
-    [-28, -4], [-19, -4], [-9, -4], [0, -4], [9, -4], [19, -4], [28, -4], // 교실 7칸
-    [-24, 5], [-8, 5], [8, 5], [24, 5],                 // 복도
-    [0, 14], [-16, 26], [18, 26], [0, 40],              // 운동장/현관앞
-    [-70, -42], [70, -42], [60, 62], [-60, 62],         // 외곽 숲
+    [-21, -7, 0.3], [-10, -12, 0.3], [10, -7, 0.3], [21, -12, 0.3], [0, -11.5, 0.3],   // 1층 교실·현관
+    [-34.5, 0, 0.3], [-36, 8, 0.3], [-33, 17, 0.3], [31.2, 2.2, 0.3], [33, 6, 0.3], [31.6, 13.5, 0.3], // 1층 특별실
+    [-20, -3.5, 0.3], [18, -3.5, 0.3], [-28.5, 12, 0.3], [28.5, -8, 0.3],               // 1층 복도
+    [-25.5, -6.2, 3.9], [10, -12, 3.9], [0, -8, 3.9], [-31.5, 5, 3.9], [34, 16, 3.9], [-34, 16.5, 3.9], [28.5, 4, 3.9], // 2층
+    [-33, 10, 7.5], [20, -8, 7.5], [33, -4, 7.5],                                       // 옥상
+    [56, -8, 0.3], [64, 1, 0.3], [71, -10, 1.3], [53, -14.5, 1.8],                      // 체육관(무대·관람석)
+    [-71, -9, 0.3], [-65, -10.5, 0.3], [-59, -8, 0.3], [-47, 12], [-52, -6],            // 별관·보관대
+    [0, 14.5], [-14, 12], [0, 28.5], [-24, 40], [20, 51], [0, 66], [7.6, 80.2],          // 안뜰·운동장·수위실
+    [-70, -44], [70, -44], [62, 62], [-62, 62], [-74, 30], [76, 30],                    // 외곽 숲
   ],
   extract: [
     { name: '정문 (남)', pos: new THREE.Vector3(0, 0, 82) },
@@ -6384,12 +6498,12 @@ const MAP_SCHOOL = {
     { name: '남동 숲길', pos: new THREE.Vector3(78, 0, 78) },
   ],
   spawns: [
-    new THREE.Vector3(0, 0, 80), new THREE.Vector3(74, 0, -44),
-    new THREE.Vector3(-74, 0, -44), new THREE.Vector3(64, 0, 64), new THREE.Vector3(-64, 0, 64),
+    new THREE.Vector3(-3, 0, 80), new THREE.Vector3(74, 0, -46),
+    new THREE.Vector3(-74, 0, -46), new THREE.Vector3(66, 0, 66), new THREE.Vector3(-66, 0, 66),
   ],
   barrels: [
-    [-18, -4, true], [18, -4, false], [0, 14, true], [-40, 40, false],
-    [40, -40, true], [-50, -30, false], [50, 50, false], [8, 38, true],
+    [-41, -17, true], [41, 23, false], [5, 22.5, true], [-40, 42, false],
+    [40, -40, true], [-54, -30, false], [50, 52, false], [10, 76, true],
   ],
 };
 
@@ -9248,7 +9362,7 @@ window.__ex = {
     info.autoReset = true; return out;
   },
   get _map() { return { current: currentMapKey, built: builtMapKey, maps: Object.keys(MAPS) }; },
-  get _lootSpots() { return LOOT_SPOTS; }, get _scene() { return scene; },
+  get _lootSpots() { return LOOT_SPOTS; }, get _colliders() { return colliders; }, get _sch() { return SCH; }, get _scene() { return scene; },
   // 화면 캡처 QA (#362): 한 프레임을 직접 그려 JPEG 으로 돌려주고, 그 프레임의 드로콜·삼각형·소요 시간을 lastShot 에 남긴다
   _shot(q = 0.9) { const info = renderer.info, ar = info.autoReset; info.autoReset = false; info.reset(); skyMesh.position.copy(camera.position); updateSunShadow(true); const t0 = performance.now(); if (composer) composer.render(); else renderer.render(scene, camera); renderer.getContext().finish(); this.lastShot = { calls: info.render.calls, tris: info.render.triangles, ms: +(performance.now() - t0).toFixed(1), programs: info.programs ? info.programs.length : 0, geos: info.memory.geometries, tex: info.memory.textures }; info.autoReset = ar; return canvas.toDataURL('image/jpeg', q); },
   // 렌더 QA (#319): 룩 전환·톤매핑 비교·낙화 상태
