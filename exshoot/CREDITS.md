@@ -44,3 +44,4 @@ FBX → GLB 변환: Blender 5.1 headless (총기, 캐릭터+애니메이션).
 
 - three.js — https://threejs.org (MIT) — 3D 렌더링 (CDN jsdelivr @0.169.0)
 - Rapier — Dimforge — https://rapier.rs (Apache-2.0) — 물리 엔진 (rapier3d-compat WASM, CDN @0.14.0): 동적 배럴/폭발통, 폭발 임펄스·연쇄, 사망 래그돌 (#119)
+- 나무 모델 15종 (assets/env/trees.glb): 자체 제작 — Blender 절차 생성 (scripts/assets/make_trees.py). 껍질·잎 텍스처는 위 ambientCG 항목.

@@ -599,6 +599,7 @@ const GLB_MANIFEST = {
   girlB: 'assets/girls/girlB.glb',
   girlC: 'assets/girls/girlC.glb',
   girlD: 'assets/girls/girlD.glb',
+  trees: 'assets/env/trees.glb', // (#380) 가지 구조 나무 15종(형상만) — scripts/assets/make_trees.py
   rifle: 'assets/rifle.glb',
   smg: 'assets/smg.glb',
   shotgun: 'assets/shotgun.glb',
@@ -1019,7 +1020,12 @@ function canopyMat(key) {
   return CANOPY_MAT[key];
 }
 const FOREST_CHUNK = 44;
-function forestBatch({ hit = true } = {}) { // 청크·재질별 지오메트리 누적 → flush 시 병합 메시 1개씩. hit:false = 탄착·시야 판정 제외(창을 덮는 덩굴 #375)
+function forestBatch({ hit = true, bake = true } = {}) { // bake:false = 굽지 않고 매번 조립(모델 나무 #380)
+  if (!bake) { const byKey = new Map(); return { put(x, z, mkey, mat, geo) { if (!geo) return; const k = `${Math.floor(x / FOREST_CHUNK)},${Math.floor(z / FOREST_CHUNK)}|${mkey}`; if (!byKey.has(k)) byKey.set(k, { mat, geos: [] }); byKey.get(k).geos.push(geo); },
+    flush() { let n = 0; for (const { mat, geos } of byKey.values()) { const g = mergeGeometries(geos, false); for (const q of geos) q.dispose(); const m = new THREE.Mesh(g, mat); m.castShadow = m.receiveShadow = true; scene.add(m); if (hit) obstacleMeshes.push(m); n++; } byKey.clear(); return n; } }; }
+  return forestBatchBaked({ hit });
+}
+function forestBatchBaked({ hit = true } = {}) { // 청크·재질별 지오메트리 누적 → flush 시 병합 메시 1개씩. hit:false = 탄착·시야 판정 제외(창을 덮는 덩굴 #375)
   const byKey = new Map(), bid = bakeBatchId(), rp = bakeReplay(); // (#325)
   return {
     put(x, z, mkey, mat, geo) { if (rp || !geo) return; const k = `${Math.floor(x / FOREST_CHUNK)},${Math.floor(z / FOREST_CHUNK)}|${mkey}`; if (!byKey.has(k)) byKey.set(k, { mat, geos: [] }); byKey.get(k).geos.push(geo); },
@@ -1054,7 +1060,34 @@ function cardGeo(c, w, h, yaw, tilt, col, flipU, topW = 1) { // 알파 카드 1�
   return g;
 }
 // kind: 'canopy_broad_a' | 'canopy_broad_b' | 'canopy_autumn' | 'pine' | 'dead'. h = 전고(m). trunkR = 줄기 콜라이더 반경(엄폐목은 크게).
+// ── 모델 나무 (#380) ── Blender 로 만든 가지 구조 나무(assets/env/trees.glb: 수종 5 × 변형 3, 형상만)를 청크 배치에 병합한다.
+// TREE_VER = trees.glb 의 sha256 앞 10자. 구운 맵은 main.js 해시에만 묶여 있어서, 나무 파일만 바뀌면 옛 나무가 구워진 채 남는다 → 이 값을 같이 바꿔 해시를 깬다(bake_check.py 가 대조).
+const TREE_VER = '36e68e3a3a';
+let treeBatch = null; // 맵 빌드 동안 모으고 applyMap 이 끝에서 flush
+const TREE_MODEL = { on: new URLSearchParams(location.search).get('oldtrees') !== '1', base: 10, geo: null };
+function treeGeos() {
+  if (TREE_MODEL.geo) return TREE_MODEL.geo;
+  const out = {}; if (!ASSETS.trees) return (TREE_MODEL.geo = out);
+  ASSETS.trees.scene.traverse((o) => { if (!o.isMesh) return; const [kind, vi, part] = o.name.split('__'); if (!part) return; ((out[kind] = out[kind] || [])[+vi] = out[kind][+vi] || {})[part] = o.geometry; });
+  return (TREE_MODEL.geo = out);
+}
+const _treeM = new THREE.Matrix4(), _treeQ = new THREE.Quaternion(), _treeS = new THREE.Vector3(), _treeP = new THREE.Vector3();
+function placeModelTree(fb, kind, x, z, h, seed) { // 성공하면 true
+  const vars = treeGeos()[kind]; if (!vars || !vars.length) return false;
+  fb = treeBatch || (treeBatch = forestBatch({ bake: false })); // 나무는 굽지 않는다 — 구우면 그루마다 펼친 형상이 들어가 학교 맵 파일이 2.9 → 16.8 MB 가 됐다. 런타임 조립은 복제·변환뿐이라 싸다
+  const rnd = mulberry32(seed), v = vars[Math.floor(rnd() * vars.length)], s = h / TREE_MODEL.base, gy = terrainH(x, z), tone = 0.86 + rnd() * 0.22;
+  _treeM.compose(_treeP.set(x, gy, z), _treeQ.setFromAxisAngle(_up, rnd() * Math.PI * 2), _treeS.set(s, s * (0.96 + rnd() * 0.08), s));
+  const bark = kind === 'pine' ? 'barkfir' : kind === 'dead' ? 'barkdark' : 'barkoak';
+  if (v.bark) { const g = new THREE.BufferGeometry(); g.setIndex(v.bark.index.clone()); for (const k of ['position', 'normal', 'uv']) g.setAttribute(k, v.bark.attributes[k].clone());
+    g.applyMatrix4(_treeM); const uv = g.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * s, uv.getY(i) * s); // 껍질 UV 는 미터 단위 — 키에 맞춰 늘린다
+    fb.put(x, z, bark, matOf(bark), g); }
+  if (v.leaf) { const mk = kind === 'pine' ? 'canopy_pine' : kind, g = new THREE.BufferGeometry(); g.setIndex(v.leaf.index.clone()); for (const k of ['position', 'normal', 'uv', 'color']) g.setAttribute(k, v.leaf.attributes[k].clone());
+    g.applyMatrix4(_treeM); const c = g.attributes.color; for (let i = 0; i < c.count; i++) c.setXYZ(i, c.getX(i) * tone, c.getY(i) * tone, c.getZ(i) * tone);
+    fb.put(x, z, mk, canopyMat(mk), g); }
+  return true;
+}
 function placeCardTree(fb, kind, x, z, h, trunkR = 0.35, seed = 1) {
+  if (TREE_MODEL.on && placeModelTree(fb, kind, x, z, h, seed)) { const gy0 = terrainH(x, z), top0 = gy0 + Math.min(4, Math.max(3, h * 0.35)); colliders.push(axisCollider(x - trunkR, x + trunkR, gy0, top0, z - trunkR, z + trunkR)); return; }
   const rnd = mulberry32(seed), gy = terrainH(x, z), V = (px, py, pz) => new THREE.Vector3(x + px, gy + py, z + pz);
   const bark = kind === 'pine' ? 'barkfir' : kind === 'dead' ? 'barkdark' : 'barkoak', bm = matOf(bark);
   const put = (g) => fb.put(x, z, bark, bm, g), tone = 0.72 + rnd() * 0.3;
@@ -8525,13 +8558,15 @@ function applyMap(key) {
   const bk = BAKE.mode === 'record' ? null : (BAKED[key] && BAKED[key].hash === SRC_HASH ? BAKED[key] : null);
   if (bk) { BAKE.mode = 'replay'; BAKE.data = bk; BAKE.seq = 0; BAKE.used = 0; BAKE.fail = null; }
   const t0 = performance.now();
+  treeBatch = null;
   try { m.build(); } finally { if (bk) BAKE.mode = null; }
   if (bk && (BAKE.seq !== bk.batchCount || BAKE.used !== bk.entryCount || BAKE.fail)) { // 불일치 → 버리고 절차 생성으로 다시 (#325)
     console.warn(`[bake] ${key}: 재생 불일치(배치 ${BAKE.seq}/${bk.batchCount}, 메시 ${BAKE.used}/${bk.entryCount}${BAKE.fail ? ', ' + BAKE.fail : ''}) — 절차 생성으로 재빌드`);
     for (const c of scene.children) if (!before.has(c)) scene.remove(c);
     colliders = []; obstacleMeshes = []; losMeshes = []; placements = []; rangeTargets = [];
-    delete BAKED[key]; m.build();
+    delete BAKED[key]; treeBatch = null; m.build();
   }
+  if (treeBatch) { const n = treeBatch.flush(); treeBatch = null; losMeshes = obstacleMeshes.filter((o) => !o.userData.terrainTile); console.info(`[trees] 모델 나무 메시 ${n}`); } // 빌드가 정한 시야 차폐 목록에 나무를 더한다
   lastBuildInfo = { key, ms: Math.round(performance.now() - t0), baked: !!bk && !!BAKED[key] };
   console.info(`[map] ${key} 빌드 ${lastBuildInfo.ms}ms (${lastBuildInfo.baked ? '구운 형상' : '절차 생성'})`);
   if (!new URLSearchParams(location.search).has('bake')) buildGrassField(); // 풀잎 (#365) — 정적 형상이 다 놓인 뒤 위에서 내려 찍어 자리를 정한다
@@ -9446,7 +9481,7 @@ window.__ex = {
     info.autoReset = true; return out;
   },
   get _map() { return { current: currentMapKey, built: builtMapKey, maps: Object.keys(MAPS) }; },
-  get _lootSpots() { return LOOT_SPOTS; }, get _colliders() { return colliders; }, get _lootStat() { return lastLootStat; }, get _interactables() { return interactables; }, get _sch() { return SCH; }, get _site() { return currentMapKey === 'school' ? SCH : IND; }, get _scene() { return scene; },
+  get _lootSpots() { return LOOT_SPOTS; }, get _colliders() { return colliders; }, _plantTrees(list) { const fb = forestBatch(); let n = 0; for (const [k, tx, tz, h, seed] of list) { placeCardTree(fb, k, tx, tz, h, 0.35, seed); n++; } let m = fb.flush(); if (treeBatch) { m += treeBatch.flush(); treeBatch = null; } return [n, m]; }, get _lootStat() { return lastLootStat; }, get _interactables() { return interactables; }, get _sch() { return SCH; }, get _site() { return currentMapKey === 'school' ? SCH : IND; }, get _scene() { return scene; },
   // 화면 캡처 QA (#362): 한 프레임을 직접 그려 JPEG 으로 돌려주고, 그 프레임의 드로콜·삼각형·소요 시간을 lastShot 에 남긴다
   _shot(q = 0.9) { const info = renderer.info, ar = info.autoReset; info.autoReset = false; info.reset(); skyMesh.position.copy(camera.position); updateSunShadow(true); const t0 = performance.now(); if (composer) composer.render(); else renderer.render(scene, camera); renderer.getContext().finish(); this.lastShot = { calls: info.render.calls, tris: info.render.triangles, ms: +(performance.now() - t0).toFixed(1), programs: info.programs ? info.programs.length : 0, geos: info.memory.geometries, tex: info.memory.textures }; info.autoReset = ar; return canvas.toDataURL('image/jpeg', q); },
   // 렌더 QA (#319): 룩 전환·톤매핑 비교·낙화 상태
