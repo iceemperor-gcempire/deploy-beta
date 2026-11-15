@@ -451,7 +451,7 @@ function setupPostFX() {
       // 알파 컷아웃·반투명(카드 나무·벚꽃·체인 펜스·유리·꽃잎)은 AO 법선/깊이 패스에서 제외 (#319): 오버라이드 재질이 alphaTest 를 무시해
       // 카드 사각형 전체가 깊이에 찍혀 수관에 검은 사각 AO 가 생기던 문제. 가시성은 GTAOPass 의 캐시가 복원한다.
       const ov = gtaoPass.overrideVisibility.bind(gtaoPass);
-      gtaoPass.overrideVisibility = function () { ov(); this.scene.traverse((o) => { const m = o.material; if (o.isMesh && m && !Array.isArray(m) && (m.alphaTest > 0 || m.transparent || o.userData.noAO)) o.visible = false; }); };
+      gtaoPass.overrideVisibility = function () { ov(); this.scene.traverse((o) => { const m = o.material; if (o.isMesh && m && !Array.isArray(m) && ((m.alphaTest > 0 && !o.userData.aoSolid) || m.transparent || o.userData.noAO)) o.visible = false; }); };
       composer.addPass(gtaoPass);
     } catch (e) { console.warn('GTAO 생략:', e && e.message); }
   }
@@ -557,55 +557,6 @@ function charMat(src) {
   return m;
 }
 
-// ── 치마 안감 (#369) ── 변환 때의 데시메이션으로 치마 주름이 찢어져(열린 모서리 수백 개) 틈으로 다리·배경이 비쳤다.
-// 원본 VRM 없이 고치려고, 치마 바로 안쪽에 같은 색 원통형 안감을 만들어 같은 뼈대에 묶는다. 가중치는 가까운 치마 정점에서 가져와 스프링 본을 같이 따라간다.
-const SKIRT_LINER = { on: new URLSearchParams(location.search).get('liner') !== '0', seg: 40, rows: 7, inset: 0.004, hemUp: 0.012, dark: 0.62 };
-function buildSkirtLiner(src) {
-  const geo = src.geometry, P = geo.attributes.position, SI = geo.attributes.skinIndex, SW = geo.attributes.skinWeight, UV = geo.attributes.uv;
-  if (!P || !SI || !SW || !src.skeleton) return null;
-  const bones = src.skeleton.bones, isSk = bones.map((b) => /Skirt/.test(b.name)), whole = /Bottoms/.test(src.material.name);
-  const sel = [];
-  for (let i = 0; i < P.count; i++) { let w = 0; for (let k = 0; k < 4; k++) if (isSk[SI.getComponent(i, k)]) w += SW.getComponent(i, k); if (whole || w > 0.02) sel.push(i); }
-  if (sel.length < 24) return null;
-  let cx = 0, cz = 0, y0 = 1e9, y1 = -1e9;
-  for (const i of sel) { cx += P.getX(i); cz += P.getZ(i); y0 = Math.min(y0, P.getY(i)); y1 = Math.max(y1, P.getY(i)); }
-  cx /= sel.length; cz /= sel.length;
-  const V = sel.map((i) => { const x = P.getX(i) - cx, z = P.getZ(i) - cz; return { i, y: P.getY(i), r: Math.hypot(x, z), a: Math.atan2(z, x) }; });
-  const { seg: K, rows: R, inset, hemUp } = SKIRT_LINER, da = Math.PI * 2 / K, dAng = (a, b) => { let d = Math.abs(a - b) % (Math.PI * 2); return d > Math.PI ? Math.PI * 2 - d : d; };
-  const pos = [], idx = [], si = [], sw = [], nodes = [];
-  for (let k = 0; k < K; k++) {
-    const a = -Math.PI + (k + 0.5) * da, near = V.filter((v) => dAng(v.a, a) < da * 1.6);
-    const pool = near.length >= 3 ? near : V; let hem = 1e9; for (const v of pool) hem = Math.min(hem, v.y); hem += hemUp;
-    for (let r = 0; r < R; r++) {
-      const y = y1 + (hem - y1) * (r / (R - 1));
-      // 이 높이의 안쪽 주름 반지름: 가까운 정점 중 가장 작은 반지름 - inset. 가중치는 (각도·높이) 거리로 가까운 셋을 섞는다
-      const sc = pool.map((v) => ({ v, d: Math.hypot(dAng(v.a, a) * v.r, v.y - y) })).sort((p, q) => p.d - q.d).slice(0, 6);
-      let rad = 1e9; for (const c of sc.slice(0, 4)) rad = Math.min(rad, c.v.r); if (r < 2) { let mx = 0; for (const c of sc.slice(0, 4)) mx = Math.max(mx, c.v.r); rad = mx + inset * 0.5; } rad = Math.max(0.02, rad - inset); // 허리 두 줄은 몸통이 바로 안쪽이라 바깥 주름면 바로 밑에 붙인다(안쪽에 두면 몸통이 안감을 뚫고 보인다)
-      const acc = new Map(); for (const c of sc.slice(0, 3)) { const wd = 1 / (c.d + 0.004); for (let q = 0; q < 4; q++) { const w = SW.getComponent(c.v.i, q); if (w > 0) { const b = SI.getComponent(c.v.i, q); acc.set(b, (acc.get(b) || 0) + w * wd); } } }
-      const top = [...acc.entries()].sort((p, q) => q[1] - p[1]).slice(0, 4); const tot = top.reduce((t, e) => t + e[1], 0) || 1;
-      nodes.push({ a, y, rad, top, tot, uv: sc[0].v.i });
-    }
-  }
-  // 반지름을 이웃 각도끼리 한 번 고르게(주름 굴곡이 그대로 튀지 않게) — 단, 더 커지지는 않게(치마 밖으로 나오지 않게)
-  for (let k = 0; k < K; k++) for (let r = 0; r < R; r++) { const n = nodes[k * R + r], l = nodes[((k + K - 1) % K) * R + r], rr = nodes[((k + 1) % K) * R + r]; n.rs = r < 2 ? n.rad : Math.min(n.rad, (l.rad + n.rad * 2 + rr.rad) / 4); }
-  for (const n of nodes) { pos.push(cx + Math.cos(n.a) * n.rs, n.y, cz + Math.sin(n.a) * n.rs); for (let q = 0; q < 4; q++) { si.push(n.top[q] ? n.top[q][0] : 0); sw.push(n.top[q] ? n.top[q][1] / n.tot : 0); } }
-  for (let k = 0; k < K; k++) for (let r = 0; r < R - 1; r++) { const a0 = k * R + r, b0 = ((k + 1) % K) * R + r; idx.push(a0, b0, a0 + 1, b0, b0 + 1, a0 + 1); }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4)); g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
-  g.setIndex(idx); g.computeVertexNormals();
-  // 색: 치마 텍스처에서 선택 정점 자리의 평균색(없으면 재질 색) × dark — 안쪽이라 한 톤 어둡게
-  const col = new THREE.Color(0x1a1c2a);
-  try { const img = src.material.map && src.material.map.image; if (img && UV) { const c = document.createElement('canvas'); c.width = c.height = 64; const x2 = c.getContext('2d', { willReadFrequently: true }); x2.drawImage(img, 0, 0, 64, 64); const d = x2.getImageData(0, 0, 64, 64).data; let rr = 0, gg = 0, bb = 0, n = 0;
-      for (const i of sel) { const u = Math.min(63, Math.max(0, Math.floor((UV.getX(i) % 1 + 1) % 1 * 64))), v = Math.min(63, Math.max(0, Math.floor((UV.getY(i) % 1 + 1) % 1 * 64))), o = (v * 64 + u) * 4; if (d[o + 3] < 128) continue; rr += d[o]; gg += d[o + 1]; bb += d[o + 2]; n++; }
-      if (n) col.setRGB(rr / n / 255, gg / n / 255, bb / n / 255, THREE.SRGBColorSpace); } } catch (e) { /* 캔버스 읽기 실패 → 기본색 */ }
-  col.multiply(src.material.color).multiplyScalar(SKIRT_LINER.dark);
-  const base = new THREE.MeshBasicMaterial({ color: col, side: THREE.DoubleSide }); base.name = 'SkirtLiner';
-  const m = new THREE.SkinnedMesh(g, charMat(base));
-  m.name = 'SkirtLiner'; m.position.copy(src.position); m.quaternion.copy(src.quaternion); m.scale.copy(src.scale);
-  m.bind(src.skeleton, src.bindMatrix); m.castShadow = false; m.receiveShadow = true; m.frustumCulled = false; m.raycast = () => {};
-  return m;
-}
-
 // ── 실내 전등 (#369) ── 전엔 점광원을 천장 0.35~0.7 m 아래에 그냥 띄워, 천장에 빛이 하얗게 뭉치고 빛이 어디서 나오는지 보이지 않았다.
 // 천장에서 drop 만큼 내려뜨린 펜던트 기구(줄 + 갓 + 빛나는 전구)를 달고 광원을 전구 자리에 둔다. 광원 수는 그대로다.
 const LAMP_FIX = { on: new URLSearchParams(location.search).get('lampfix') !== '0', geoBody: null, geoBulb: null, matBody: null, count: 0 };
@@ -640,7 +591,7 @@ const CANOPY_TEX = {}; // 카드 트리/풀 카드 알파 텍스처 (#280, make_
 const CHAR_CLIPS = {}; // key(girl*) → { idle, run, death, hitChest, hitHead }
 // VRoid CC0 샘플 (OpenGameArt) → convert_vrm_girl.py 변환. 개체마다 랜덤 선택
 const GIRL_KEYS = ['girlA', 'girlB', 'girlC', 'girlD'];
-const linerInfo = {};  // key → 안감 정점 수 (0 = 치마를 못 찾음)
+const AO_CHAR = new URLSearchParams(location.search).get('aochar') !== '0'; // 주인공을 AO 깊이 패스에 넣을지 (#370) — 끄면 배경 AO 선이 몸 위에 비친다
 let assetsReady = false;
 
 const GLB_MANIFEST = {
@@ -779,7 +730,6 @@ async function loadAssets() {
     const gltf = await loadGlb(path);
     const isGirl = GIRL_KEYS.includes(key);
     const isNature = key.startsWith('q_'); // Quaternius 나무·수풀·바위
-    const skirts = [];
     gltf.scene.traverse((o) => {
       if (o.isMesh) {
         o.castShadow = true; o.receiveShadow = true;
@@ -807,17 +757,16 @@ async function loadAssets() {
             o.material.alphaTest = 0; o.material.transparent = false; o.material.opacity = 1;
           }
         }
+        if (o.material && isGirl && !o.material.transparent) o.userData.solidSrc = true; // 원래 불투명(MASK 포함)인 파츠 — 주인공은 이걸로 AO 깊이 패스에 넣는다 (#370)
         if (o.material && isGirl && o.material.transparent) {
           // 반투명(BLEND) 파츠는 컷아웃으로 — 헤어/속눈썹 소팅 아티팩트 방지
           o.material.transparent = false;
           o.material.alphaTest = 0.35;
           o.material.depthWrite = true;
         }
-        if (isGirl && SKIRT_LINER.on && o.isSkinnedMesh && o.material && /Bottoms|Onepice/.test(o.material.name || '')) skirts.push(o);
         if (o.material && isGirl) { o.material = charMat(o.material); o.receiveShadow = true; } // 배경과 같은 빛을 받게 (#365)
       }
     });
-    for (const sk of skirts) { const ln = buildSkirtLiner(sk); if (ln) sk.parent.add(ln); linerInfo[key] = ln ? ln.geometry.attributes.position.count : 0; } // 0 이어도 남긴다
     ASSETS[key] = gltf;
   });
   // 지면 PBR 컬러맵 (ambientCG CC0) — 실패해도 절차 생성 텍스처로 폴백
@@ -3205,7 +3154,7 @@ function makeEnemyMesh(boss = false) {
   model.position.y = -bb.min.y * s;
   model.traverse((o) => {
     if (o.isMesh || o.isSkinnedMesh) {
-      o.castShadow = o.name !== 'SkirtLiner';
+      o.castShadow = true;
       o.frustumCulled = false; // 스킨드 메시 컬링 오판 방지
     }
   });
@@ -4445,7 +4394,8 @@ function buildPlayerChar() {
   const s = CHAR_HEIGHT / Math.max(0.001, bb.max.y - bb.min.y);
   model.scale.setScalar(s);
   model.position.y = -bb.min.y * s;
-  model.traverse((o) => { if (o.isMesh || o.isSkinnedMesh) { o.castShadow = o.name !== 'SkirtLiner'; o.frustumCulled = false; } });
+  model.traverse((o) => { if (o.isMesh || o.isSkinnedMesh) { o.castShadow = true; o.frustumCulled = false; if (AO_CHAR && o.userData.solidSrc) o.userData.aoSolid = true; } });
+  // ↑ (#370) 몸·옷·머리카락은 MASK 재질이라 AO 깊이 패스에서 빠졌고, 뒤 배경의 AO 선(벽 홈·지평선)이 몸 위에 그려졌다. 늘 가까이 보이는 주인공만 넣는다 — 적 13명까지 넣으면 프레임당 1.2~1.7 ms 가 든다(M4 Pro)
   const g = new THREE.Group();
   g.add(model);
   const gear = attachGear(model, g, PC_KEY, { helmet: 'olive', nvg: true, vest: 'olive', pack: 'tan', heavy: false }); // 전부 만들고 상태별 표시 (#331)
@@ -9298,7 +9248,7 @@ window.__ex = {
     info.autoReset = true; return out;
   },
   get _map() { return { current: currentMapKey, built: builtMapKey, maps: Object.keys(MAPS) }; },
-  get _lootSpots() { return LOOT_SPOTS; }, get _scene() { return scene; }, get _liner() { return linerInfo; },
+  get _lootSpots() { return LOOT_SPOTS; }, get _scene() { return scene; },
   // 화면 캡처 QA (#362): 한 프레임을 직접 그려 JPEG 으로 돌려주고, 그 프레임의 드로콜·삼각형·소요 시간을 lastShot 에 남긴다
   _shot(q = 0.9) { const info = renderer.info, ar = info.autoReset; info.autoReset = false; info.reset(); skyMesh.position.copy(camera.position); updateSunShadow(true); const t0 = performance.now(); if (composer) composer.render(); else renderer.render(scene, camera); renderer.getContext().finish(); this.lastShot = { calls: info.render.calls, tris: info.render.triangles, ms: +(performance.now() - t0).toFixed(1), programs: info.programs ? info.programs.length : 0, geos: info.memory.geometries, tex: info.memory.textures }; info.autoReset = ar; return canvas.toDataURL('image/jpeg', q); },
   // 렌더 QA (#319): 룩 전환·톤매핑 비교·낙화 상태
