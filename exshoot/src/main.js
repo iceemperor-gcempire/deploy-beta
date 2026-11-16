@@ -1201,6 +1201,7 @@ let enemies = [];
 let interactables = [];   // {pos, mesh, items, opened, label}
 let extractions = [];     // {pos, mesh, ring}
 let pendingExtractFee = 0; // 유료 탈출 시 차감할 ₽ (#194)
+const airdropLight = new THREE.PointLight(0x5ac8ff, 0, 18, 2); scene.add(airdropLight); /* 보급 투하 비컨 광원 — 밝기 0 으로 상주시켜 투하 순간 광원 수가 바뀌지 않게 (#387) */
 let airdropBeacon = null;  // 에어드랍 비컨 (#197)
 let tracers = [];         // {line, life}
 // 물리 (Rapier) — #119 Phase 2
@@ -3360,13 +3361,10 @@ function makeEnemyMesh(boss = false) {
   head.position.y = 1.60; head.visible = false;
   g.add(body, head);
 
-  const flash = new THREE.PointLight(0xffc070, 0, 10, 2);
-  flash.position.set(0.24, 1.3, 0.9);
-  g.add(flash);
   // 상체 본 — 피격 flinch / 전투 조준 자세용 (mixer 갱신 후 오프셋 적용)
   const spine = model.getObjectByName('Spine') || null;
   return {
-    group: g, body, head, flash, model, mixer, gear, spring, actIdle, actRun, actBack,
+    group: g, body, head, model, mixer, gear, spring, actIdle, actRun, actBack,
     actDeath, actHitChest, actHitHead, actShoot, actReload, actHitDir, actDeathDir,
     actRoll, actCrouch, actAimUp, actAimDown, actWalk, actLimp, actAlert,
     running: false, crouched: false, baseAct: actIdle, spine,
@@ -4009,8 +4007,17 @@ function enemyAccuracy(e, dist) {
   return acc;
 }
 
+/* 적 총구 섬광 광원 (#387): 전엔 적마다 점광원을 하나씩 달아, 적이 늘 때(보급 투하 경비병)마다 광원 수가 바뀌어 모든 재질의 셰이더가
+   다시 컴파일됐다(수 초 멈춤). 광원 수만큼 모든 픽셀의 조명 계산도 늘었다. 씬에 상주하는 광원 2개를 돌려 쓴다. */
+const enemyFlashPool = [];
+function initEnemyFlashPool() { for (let i = 0; i < 2; i++) { const l = new THREE.PointLight(0xffc070, 0, 10, 2); scene.add(l); enemyFlashPool.push(l); } }
+const _efp = new THREE.Vector3();
+function enemyFlash(e) {
+  let l = enemyFlashPool[0]; for (const c of enemyFlashPool) if (c.intensity < l.intensity) l = c; if (!l) return;
+  e.group.updateMatrixWorld(); l.position.copy(e.group.localToWorld(_efp.set(0.24, 1.3, 0.9))); l.intensity = 50;
+}
 function enemyShoot(e, dist) {
-  e.flash.intensity = 50;
+  enemyFlash(e);
   sfx.enemyShoot(dist);
 
   // 트레이서: 총구 → 플레이어 근처
@@ -4169,7 +4176,6 @@ function killEnemy(e, dir = null) {
   sfx.enemyDeath();
   addFeed(e.boss ? '보스 사살! 시체에서 전리품을 회수하세요' : '스캐브 사살');
   if (e.boss) sfx.death(); // 저역 붐으로 강조
-  e.flash.intensity = 0;
   e.body.userData = {}; e.head.userData = {};
   corpses.push(e.group);
   // 시체 루팅
@@ -4204,7 +4210,7 @@ let EXTRACT_CANDIDATES = [
   { name: '북서 수풀', pos: new THREE.Vector3(-76, 0, -76) },
 ];
 
-function makeExtractBeacon(pos, color) {
+function makeExtractBeacon(pos, color, sharedLight) {
   const beam = new THREE.Mesh(
     new THREE.CylinderGeometry(0.4, 0.4, 40, 12, 1, true),
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false }));
@@ -4213,8 +4219,8 @@ function makeExtractBeacon(pos, color) {
     new THREE.RingGeometry(EXTRACT_RADIUS - 0.4, EXTRACT_RADIUS, 40),
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5, side: THREE.DoubleSide }));
   ring.rotation.x = -Math.PI / 2; ring.position.set(pos.x, terrainH(pos.x, pos.z) + 0.05, pos.z); scene.add(ring);
-  const light = new THREE.PointLight(color, 30, 18, 2);
-  light.position.set(pos.x, 3, pos.z); scene.add(light);
+  const light = sharedLight || new THREE.PointLight(color, 30, 18, 2);
+  light.position.set(pos.x, 3, pos.z); if (sharedLight) { light.color.set(color); light.intensity = 30; } else scene.add(light);
   return { beam, ring, light };
 }
 function setupExtractions(spawnPos) {
@@ -4255,7 +4261,7 @@ function triggerAirdrop() {
     airdrop: true, landing: true, groundY: gy, raidObject: true,
   });
   mesh.userData.raidObject = true;
-  airdropBeacon = makeExtractBeacon(p, 0x5ac8ff); // 파란 비컨(먼 거리에서도 보임)
+  airdropBeacon = makeExtractBeacon(p, 0x5ac8ff, airdropLight); // 파란 비컨(먼 거리에서도 보임)
   for (let i = 0; i < 2; i++) { // 경비 스캐브
     const gp = new THREE.Vector3(p.x + (Math.random() * 2 - 1) * 8, 0, p.z + (Math.random() * 2 - 1) * 8);
     gp.y = terrainH(gp.x, gp.z); spawnEnemyAt(gp, p.clone());
@@ -5641,13 +5647,11 @@ function updateEffects(dt) {
     t.line.material.opacity = Math.max(0, t.life / 0.07) * 0.85;
     if (t.life <= 0) {
       scene.remove(t.line);
-      t.line.geometry.dispose(); t.line.material.dispose();
+      t.line.geometry.dispose(); /* 재질은 dispose 하지 않는다 — 마지막 예광탄이 사라질 때 셰이더 프로그램까지 풀려, 다음 사격에서 다시 링크됐다 (#387) */
       tracers.splice(i, 1);
     }
   }
-  for (const e of enemies) {
-    if (e.flash.intensity > 0) e.flash.intensity *= Math.pow(0.001, dt * 5);
-  }
+  for (const l of enemyFlashPool) { if (l.intensity > 0) { l.intensity *= Math.pow(0.001, dt * 5); if (l.intensity < 0.05) l.intensity = 0; } }
 }
 
 // ============================================================
@@ -5736,7 +5740,7 @@ function grenadeStep(g, h) {
   } else g.rolling = false;
 }
 function detonateGrenade(g) {
-  g.dead = true; scene.remove(g.mesh); g.mat.dispose();
+  g.dead = true; scene.remove(g.mesh);
   const i = grenades.indexOf(g); if (i >= 0) grenades.splice(i, 1); // 폭발 전에 목록에서 뺀다 — 적 회피가 끝나고, 폭발 중 사망으로 clearRaidObjects 가 돌아도 이중 처리가 없다
   grenadeStats.detonated++;
   explodeAt(g.pos.clone(), { radius: GRENADE.radius, damage: GRENADE.damage, force: GRENADE.force, grenade: true });
@@ -8663,10 +8667,10 @@ function clearRaidObjects() {
   interactables = [];
   for (const ex of extractions) { scene.remove(ex.beam); scene.remove(ex.ring); scene.remove(ex.light); }
   extractions = [];
-  if (airdropBeacon) { scene.remove(airdropBeacon.beam); scene.remove(airdropBeacon.ring); scene.remove(airdropBeacon.light); airdropBeacon = null; } // (#197)
+  if (airdropBeacon) { scene.remove(airdropBeacon.beam); scene.remove(airdropBeacon.ring); airdropLight.intensity = 0; airdropBeacon = null; } // (#197)
   for (const t of tracers) scene.remove(t.line);
   for (const pr of projectiles) if (pr.line) scene.remove(pr.line); projectiles = []; // 발사체 정리 (#301)
-  for (const g of grenades) if (!g.dead) { g.dead = true; scene.remove(g.mesh); g.mat.dispose(); } grenades = []; grenadeCd = 0; // 수류탄 정리 (#359)
+  for (const g of grenades) if (!g.dead) { g.dead = true; scene.remove(g.mesh); } grenades = []; grenadeCd = 0; // 수류탄 정리 (#359)
   tracers = [];
   for (const d of decals) scene.remove(d); // 탄흔 데칼 정리 (#208)
   decals = [];
@@ -8677,6 +8681,14 @@ function clearRaidObjects() {
 
 // 레이드 시작 (#325): 로딩 표시 → 구운 형상 로드(비동기) → 빌드 → 셰이더 선컴파일(renderer.compileAsync, 그동안 렌더 보류) → 표시
 let renderHold = false, raidLoadingEl = null;
+/* 워밍업 렌더 (#387): 시야 컬링을 끄고 한 프레임을 실제 경로(그림자·AO·후처리 포함)로 그려, 남은 셰이더 변형과 텍스처·버퍼 업로드를 로딩 화면 뒤에서 끝낸다. */
+function warmupRender() {
+  const off = []; scene.traverse((o) => { if (o.frustumCulled) { o.frustumCulled = false; off.push(o); } });
+  const t0 = performance.now();
+  try { if (composer) composer.render(); else renderer.render(scene, camera); } catch (e) { console.warn('워밍업 렌더 실패:', e && e.message); }
+  finally { for (const o of off) o.frustumCulled = true; }
+  console.info(`[raid] 워밍업 렌더 ${Math.round(performance.now() - t0)}ms (${off.length}개 객체)`);
+}
 async function beginRaid(key) {
   if (!raidLoadingEl) { raidLoadingEl = document.createElement('div'); raidLoadingEl.style.cssText = 'position:fixed;inset:0;z-index:70;display:flex;align-items:center;justify-content:center;background:rgba(8,12,10,.86);color:#dfe8df;font-size:20px;letter-spacing:2px'; document.body.appendChild(raidLoadingEl); }
   raidLoadingEl.textContent = '지역 불러오는 중…'; raidLoadingEl.style.display = 'flex'; // hidden 속성은 쓰지 않는다 — 인라인 display 가 UA [hidden]{display:none} 을 이겨 안 숨겨진다 (#346)
@@ -8687,7 +8699,12 @@ async function beginRaid(key) {
     if (state.phase === 'raid' && renderer.compileAsync) {
       raidLoadingEl.textContent = '셰이더 준비 중…'; renderHold = true;
       const t0 = performance.now();
-      await Promise.race([renderer.compileAsync(scene, camera).catch(() => {}), new Promise((r) => setTimeout(r, 8000))]);
+      /* 컴포저의 렌더 타깃을 걸고 컴파일한다 (#387) — 화면(타깃 없음) 기준으로 컴파일하면 톤매핑·출력 색공간이 달라 실제로는 쓰지 않는 변형이 만들어지고,
+         진짜 변형은 처음 화면에 들어올 때 하나씩 컴파일돼 멈칫거렸다. */
+      const _rt = composer ? composer.readBuffer : null; if (_rt) renderer.setRenderTarget(_rt);
+      const _cp = renderer.compileAsync(scene, camera).catch(() => {}); if (_rt) renderer.setRenderTarget(null);
+      await Promise.race([_cp, new Promise((r) => setTimeout(r, 15000))]);
+      warmupRender();
       console.info(`[raid] 셰이더 선컴파일 ${Math.round(performance.now() - t0)}ms`);
     }
   } finally { renderHold = false; raidLoadingEl.style.display = 'none'; }
@@ -9464,13 +9481,13 @@ window.__ex = {
   },
   _startRaid(k) { startRaid(k); }, keys, get pc() { return pc; }, // 모션 QA (#328): 키 주입·캐릭터 액션 가중치 확인
   _hitDir(i, x, z) { const e = enemies[i]; if (!e || e.dead) return null; e.state = 'combat'; e.rollT = 1; enemyHitReact(e, false, new THREE.Vector3(x, 0, z)); e.rollT = 0; return { side: enemyHitSide(e, new THREE.Vector3(x, 0, z)), clip: e.oneShot ? e.oneShot.getClip().name : null }; },
-  _killDir(i, x, z) { const e = enemies[i]; if (!e || e.dead) return null; killEnemy(e, new THREE.Vector3(x, 0, z)); return { side: enemyHitSide(e, new THREE.Vector3(x, 0, z)), clip: e.actDeath ? e.actDeath.getClip().name : null }; }, _beginRaid(k) { return beginRaid(k); }, _loadBaked(k) { return loadBaked(k); }, get bakeInfo() { return { hash: SRC_HASH, loaded: Object.keys(BAKED), last: lastBuildInfo }; },
+  _killDir(i, x, z) { const e = enemies[i]; if (!e || e.dead) return null; killEnemy(e, new THREE.Vector3(x, 0, z)); return { side: enemyHitSide(e, new THREE.Vector3(x, 0, z)), clip: e.actDeath ? e.actDeath.getClip().name : null }; }, _renderer: renderer, _scene: scene, get _gfx() { return { scale: renderScale, ao: !!(gtaoPass && gtaoPass.enabled), bloom: !!(bloomPass && bloomPass.enabled) }; }, _airdrop() { triggerAirdrop(); }, _beginRaid(k) { return beginRaid(k); }, _loadBaked(k) { return loadBaked(k); }, get bakeInfo() { return { hash: SRC_HASH, loaded: Object.keys(BAKED), last: lastBuildInfo }; },
   _fire() { if (state.phase !== 'raid') return; if (gun.mag <= 0) gun.mag = GUN.magSize; fireShot(); }, // QA: 트리거 게이트(포인터락·raiseT 등) 우회 1발, 탄창 자동 보충 (#292)
   get rangeTargets() { return rangeTargets; }, get drill() { return drill; }, _startDrill() { startDrill(); }, _rangeTick(dt) { updateRangeTargets(dt); }, _cycleDrillMode() { cycleDrillMode(); }, get recoilPat() { return recoilPat; }, // QA (#295/#298)
   get grassField() { return grassField; }, GRASS,
   get grenades() { return grenades; }, get grenadeStats() { return grenadeStats; }, GRENADE, grenadeCount, _terrainH(x, z) { return terrainH(x, z); }, _isOpen(x, z, r = 0.8) { return isPointOpen(x, z, r); }, // QA (#359): 수류탄
   _giveGrenade(n = 1) { for (let k = 0; k < n; k++) inventory.push({ name: '파편 수류탄', value: 9000, use: 'grenade', type: 'consumable' }); refreshInventoryUI(); return grenadeCount(); },
-  _throwGrenade(x, y, z) { grenadeCd = 0; return throwGrenade(x == null ? null : new THREE.Vector3(x, y, z)); }, _stepGrenades(dt) { updateGrenades(dt); return grenades.length; }, _discardGrenades() { for (const g of grenades) if (!g.dead) { g.dead = true; scene.remove(g.mesh); g.mat.dispose(); } grenades = []; }, _grenadeFlee(i, dt) { return grenadeFlee(enemies[i], dt); },
+  _throwGrenade(x, y, z) { grenadeCd = 0; return throwGrenade(x == null ? null : new THREE.Vector3(x, y, z)); }, _stepGrenades(dt) { updateGrenades(dt); return grenades.length; }, _discardGrenades() { for (const g of grenades) if (!g.dead) { g.dead = true; scene.remove(g.mesh); } grenades = []; }, _grenadeFlee(i, dt) { return grenadeFlee(enemies[i], dt); },
   _flushProjectiles() { for (let k = 0; k < 200 && projectiles.length; k++) updateProjectiles(0.02); return projectiles.length; }, _stepProjectiles(dt) { updateProjectiles(dt); }, get projectiles() { return projectiles; }, // QA (#301): 발사체를 즉시 비행 완료 / 수동 스텝 — 자동화 탭은 rAF 가 느려 드릴/이동 표적 시간을 수동 진행
   // 성능 QA (#280): _perfBegin() … (프레임 진행) … _perfEnd() → 그 사이 누적 draw call/삼각형의 프레임당 평균. renderer.info 는 프레임마다
   // 리셋되므로 autoReset 을 잠시 끈다. 두 호출로 나눈 이유: 자동화 탭에서는 JS 실행 중 rAF 가 멈춰 한 호출 안의 await 로는 프레임이 안 흐른다.
@@ -9494,15 +9511,19 @@ window.__ex = {
   },
 };
 
+initEnemyFlashPool(); /* 적 총구 섬광 광원 풀 (#387) */
 initExplosionPool(); // 폭발 VFX 풀 미리 생성 (셰이더 재컴파일 방지, #132)
 // 해상도 설정 (#136): 저장값 적용 + 버튼 배선
 {
-  let savedRes = 'high', savedFx = 'on';
-  try { savedRes = localStorage.getItem('exshoot_res') || 'high'; savedFx = localStorage.getItem('exshoot_fx') || 'on'; } catch {}
+  /* 첫 실행 기본값은 최저(해상도 낮음·효과 끔) — 최고 옵션은 고사양 PC 에서도 무거웠다 (#385). QA·스모크 페이지는 기준선 유지를 위해 최고로 돈다. */
+  const _qs0 = new URLSearchParams(location.search), _qaPage = _qs0.has('smoke') && !_qs0.has('userdefaults'); /* userdefaults: QA 페이지에서도 신규 사용자 기본값으로 */
+  const defRes = _qaPage ? 'high' : 'low', defFx = _qaPage ? 'on' : 'off';
+  let savedRes = defRes, savedFx = defFx;
+  try { savedRes = localStorage.getItem('exshoot_res') || defRes; savedFx = localStorage.getItem('exshoot_fx') || defFx; } catch {}
   document.querySelectorAll('#res-row button[data-res]').forEach((b) => b.addEventListener('click', () => { audio(); setResolution(b.dataset.res); }));
   document.querySelectorAll('#res-row button[data-fx]').forEach((b) => b.addEventListener('click', () => { audio(); setPostfx(b.dataset.fx === 'on'); }));
-  setResolution(RES_LEVELS[savedRes] ? savedRes : 'high');
-  setPostfx(savedFx !== 'off');
+  setResolution(RES_LEVELS[savedRes] ? savedRes : defRes);
+  setPostfx(savedFx === 'on');
 }
 updateMenuStash();
 refreshInventoryUI();
